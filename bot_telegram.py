@@ -39,6 +39,15 @@ from decisor import (
     obter_funding_rate   # <-- NOVA IMPORTAÇÃO
 )
 from ai_analista import gerar_comentario_ia
+from storage import (
+    buscar_ultimo_decision_log,
+    buscar_ultimos_decision_logs,
+    buscar_trades_paper,
+    contar_trades_abertos_paper,
+    contar_trades_fechados_hoje,
+    criar_tabelas as criar_tabelas_observabilidade,
+    log_decisao,
+)
 try:
     from risk_manager import (
         calcular_tamanho_posicao,
@@ -142,6 +151,7 @@ def garantir_schema_trades():
     conn.close()
 
 def init_db():
+    criar_tabelas_observabilidade()
     garantir_schema_trades()
 
 def salvar_trade(direcao, resultado, score, lucro_percent, rr_planejado):
@@ -197,7 +207,7 @@ def obter_trades_paper_abertos(symbol=PAPER_SYMBOL):
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     linhas = c.execute(
-        "SELECT id, timestamp, direcao, entrada, stop_loss, take_profit, quantidade, valor_arriscado "
+        "SELECT id, timestamp, simbolo, direcao, entrada, stop_loss, take_profit, quantidade, valor_arriscado, aberto_em "
         "FROM trades WHERE tipo = 'paper' AND simbolo = ? AND status = 'open' ORDER BY timestamp ASC",
         (symbol,),
     ).fetchall()
@@ -208,12 +218,14 @@ def obter_trades_paper_abertos(symbol=PAPER_SYMBOL):
             {
                 "id": linha[0],
                 "timestamp": linha[1],
-                "direcao": linha[2],
-                "entrada": float(linha[3]),
-                "stop_loss": float(linha[4]),
-                "take_profit": float(linha[5]),
-                "quantidade": float(linha[6] or 0.0),
-                "valor_arriscado": float(linha[7] or 0.0),
+                "symbol": linha[2],
+                "direcao": linha[3],
+                "entrada": float(linha[4]),
+                "stop_loss": float(linha[5]),
+                "take_profit": float(linha[6]),
+                "quantidade": float(linha[7] or 0.0),
+                "valor_arriscado": float(linha[8] or 0.0),
+                "aberto_em": linha[9],
             }
         )
     return trades
@@ -539,14 +551,44 @@ async def monitorar_paper_sol(context: ContextTypes.DEFAULT_TYPE):
     try:
         chat_id = context.job.data["chat_id"]
         if backtester is None:
+            registrar_decisao_observabilidade(
+                symbol=PAPER_SYMBOL,
+                modo="PAPER_SOL",
+                decisao="ERRO",
+                direcao="N/A",
+                preco=None,
+                regime="N/D",
+                adx=None,
+                volume_status="N/D",
+                motivo="Backtester indisponível para o paper trading.",
+                bloqueado_por="N/A",
+                fonte_dados="N/D",
+                erro="backtester indisponível",
+            )
             return
 
         df = backtester.baixar_dados_historicos(symbol=PAPER_SYMBOL)
         if df is None or df.empty:
+            registrar_decisao_observabilidade(
+                symbol=PAPER_SYMBOL,
+                modo="PAPER_SOL",
+                decisao="AGUARDAR",
+                direcao="N/A",
+                preco=None,
+                regime="N/D",
+                adx=None,
+                volume_status="N/D",
+                motivo="Sem dados suficientes para monitorar o paper trading.",
+                bloqueado_por="N/D",
+                fonte_dados="N/D",
+                erro="N/D",
+            )
             return
 
+        fonte_dados = obter_fonte_dados_df(df)
         preco_atual = float(df["close"].iloc[-1])
         candle = df.iloc[-1]
+        regime_info = classificar_regime(df)
         aberto = obter_trades_paper_abertos(PAPER_SYMBOL)
 
         if aberto:
@@ -567,6 +609,20 @@ async def monitorar_paper_sol(context: ContextTypes.DEFAULT_TYPE):
                         lucro_reais = quantidade * (saida - entrada)
                         lucro_percent = (lucro_reais / 10000) * 100
                         finalizar_trade_paper(trade["id"], saida, lucro_percent, lucro_reais, "PERDA", "STOP")
+                        registrar_decisao_observabilidade(
+                            symbol=PAPER_SYMBOL,
+                            modo="PAPER_SOL",
+                            decisao="TRADE_FECHADO",
+                            direcao=direcao,
+                            preco=saida,
+                            regime=regime_info.get("regime"),
+                            adx=regime_info.get("adx"),
+                            volume_status=regime_info.get("volatilidade"),
+                            motivo="Fechado no STOP",
+                            bloqueado_por="N/A",
+                            fonte_dados=fonte_dados,
+                            erro="N/A",
+                        )
                         await context.bot.send_message(
                             chat_id=chat_id,
                             text=f"🧪 Paper SOL fechado por STOP. Resultado: {fmt_num(lucro_percent, '+.2f')}%",
@@ -577,6 +633,20 @@ async def monitorar_paper_sol(context: ContextTypes.DEFAULT_TYPE):
                         lucro_reais = quantidade * (saida - entrada)
                         lucro_percent = (lucro_reais / 10000) * 100
                         finalizar_trade_paper(trade["id"], saida, lucro_percent, lucro_reais, "GANHO", "TAKE_PROFIT")
+                        registrar_decisao_observabilidade(
+                            symbol=PAPER_SYMBOL,
+                            modo="PAPER_SOL",
+                            decisao="TRADE_FECHADO",
+                            direcao=direcao,
+                            preco=saida,
+                            regime=regime_info.get("regime"),
+                            adx=regime_info.get("adx"),
+                            volume_status=regime_info.get("volatilidade"),
+                            motivo="Fechado no TAKE PROFIT",
+                            bloqueado_por="N/A",
+                            fonte_dados=fonte_dados,
+                            erro="N/A",
+                        )
                         await context.bot.send_message(
                             chat_id=chat_id,
                             text=f"🧪 Paper SOL fechado por TAKE PROFIT. Resultado: {fmt_num(lucro_percent, '+.2f')}%",
@@ -590,6 +660,20 @@ async def monitorar_paper_sol(context: ContextTypes.DEFAULT_TYPE):
                         lucro_reais = quantidade * (entrada - saida)
                         lucro_percent = (lucro_reais / 10000) * 100
                         finalizar_trade_paper(trade["id"], saida, lucro_percent, lucro_reais, "PERDA", "STOP")
+                        registrar_decisao_observabilidade(
+                            symbol=PAPER_SYMBOL,
+                            modo="PAPER_SOL",
+                            decisao="TRADE_FECHADO",
+                            direcao=direcao,
+                            preco=saida,
+                            regime=regime_info.get("regime"),
+                            adx=regime_info.get("adx"),
+                            volume_status=regime_info.get("volatilidade"),
+                            motivo="Fechado no STOP",
+                            bloqueado_por="N/A",
+                            fonte_dados=fonte_dados,
+                            erro="N/A",
+                        )
                         await context.bot.send_message(
                             chat_id=chat_id,
                             text=f"🧪 Paper SOL fechado por STOP. Resultado: {fmt_num(lucro_percent, '+.2f')}%",
@@ -600,6 +684,20 @@ async def monitorar_paper_sol(context: ContextTypes.DEFAULT_TYPE):
                         lucro_reais = quantidade * (entrada - saida)
                         lucro_percent = (lucro_reais / 10000) * 100
                         finalizar_trade_paper(trade["id"], saida, lucro_percent, lucro_reais, "GANHO", "TAKE_PROFIT")
+                        registrar_decisao_observabilidade(
+                            symbol=PAPER_SYMBOL,
+                            modo="PAPER_SOL",
+                            decisao="TRADE_FECHADO",
+                            direcao=direcao,
+                            preco=saida,
+                            regime=regime_info.get("regime"),
+                            adx=regime_info.get("adx"),
+                            volume_status=regime_info.get("volatilidade"),
+                            motivo="Fechado no TAKE PROFIT",
+                            bloqueado_por="N/A",
+                            fonte_dados=fonte_dados,
+                            erro="N/A",
+                        )
                         await context.bot.send_message(
                             chat_id=chat_id,
                             text=f"🧪 Paper SOL fechado por TAKE PROFIT. Resultado: {fmt_num(lucro_percent, '+.2f')}%",
@@ -609,16 +707,43 @@ async def monitorar_paper_sol(context: ContextTypes.DEFAULT_TYPE):
 
         sinal = _obter_sinal_paper_sol()
         if not sinal or sinal.get("direcao") not in ("COMPRA", "VENDA"):
+            registrar_decisao_observabilidade(
+                symbol=PAPER_SYMBOL,
+                modo="PAPER_SOL",
+                decisao="AGUARDAR",
+                direcao="N/A",
+                preco=preco_atual,
+                regime=regime_info.get("regime"),
+                adx=regime_info.get("adx"),
+                volume_status=regime_info.get("volatilidade"),
+                motivo="Sem sinal válido no momento.",
+                bloqueado_por="N/A",
+                fonte_dados=fonte_dados,
+                erro="N/A",
+            )
             return
 
         agora_utc = datetime.now(timezone.utc)
         horario_utc = agora_utc.strftime("%H:%M")
         if KILLZONE_SOL and not esta_em_killzone():
+            registrar_decisao_observabilidade(
+                symbol=PAPER_SYMBOL,
+                modo="PAPER_SOL",
+                decisao="BLOQUEADO_KILLZONE",
+                direcao=sinal.get("direcao"),
+                preco=preco_atual,
+                regime=regime_info.get("regime"),
+                adx=regime_info.get("adx"),
+                volume_status=regime_info.get("volatilidade"),
+                motivo="Fora da Killzone.",
+                bloqueado_por="KILLZONE",
+                fonte_dados=fonte_dados,
+                erro="N/A",
+            )
             logging.info(f"Alerta bloqueado: fora da Killzone (Horário atual: {horario_utc} UTC)")
             return
 
-        decisao_info = tomar_decisao(df)
-        regime_info = classificar_regime(df)
+        decisao_info = tomar_decisao(df, symbol=PAPER_SYMBOL, modo="PAPER_SOL", fonte_dados=fonte_dados)
         filtros_aplicados, detalhes_filtros = _avaliar_filtros_paper(df, sinal, decisao_info, regime_info)
 
         entrada = float(sinal["entrada"])
@@ -628,6 +753,20 @@ async def monitorar_paper_sol(context: ContextTypes.DEFAULT_TYPE):
         capital_teste = 10000
         quantidade, valor_arriscado = calcular_tamanho_posicao(capital_teste, 1.0, entrada, stop_loss)
         if quantidade <= 0:
+            registrar_decisao_observabilidade(
+                symbol=PAPER_SYMBOL,
+                modo="PAPER_SOL",
+                decisao="BLOQUEADO_FILTRO",
+                direcao=sinal.get("direcao"),
+                preco=entrada,
+                regime=regime_info.get("regime"),
+                adx=regime_info.get("adx"),
+                volume_status=decisao_info.get("volume_status"),
+                motivo="Tamanho de posição inválido.",
+                bloqueado_por="RISK",
+                fonte_dados=fonte_dados,
+                erro="N/A",
+            )
             return
 
         trade_id = registrar_trade_paper(
@@ -643,6 +782,20 @@ async def monitorar_paper_sol(context: ContextTypes.DEFAULT_TYPE):
         )
 
         if filtros_aplicados:
+            registrar_decisao_observabilidade(
+                symbol=PAPER_SYMBOL,
+                modo="PAPER_SOL",
+                decisao="TRADE_ABERTO",
+                direcao=sinal["direcao"],
+                preco=entrada,
+                regime=regime_info.get("regime"),
+                adx=regime_info.get("adx"),
+                volume_status=decisao_info.get("volume_status"),
+                motivo=sinal.get("motivo") or decisao_info.get("motivo") or "Trade paper aberto.",
+                bloqueado_por="N/A",
+                fonte_dados=fonte_dados,
+                erro="N/A",
+            )
             await context.bot.send_message(
                 chat_id=chat_id,
                 text=(
@@ -657,11 +810,51 @@ async def monitorar_paper_sol(context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown",
             )
         else:
+            bloqueado_por = "FILTRO"
+            if not detalhes_filtros.get("killzone_ok"):
+                bloqueado_por = "KILLZONE"
+            elif not detalhes_filtros.get("adx_ok"):
+                bloqueado_por = "ADX"
+            elif not detalhes_filtros.get("rsi_ok"):
+                bloqueado_por = "RSI"
+            elif regime_info.get("regime") == "CHOP":
+                bloqueado_por = "CHOP"
+            registrar_decisao_observabilidade(
+                symbol=PAPER_SYMBOL,
+                modo="PAPER_SOL",
+                decisao="BLOQUEADO_FILTRO",
+                direcao=sinal.get("direcao"),
+                preco=entrada,
+                regime=regime_info.get("regime"),
+                adx=regime_info.get("adx"),
+                volume_status=decisao_info.get("volume_status"),
+                motivo=(
+                    f"Filtros bloquearam o sinal: ADX_ok={detalhes_filtros['adx_ok']}, "
+                    f"RSI_ok={detalhes_filtros['rsi_ok']}, Killzone_ok={detalhes_filtros['killzone_ok']}."
+                ),
+                bloqueado_por=bloqueado_por,
+                fonte_dados=fonte_dados,
+                erro="N/A",
+            )
             logging.info(
                 "Paper SOL registrado sem alerta: filtros bloquearam o sinal "
                 f"(ADX_ok={detalhes_filtros['adx_ok']}, RSI_ok={detalhes_filtros['rsi_ok']}, Killzone_ok={detalhes_filtros['killzone_ok']})."
             )
     except Exception as e:
+        registrar_decisao_observabilidade(
+            symbol=PAPER_SYMBOL,
+            modo="PAPER_SOL",
+            decisao="ERRO",
+            direcao="N/A",
+            preco=None,
+            regime="N/D",
+            adx=None,
+            volume_status="N/D",
+            motivo="Falha no monitoramento do paper SOL.",
+            bloqueado_por="N/A",
+            fonte_dados="N/D",
+            erro=str(e),
+        )
         logging.warning(f"Erro no monitoramento paper SOL: {e}")
 
 def obter_dados_risco_historico(capital):
@@ -780,6 +973,26 @@ def fmt_num(val, formato=".2f"):
         return f"{val:{formato}}"
     except (TypeError, ValueError):
         return "N/A"
+
+
+def obter_fonte_dados_df(df):
+    if df is None or getattr(df, "empty", True):
+        return "N/D"
+    fonte = getattr(df, "attrs", {}).get("fonte_dados")
+    return fonte or "BINANCE"
+
+
+def registrar_decisao_segura(**kwargs):
+    try:
+        payload = dict(kwargs)
+        payload.setdefault("strategy_version", "v2_risk_safe")
+        log_decisao(**payload)
+    except Exception as exc:
+        logging.warning(f"Falha ao registrar decisão operacional: {exc}")
+
+
+def registrar_decisao_observabilidade(**kwargs):
+    registrar_decisao_segura(**kwargs)
 
 # ---------- Variáveis globais do vigia ----------
 vigia_ativo = False
@@ -1063,6 +1276,7 @@ async def monitorar_preco(context: ContextTypes.DEFAULT_TYPE):
         if df.empty:
             return
 
+        horario_utc = datetime.now(timezone.utc).strftime("%H:%M")
         preco_atual = df['close'].iloc[-1]
         regime_info = classificar_regime(df)
         regime_atual = regime_info['regime']
@@ -1085,6 +1299,20 @@ async def monitorar_preco(context: ContextTypes.DEFAULT_TYPE):
         ultimo_regime_vigia = regime_atual
 
         if regime_atual in ('CHOP', 'INDEFINIDO'):
+            registrar_decisao_observabilidade(
+                symbol="BTCUSDT",
+                modo="VIGIA_BTC",
+                decisao="BLOQUEADO_FILTRO",
+                direcao="N/A",
+                preco=preco_atual,
+                regime=regime_atual,
+                adx=regime_info.get("adx"),
+                volume_status=regime_info.get("volatilidade"),
+                motivo="Mercado lateral/indefinido.",
+                bloqueado_por="CHOP",
+                fonte_dados=obter_fonte_dados_df(df),
+                erro="N/A",
+            )
             return
 
         topo, fundo = extrair_swing_high_low(df, 50)
@@ -1092,6 +1320,20 @@ async def monitorar_preco(context: ContextTypes.DEFAULT_TYPE):
 
         if regime_atual == 'BULL':
             if fundo and candle_anterior['low'] < fundo:
+                registrar_decisao_observabilidade(
+                    symbol="BTCUSDT",
+                    modo="VIGIA_BTC",
+                    decisao="BLOQUEADO_FILTRO",
+                    direcao="COMPRA",
+                    preco=preco_atual,
+                    regime=regime_atual,
+                    adx=regime_info.get("adx"),
+                    volume_status=regime_info.get("volatilidade"),
+                    motivo="Estrutura de baixa quebrada no candle anterior.",
+                    bloqueado_por="ESTRUTURA",
+                    fonte_dados=obter_fonte_dados_df(df),
+                    erro="N/A",
+                )
                 await context.bot.send_message(chat_id=chat_id, text="🚨 Estrutura de baixa quebrada. Vigia cancelado.")
                 vigia_ativo = False
                 jobs = context.job_queue.get_jobs_by_name("vigia_btc")
@@ -1100,6 +1342,20 @@ async def monitorar_preco(context: ContextTypes.DEFAULT_TYPE):
                 return
         elif regime_atual == 'BEAR':
             if topo and candle_anterior['high'] > topo:
+                registrar_decisao_observabilidade(
+                    symbol="BTCUSDT",
+                    modo="VIGIA_BTC",
+                    decisao="BLOQUEADO_FILTRO",
+                    direcao="VENDA",
+                    preco=preco_atual,
+                    regime=regime_atual,
+                    adx=regime_info.get("adx"),
+                    volume_status=regime_info.get("volatilidade"),
+                    motivo="Estrutura de alta quebrada no candle anterior.",
+                    bloqueado_por="ESTRUTURA",
+                    fonte_dados=obter_fonte_dados_df(df),
+                    erro="N/A",
+                )
                 await context.bot.send_message(chat_id=chat_id, text="🚨 Estrutura de alta quebrada. Vigia cancelado.")
                 vigia_ativo = False
                 jobs = context.job_queue.get_jobs_by_name("vigia_btc")
@@ -1179,11 +1435,40 @@ async def monitorar_preco(context: ContextTypes.DEFAULT_TYPE):
             mensagem += f"📊 *Funding Rate:* {funding_str}\n"
 
             risco_contexto = aplicar_bloqueio_risco(decisao_info, capital=10000, risco_percentual=1.0)
+            linha_risco = None
             if risco_contexto:
                 if risco_contexto["limite_diario_atingido"]:
+                    registrar_decisao_observabilidade(
+                        symbol="BTCUSDT",
+                        modo="VIGIA_BTC",
+                        decisao="BLOQUEADO_FILTRO",
+                        direcao=direcao,
+                        preco=preco_atual,
+                        regime=regime_atual,
+                        adx=regime_info.get("adx"),
+                        volume_status=regime_info.get("volatilidade"),
+                        motivo="Limite diário de risco atingido.",
+                        bloqueado_por="RISK",
+                        fonte_dados=obter_fonte_dados_df(df),
+                        erro="N/A",
+                    )
                     logging.info("Alerta bloqueado por risco: limite diário atingido.")
                     return
                 if risco_contexto["sequencia_perdas_atingida"]:
+                    registrar_decisao_observabilidade(
+                        symbol="BTCUSDT",
+                        modo="VIGIA_BTC",
+                        decisao="BLOQUEADO_FILTRO",
+                        direcao=direcao,
+                        preco=preco_atual,
+                        regime=regime_atual,
+                        adx=regime_info.get("adx"),
+                        volume_status=regime_info.get("volatilidade"),
+                        motivo="Sequência máxima de perdas atingida.",
+                        bloqueado_por="RISK",
+                        fonte_dados=obter_fonte_dados_df(df),
+                        erro="N/A",
+                    )
                     logging.info("Alerta bloqueado por risco: sequência de perdas atingida.")
                     return
 
@@ -1192,6 +1477,20 @@ async def monitorar_preco(context: ContextTypes.DEFAULT_TYPE):
                 mensagem += f"{linha_risco}\n"
 
             if KILLZONE_BTC and not esta_em_killzone():
+                registrar_decisao_observabilidade(
+                    symbol="BTCUSDT",
+                    modo="VIGIA_BTC",
+                    decisao="BLOQUEADO_KILLZONE",
+                    direcao=direcao,
+                    preco=preco_atual,
+                    regime=regime_atual,
+                    adx=regime_info.get("adx"),
+                    volume_status=regime_info.get("volatilidade"),
+                    motivo="Fora da Killzone.",
+                    bloqueado_por="KILLZONE",
+                    fonte_dados=obter_fonte_dados_df(df),
+                    erro="N/A",
+                )
                 logging.info(f"Alerta bloqueado: fora da Killzone (Horário atual: {horario_utc} UTC)")
                 return
 
@@ -1200,12 +1499,40 @@ async def monitorar_preco(context: ContextTypes.DEFAULT_TYPE):
                 logging.info("Alerta bloqueado: cooldown de 30 minutos ativo.")
                 return
 
+            registrar_decisao_observabilidade(
+                symbol="BTCUSDT",
+                modo="VIGIA_BTC",
+                decisao="TRADE_ABERTO",
+                direcao=direcao,
+                preco=preco_atual,
+                regime=regime_atual,
+                adx=regime_info.get("adx"),
+                volume_status=regime_info.get("volatilidade"),
+                motivo="Alerta de entrada enviado.",
+                bloqueado_por="N/A",
+                fonte_dados=obter_fonte_dados_df(df),
+                erro="N/A",
+            )
             await context.bot.send_message(chat_id=chat_id, text=mensagem)
             ultimo_alerta_timestamp = agora_ts
             logging.info("ALERTA! Preço na zona de entrada! Verifique o Telegram.")
 
     except Exception as e:
-        print(f"Erro no monitoramento: {e}")
+        registrar_decisao_observabilidade(
+            symbol="BTCUSDT",
+            modo="VIGIA_BTC",
+            decisao="ERRO",
+            direcao="N/A",
+            preco=None,
+            regime="N/D",
+            adx=None,
+            volume_status="N/D",
+            motivo="Falha no monitoramento do BTC.",
+            bloqueado_por="N/A",
+            fonte_dados="N/D",
+            erro=str(e),
+        )
+        logging.warning(f"Erro no monitoramento: {e}")
 
 async def ativar_vigia(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global vigia_ativo, ultimo_regime_vigia
@@ -1428,6 +1755,147 @@ async def paper_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(mensagem)
 
 # ---------- Resetar Estatísticas (/reset_stats) ----------
+def _parse_dt_segura(valor):
+    if not valor:
+        return None
+    try:
+        return datetime.fromisoformat(valor)
+    except ValueError:
+        try:
+            return datetime.strptime(valor, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return None
+
+
+def _obter_preco_atual_referencia(symbol):
+    try:
+        if symbol == PAPER_SYMBOL and backtester is not None:
+            df = backtester.baixar_dados_historicos(symbol=symbol)
+        else:
+            df = baixar_dados_btc(simbolo=symbol)
+        if df is not None and not df.empty:
+            return float(df["close"].iloc[-1]), obter_fonte_dados_df(df)
+    except Exception as exc:
+        logging.warning(f"Falha ao obter preço atual de referência para {symbol}: {exc}")
+
+    ultimo_log = buscar_ultimo_decision_log(modos=["PAPER_SOL", "VIGIA_BTC"])
+    if ultimo_log and ultimo_log.get("preco") is not None:
+        return float(ultimo_log["preco"]), ultimo_log.get("fonte_dados") or "N/D"
+
+    return None, "N/D"
+
+
+async def paper_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ultimo_log = buscar_ultimo_decision_log(modos=["PAPER_SOL", "VIGIA_BTC"])
+    preco_atual, fonte_dados = _obter_preco_atual_referencia(PAPER_SYMBOL)
+    status_paper = "SIM" if PAPER_TRADING_ATIVO else "NÃO"
+    jobs_vigia = context.job_queue.get_jobs_by_name("vigia_btc")
+    status_vigia = "SIM" if jobs_vigia or vigia_ativo else "NÃO"
+    ultimo_horario = ultimo_log["timestamp"] if ultimo_log else "N/D"
+    ultima_decisao = ultimo_log["decisao"] if ultimo_log else "N/D"
+    ultimo_motivo = ultimo_log["motivo"] if ultimo_log else "N/D"
+    trades_abertos = contar_trades_abertos_paper(PAPER_SYMBOL)
+    trades_fechados_hoje = contar_trades_fechados_hoje(PAPER_SYMBOL)
+    preco_texto = fmt_num(preco_atual, ',.4f') if preco_atual is not None else "N/D"
+
+    mensagem = (
+        "📡 *Paper Status*\n\n"
+        f"Paper ativo: {status_paper}\n"
+        f"Vigia ativo: {status_vigia}\n"
+        f"Última checagem: {ultimo_horario}\n"
+        f"Último preço: {preco_texto}\n"
+        f"Fonte de dados: {fonte_dados}\n"
+        f"Última decisão: {ultima_decisao}\n"
+        f"Último motivo: {ultimo_motivo}\n"
+        f"Trades abertos: {trades_abertos}\n"
+        f"Trades fechados hoje: {trades_fechados_hoje}"
+    )
+    await update.message.reply_text(mensagem, parse_mode="Markdown")
+
+
+async def paper_abertos(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    trades = obter_trades_paper_abertos(PAPER_SYMBOL)
+    if not trades:
+        await update.message.reply_text("ℹ️ Não há trades paper abertos no momento.")
+        return
+
+    preco_atual, _ = _obter_preco_atual_referencia(PAPER_SYMBOL)
+    agora = datetime.now(timezone.utc)
+    linhas = ["📂 *Trades Paper Abertos*"]
+    for trade in trades:
+        aberto_em = _parse_dt_segura(trade.get("aberto_em") or trade.get("timestamp"))
+        horas_aberto = ((agora - aberto_em).total_seconds() / 3600) if aberto_em else None
+        entrada = trade.get("entrada")
+        preco_ref = preco_atual
+        if entrada is None or preco_ref is None:
+            pnl_parcial = "N/D"
+        else:
+            if trade["direcao"] == "COMPRA":
+                pnl_parcial = ((preco_ref - entrada) / entrada) * 100
+            else:
+                pnl_parcial = ((entrada - preco_ref) / entrada) * 100
+            pnl_parcial = f"{pnl_parcial:+.2f}%"
+
+        linhas.append(
+            (
+                f"\nID: {trade['id']}\n"
+                f"Símbolo: {trade['symbol']}\n"
+                f"Direção: {trade['direcao']}\n"
+                f"Entrada: {fmt_num(entrada, ',.4f')}\n"
+                f"Stop: {fmt_num(trade.get('stop_loss'), ',.4f')}\n"
+                f"Take: {fmt_num(trade.get('take_profit'), ',.4f')}\n"
+                f"Preço atual: {fmt_num(preco_ref, ',.4f') if preco_ref is not None else 'N/D'}\n"
+                f"PnL parcial: {pnl_parcial}\n"
+                f"Tempo aberto: {fmt_num(horas_aberto, '.2f') if horas_aberto is not None else 'N/D'} h"
+            )
+        )
+
+    await update.message.reply_text("\n".join(linhas), parse_mode="Markdown")
+
+
+async def paper_trades(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    trades = buscar_trades_paper(limite=10, symbol=PAPER_SYMBOL)
+    if not trades:
+        await update.message.reply_text("ℹ️ Nenhum trade paper encontrado.")
+        return
+
+    linhas = ["📜 *Últimos 10 Trades Paper*"]
+    for trade in trades:
+        linhas.append(
+            (
+                f"\nID: {trade['id']}\n"
+                f"Símbolo: {trade['symbol']}\n"
+                f"Direção: {trade['direcao']}\n"
+                f"Entrada: {fmt_num(trade.get('entrada'), ',.4f')}\n"
+                f"Saída: {fmt_num(trade.get('saida'), ',.4f')}\n"
+                f"Resultado: {fmt_num(trade.get('lucro_percent'), '+.2f')}%\n"
+                f"Status: {trade['status']}"
+            )
+        )
+    await update.message.reply_text("\n".join(linhas), parse_mode="Markdown")
+
+
+async def paper_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logs = buscar_ultimos_decision_logs(limite=10)
+    if not logs:
+        await update.message.reply_text("ℹ️ Nenhum registro de decisão encontrado.")
+        return
+
+    linhas = ["🧾 *Últimos 10 Decision Logs*"]
+    for log in logs:
+        linhas.append(
+            (
+                f"\nTimestamp: {log['timestamp']}\n"
+                f"Símbolo: {log['symbol']}\n"
+                f"Decisão: {log['decisao']}\n"
+                f"Motivo: {log['motivo']}\n"
+                f"Bloqueado por: {log['bloqueado_por']}\n"
+                f"Fonte dados: {log['fonte_dados']}"
+            )
+        )
+    await update.message.reply_text("\n".join(linhas), parse_mode="Markdown")
+
+
 async def reset_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("Sim, resetar tudo", callback_data='confirm_reset')],
@@ -1469,6 +1937,10 @@ def main():
     app.add_handler(CommandHandler("status", status_vigia))
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CommandHandler("paper_stats", paper_stats))
+    app.add_handler(CommandHandler("paper_status", paper_status))
+    app.add_handler(CommandHandler("paper_abertos", paper_abertos))
+    app.add_handler(CommandHandler("paper_trades", paper_trades))
+    app.add_handler(CommandHandler("paper_log", paper_log))
 
     # ConversationHandler para /trade
     conv_handler = ConversationHandler(

@@ -44,5 +44,6 @@ def baixar_dados_btc(simbolo="BTCUSDT", intervalo="1h", limite=500):
         "close": float,
         "volume": float
     })
+    df.attrs["fonte_dados"] = "BINANCE"
 
     return df

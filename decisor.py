@@ -1,6 +1,7 @@
 import pandas as pd
 import requests
 from regime_classifier import classificar_regime
+from storage import log_decisao
 
 def obter_funding_rate(symbol="BTCUSDT"):
     """
@@ -95,7 +96,7 @@ def extrair_fvg_bullish_abaixo(df, preco_atual):
                     melhor_dist = dist
     return melhor
 
-def tomar_decisao(df):
+def tomar_decisao(df, symbol="BTCUSDT", modo="DECISOR", fonte_dados=None, strategy_version="v2_risk_safe"):
     preco_atual = df['close'].iloc[-1]
     volume_atual = df['volume'].iloc[-1]
     atr = calcular_atr(df, 14)
@@ -241,6 +242,24 @@ def tomar_decisao(df):
             "motivo": "Tendência de alta, comprando na correção até o FVG Bearish.",
             "direcao": "COMPRA"
         })
+        try:
+            log_decisao(
+                symbol=symbol,
+                modo=modo,
+                decisao="SINAL_GERADO",
+                direcao="COMPRA",
+                preco=entrada,
+                regime=regime,
+                adx=regime_info.get("adx"),
+                volume_status=status_volume,
+                motivo=resultado["motivo"],
+                bloqueado_por="N/A",
+                fonte_dados=fonte_dados or getattr(df, "attrs", {}).get("fonte_dados") or "BINANCE",
+                erro="N/A",
+                strategy_version=strategy_version,
+            )
+        except Exception as exc:
+            print(f"⚠️ Falha ao registrar SINAL_GERADO: {exc}")
         return resultado
 
     elif regime == 'BEAR':
@@ -302,6 +321,24 @@ def tomar_decisao(df):
             "motivo": "Tendência de baixa, vendendo na correção até o FVG Bullish.",
             "direcao": "VENDA"
         })
+        try:
+            log_decisao(
+                symbol=symbol,
+                modo=modo,
+                decisao="SINAL_GERADO",
+                direcao="VENDA",
+                preco=entrada,
+                regime=regime,
+                adx=regime_info.get("adx"),
+                volume_status=status_volume,
+                motivo=resultado["motivo"],
+                bloqueado_por="N/A",
+                fonte_dados=fonte_dados or getattr(df, "attrs", {}).get("fonte_dados") or "BINANCE",
+                erro="N/A",
+                strategy_version=strategy_version,
+            )
+        except Exception as exc:
+            print(f"⚠️ Falha ao registrar SINAL_GERADO: {exc}")
         return resultado
 
     resultado["motivo"] = "Regime não identificado."

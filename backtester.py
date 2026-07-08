@@ -76,7 +76,9 @@ def baixar_dados_historicos(symbol="BTCUSDT", intervalo="1h", limite=2000):
         df[coluna] = pd.to_numeric(df[coluna], errors="coerce")
     df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
     df["close_time"] = pd.to_datetime(df["close_time"], unit="ms", utc=True)
-    return df[["open_time", "close_time", "open", "high", "low", "close", "volume"]].copy()
+    resultado = df[["open_time", "close_time", "open", "high", "low", "close", "volume"]].copy()
+    resultado.attrs["fonte_dados"] = "BINANCE"
+    return resultado
 
 
 def _calcular_atr(df, periodo=14):
