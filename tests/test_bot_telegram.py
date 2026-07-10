@@ -612,6 +612,7 @@ def test_vigia_status_parar_monitorar_preco(monkeypatch):
 
 def test_monitorar_preco_regime_change_killzone_e_estrutura(monkeypatch):
     import asyncio
+    from unittest.mock import MagicMock
 
     df = _df_market()
     job_queue = FakeJobQueue({"vigia_btc": [FakeJob("vigia_btc")]})
@@ -624,14 +625,40 @@ def test_monitorar_preco_regime_change_killzone_e_estrutura(monkeypatch):
     monkeypatch.setattr(bot_telegram, "vigia_ativo", True)
     bot_telegram.ultimo_regime_vigia = "BULL"
     bot_telegram.ultimo_alerta_timestamp = None
-    from unittest.mock import MagicMock
-
     dec_mock = MagicMock()
     monkeypatch.setattr(bot_telegram, "registrar_decisao_observabilidade", dec_mock)
 
     asyncio.run(bot_telegram.monitorar_preco(context))
-    assert job_queue.jobs["vigia_btc"][0].removed is True or job_queue.jobs["vigia_btc"][0].removed is False
-    assert any(call.kwargs.get("decisao") == "BLOQUEADO_FILTRO" for call in dec_mock.call_args_list) or True
+    assert job_queue.jobs["vigia_btc"][0].removed is True
+    assert len(job_queue.calls) == 1
+
+    requeued = job_queue.calls[0]
+    assert requeued["name"] == "vigia_btc"
+    assert requeued["data"] == {
+        "chat_id": context.job.data["chat_id"],
+        "user_id": context.job.data["user_id"],
+        "chat_type": context.job.data["chat_type"],
+    }
+
+    novo_contexto = FakeContext(
+        job_queue=job_queue,
+        chat_id=requeued["data"]["chat_id"],
+        user_id=requeued["data"]["user_id"],
+        chat_type=requeued["data"]["chat_type"],
+    )
+    monkeypatch.setattr(bot_telegram, "KILLZONE_BTC", False)
+    fetch_requeued = MagicMock(return_value=df)
+    monkeypatch.setattr(bot_telegram, "baixar_dados_btc", fetch_requeued)
+    asyncio.run(bot_telegram.monitorar_preco(novo_contexto))
+    assert fetch_requeued.called
+    assert dec_mock.call_args_list
+
+    job_queue_bloqueado = FakeJobQueue({"vigia_btc": [FakeJob("vigia_btc")]})
+    contexto_bloqueado = FakeContext(job_queue=job_queue_bloqueado, user_id=999, chat_id=123, chat_type="private")
+    fetch_mock = MagicMock(return_value=df)
+    monkeypatch.setattr(bot_telegram, "baixar_dados_btc", fetch_mock)
+    asyncio.run(bot_telegram.monitorar_preco(contexto_bloqueado))
+    fetch_mock.assert_not_called()
 
 
 def test_obter_contexto_risco_aplicar_e_formatadores(monkeypatch, temp_db_path):

@@ -736,7 +736,12 @@ async def monitorar_preco(context: ContextTypes.DEFAULT_TYPE):
                 job.schedule_removal()
             context.job_queue.run_repeating(
                 monitorar_preco, interval=60, first=10,
-                name="vigia_btc", data={'chat_id': chat_id}
+                name="vigia_btc",
+                data={
+                    "chat_id": chat_id,
+                    "user_id": user_id,
+                    "chat_type": chat_type,
+                }
             )
             ultimo_regime_vigia = regime_atual
             await context.bot.send_message(
