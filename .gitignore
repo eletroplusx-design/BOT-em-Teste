@@ -1,7 +1,15 @@
 venv/
 .env
-trades.db
 __pycache__/
 *.pyc
 .DS_Store
+*.log
+*.db
+*.sqlite
+*.sqlite3
+coverage.xml
+.pytest_cache/
+.tmp/
+.coverage
+.coverage.*
 *.json

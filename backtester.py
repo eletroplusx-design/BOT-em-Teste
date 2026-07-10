@@ -1173,6 +1173,8 @@ def _chave_otimizacao_sol(config):
 def _precomputar_contextos_otimizacao(df):
     if df is None or df.empty:
         return {}
+    if len(df) < 20:
+        return {}
 
     contextos = []
     try:
@@ -2011,6 +2013,111 @@ def avaliar_out_of_sample_sol(
         "treino": treino,
         "teste": teste,
         "comparacao": comparacao,
+    }
+
+
+def _yahoo_para_backtester(df):
+    if df is None or df.empty:
+        return pd.DataFrame(columns=["open_time", "close_time", "open", "high", "low", "close", "volume"])
+
+    resultado = df.copy()
+    if "Date" in resultado.columns:
+        resultado["open_time"] = pd.to_datetime(resultado["Date"], utc=True)
+    elif "Datetime" in resultado.columns:
+        resultado["open_time"] = pd.to_datetime(resultado["Datetime"], utc=True)
+    else:
+        resultado["open_time"] = pd.to_datetime(resultado.index, utc=True)
+
+    resultado["close_time"] = resultado["open_time"]
+    rename_map = {
+        "Open": "open",
+        "High": "high",
+        "Low": "low",
+        "Close": "close",
+        "Volume": "volume",
+    }
+    resultado = resultado.rename(columns=rename_map)
+    colunas = ["open_time", "close_time", "open", "high", "low", "close", "volume"]
+    for coluna in ("open", "high", "low", "close", "volume"):
+        if coluna in resultado.columns:
+            resultado[coluna] = pd.to_numeric(resultado[coluna], errors="coerce")
+    for coluna in colunas:
+        if coluna not in resultado.columns:
+            resultado[coluna] = pd.NA
+    resultado = resultado[colunas].copy()
+    resultado.attrs["fonte_dados"] = "YAHOO"
+    return resultado
+
+
+def _calcular_metricas(trades, capital_inicial=10000):
+    if not trades:
+        return {
+            "total_trades": 0,
+            "win_rate": 0.0,
+            "lucro_total_percent": 0.0,
+            "lucro_total_valor": 0.0,
+            "profit_factor": 0.0,
+            "drawdown_max_percent": 0.0,
+            "media_rr": 0.0,
+            "sequencia_maxima_perdas": 0,
+            "expectativa_matematica_percentual": 0.0,
+            "regimes": {},
+        }
+
+    trades_ordenados = sorted(trades, key=lambda item: item.get("data_entrada") or "")
+    gross_profit = sum(t["net_pnl"] for t in trades_ordenados if t["net_pnl"] > 0)
+    gross_loss = abs(sum(t["net_pnl"] for t in trades_ordenados if t["net_pnl"] < 0))
+    total_net = sum(t["net_pnl"] for t in trades_ordenados)
+    total_trades = len(trades_ordenados)
+    wins = sum(1 for t in trades_ordenados if t["resultado"] == "GANHO")
+    win_rate = (wins / total_trades * 100) if total_trades > 0 else 0.0
+    profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else float("inf") if gross_profit > 0 else 0.0
+    media_rr = sum((t.get("realized_rr") or 0.0 for t in trades_ordenados), 0.0) / total_trades if total_trades > 0 else 0.0
+    ganho_medio = (
+        sum(t.get("resultado_percentual") or 0.0 for t in trades_ordenados if (t.get("resultado_percentual") or 0.0) > 0) / wins
+        if wins > 0
+        else 0.0
+    )
+    perdas = total_trades - wins
+    perda_media = (
+        abs(sum(t.get("resultado_percentual") or 0.0 for t in trades_ordenados if (t.get("resultado_percentual") or 0.0) < 0)) / perdas
+        if perdas > 0
+        else 0.0
+    )
+    expectativa_matematica = (win_rate / 100.0) * ganho_medio - (1 - (win_rate / 100.0)) * perda_media
+
+    regimes_summary = {}
+    for regime_nome in ("BULL", "BEAR", "CHOP", "INDEFINIDO"):
+        trades_regime = [t for t in trades_ordenados if t.get("regime") == regime_nome]
+        total_regime = len(trades_regime)
+        wins_regime = sum(1 for t in trades_regime if t["resultado"] == "GANHO")
+        gross_profit_regime = sum(t["net_pnl"] for t in trades_regime if t["net_pnl"] > 0)
+        gross_loss_regime = abs(sum(t["net_pnl"] for t in trades_regime if t["net_pnl"] < 0))
+        profit_factor_regime = (
+            gross_profit_regime / gross_loss_regime
+            if gross_loss_regime > 0
+            else float("inf") if gross_profit_regime > 0
+            else 0.0
+        )
+        media_rr_regime = sum((t.get("realized_rr") or 0.0 for t in trades_regime), 0.0) / total_regime if total_regime > 0 else 0.0
+        regimes_summary[regime_nome] = {
+            "total_trades": total_regime,
+            "win_rate": round((wins_regime / total_regime * 100), 2) if total_regime > 0 else 0.0,
+            "profit_factor": round(profit_factor_regime, 4) if profit_factor_regime != float("inf") else "inf",
+            "media_rr": round(media_rr_regime, 3),
+        }
+
+    return {
+        "total_trades": total_trades,
+        "win_rate": round(win_rate, 2),
+        "lucro_total_percent": round((total_net / capital_inicial) * 100, 2) if capital_inicial else 0.0,
+        "lucro_total_valor": round(total_net, 2),
+        "profit_factor": round(profit_factor, 4) if profit_factor != float("inf") else "inf",
+        "drawdown_max_percent": 0.0,
+        "media_rr": round(media_rr, 3),
+        "sequencia_maxima_perdas": _sequencia_maxima_perdas([t["resultado"] for t in trades_ordenados]),
+        "expectativa_matematica_percentual": round(expectativa_matematica, 3),
+        "regimes": regimes_summary,
     }
 
 
