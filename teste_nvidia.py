@@ -1,7 +1,11 @@
 from openai import OpenAI
+from config import NVIDIA_API_KEY
+
+if not NVIDIA_API_KEY:
+    raise RuntimeError("NVIDIA_API_KEY ausente no ambiente.")
 
 client = OpenAI(
-    api_key="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",
+    api_key=NVIDIA_API_KEY,
     base_url="https://integrate.api.nvidia.com/v1"
 )
 

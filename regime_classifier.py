@@ -3,6 +3,11 @@ import numpy as np
 
 def calcular_atr(df, periodo=14):
     """Calcula o Average True Range (ATR) e retorna a série."""
+    if df is None or df.empty:
+        return pd.Series(dtype=float)
+    if len(df) < periodo + 1:
+        return pd.Series([0.0] * len(df), index=df.index, dtype=float)
+
     high = df['high']
     low = df['low']
     close = df['close']
@@ -13,7 +18,7 @@ def calcular_atr(df, periodo=14):
     tr3 = (low - prev_close).abs()
     true_range = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
 
-    atr = true_range.ewm(alpha=1/periodo, min_periods=periodo, adjust=False).mean()
+    atr = true_range.rolling(window=periodo).mean()
     return atr
 
 def calcular_adx(df, periodo=14):

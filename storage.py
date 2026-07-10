@@ -1,4 +1,5 @@
 import logging
+import logging
 import sqlite3
 from datetime import datetime, timezone
 
@@ -44,9 +45,87 @@ def criar_tabelas(db_name=DB_NAME):
                 )
                 """
             )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_decision_logs_timestamp ON decision_logs(timestamp DESC)"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_decision_logs_modo_timestamp ON decision_logs(modo, timestamp DESC)"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_decision_logs_decisao_timestamp ON decision_logs(decisao, timestamp DESC)"
+            )
             conn.commit()
     except Exception as exc:
         logging.warning(f"Falha ao criar tabelas de observabilidade: {exc}")
+
+
+def inicializar_banco(db_name=DB_NAME):
+    """
+    Cria as tabelas do bot e executa migrações leves automaticamente.
+    """
+    try:
+        criar_tabelas(db_name=db_name)
+        with sqlite3.connect(db_name) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS trades (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    direcao TEXT NOT NULL,
+                    resultado TEXT NOT NULL,
+                    score INTEGER NOT NULL,
+                    lucro_percent REAL NOT NULL,
+                    rr_planejado REAL NOT NULL
+                )
+                """
+            )
+            colunas = {row[1] for row in cursor.execute("PRAGMA table_info(trades)").fetchall()}
+            alteracoes = {
+                "tipo": "TEXT DEFAULT 'manual'",
+                "simbolo": "TEXT DEFAULT 'BTCUSDT'",
+                "status": "TEXT DEFAULT 'closed'",
+                "entrada": "REAL",
+                "stop_loss": "REAL",
+                "take_profit": "REAL",
+                "quantidade": "REAL",
+                "valor_arriscado": "REAL",
+                "aberto_em": "TEXT",
+                "fechado_em": "TEXT",
+                "saida": "REAL",
+                "lucro_reais": "REAL",
+                "motivo_saida": "TEXT",
+                "filtros_aplicados": "INTEGER DEFAULT 1",
+            }
+            for coluna, tipo in alteracoes.items():
+                if coluna not in colunas:
+                    try:
+                        cursor.execute(f"ALTER TABLE trades ADD COLUMN {coluna} {tipo}")
+                    except sqlite3.OperationalError:
+                        pass
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS validacoes_sol (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    total_trades INTEGER NOT NULL,
+                    profit_factor REAL NOT NULL,
+                    win_rate REAL NOT NULL,
+                    drawdown_max REAL NOT NULL,
+                    resultado TEXT NOT NULL,
+                    comparacao_walkforward TEXT NOT NULL
+                )
+                """
+            )
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_tipo_simbolo_status ON trades(tipo, simbolo, status)")
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_trades_tipo_simbolo_status_fechado_em ON trades(tipo, simbolo, status, fechado_em)"
+            )
+            conn.commit()
+        return True
+    except Exception as exc:
+        logging.warning(f"Falha ao inicializar banco: {exc}")
+        return False
 
 
 def log_decisao(**kwargs):
@@ -221,3 +300,342 @@ def buscar_trades_paper(limite=10, symbol="SOLUSDT"):
     except Exception as exc:
         logging.warning(f"Falha ao buscar trades paper: {exc}")
         return []
+
+
+def obter_trades_paper_abertos(symbol="SOLUSDT"):
+    try:
+        with sqlite3.connect(DB_NAME) as conn:
+            cursor = conn.cursor()
+            rows = cursor.execute(
+                """
+                SELECT id, timestamp, simbolo, direcao, entrada, stop_loss, take_profit, quantidade, valor_arriscado, aberto_em
+                FROM trades
+                WHERE tipo = 'paper' AND simbolo = ? AND status = 'open'
+                ORDER BY timestamp ASC
+                """,
+                (symbol,),
+            ).fetchall()
+        trades = []
+        for linha in rows:
+            trades.append(
+                {
+                    "id": linha[0],
+                    "timestamp": linha[1],
+                    "symbol": linha[2],
+                    "direcao": linha[3],
+                    "entrada": float(linha[4]) if linha[4] is not None else None,
+                    "stop_loss": float(linha[5]) if linha[5] is not None else None,
+                    "take_profit": float(linha[6]) if linha[6] is not None else None,
+                    "quantidade": float(linha[7] or 0.0),
+                    "valor_arriscado": float(linha[8] or 0.0),
+                    "aberto_em": linha[9],
+                }
+            )
+        return trades
+    except Exception as exc:
+        logging.warning(f"Falha ao buscar trades paper abertos: {exc}")
+        return []
+
+
+def registrar_trade_paper(
+    symbol,
+    direcao,
+    entrada,
+    stop_loss,
+    take_profit,
+    quantidade,
+    valor_arriscado,
+    rr_planejado,
+    filtros_aplicados=True,
+):
+    try:
+        with sqlite3.connect(DB_NAME) as conn:
+            cursor = conn.cursor()
+            timestamp = datetime.now(timezone.utc).isoformat()
+            cursor.execute(
+                """
+                INSERT INTO trades (
+                    timestamp, tipo, simbolo, status, direcao, resultado, score,
+                    lucro_percent, rr_planejado, entrada, stop_loss, take_profit,
+                    quantidade, valor_arriscado, aberto_em, filtros_aplicados
+                )
+                VALUES (?, 'paper', ?, 'open', ?, 'PENDENTE', 0, 0.0, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    timestamp,
+                    symbol,
+                    direcao,
+                    rr_planejado,
+                    entrada,
+                    stop_loss,
+                    take_profit,
+                    quantidade,
+                    valor_arriscado,
+                    timestamp,
+                    1 if filtros_aplicados else 0,
+                ),
+            )
+            conn.commit()
+            return cursor.lastrowid
+    except Exception as exc:
+        logging.warning(f"Falha ao registrar trade paper: {exc}")
+        return None
+
+
+def finalizar_trade_paper(trade_id, saida, lucro_percent, lucro_reais, resultado, motivo_saida):
+    try:
+        with sqlite3.connect(DB_NAME) as conn:
+            cursor = conn.cursor()
+            timestamp = datetime.now(timezone.utc).isoformat()
+            cursor.execute(
+                """
+                UPDATE trades
+                SET status = 'closed',
+                    resultado = ?,
+                    lucro_percent = ?,
+                    lucro_reais = ?,
+                    saida = ?,
+                    fechado_em = ?,
+                    motivo_saida = ?
+                WHERE id = ?
+                """,
+                (resultado, lucro_percent, lucro_reais, saida, timestamp, motivo_saida, trade_id),
+            )
+            conn.commit()
+            return True
+    except Exception as exc:
+        logging.warning(f"Falha ao finalizar trade paper: {exc}")
+        return False
+
+
+def obter_paper_stats(symbol="SOLUSDT"):
+    def _consultar_metricas(cursor, where_sql, parametros):
+        total_local = cursor.execute(
+            f"SELECT COUNT(*) FROM trades WHERE {where_sql}",
+            parametros,
+        ).fetchone()[0]
+        if total_local == 0:
+            return None
+
+        vitorias_local = cursor.execute(
+            f"SELECT COUNT(*) FROM trades WHERE {where_sql} AND resultado = 'GANHO'",
+            parametros,
+        ).fetchone()[0]
+        win_rate_local = (vitorias_local / total_local) * 100 if total_local > 0 else 0.0
+        lucro_total_percent_local = cursor.execute(
+            f"SELECT SUM(lucro_percent) FROM trades WHERE {where_sql}",
+            parametros,
+        ).fetchone()[0] or 0.0
+        lucro_total_reais_local = cursor.execute(
+            f"SELECT SUM(lucro_reais) FROM trades WHERE {where_sql}",
+            parametros,
+        ).fetchone()[0] or 0.0
+        lucro_bruto_local = cursor.execute(
+            f"SELECT SUM(lucro_reais) FROM trades WHERE {where_sql} AND lucro_reais > 0",
+            parametros,
+        ).fetchone()[0] or 0.0
+        perda_bruta_local = abs(
+            cursor.execute(
+                f"SELECT SUM(lucro_reais) FROM trades WHERE {where_sql} AND lucro_reais < 0",
+                parametros,
+            ).fetchone()[0]
+            or 0.0
+        )
+        profit_factor_local = (
+            lucro_bruto_local / perda_bruta_local
+            if perda_bruta_local > 0
+            else (float("inf") if lucro_bruto_local > 0 else 0.0)
+        )
+        rr_medio_local = cursor.execute(
+            f"SELECT AVG(rr_planejado) FROM trades WHERE {where_sql}",
+            parametros,
+        ).fetchone()[0] or 0.0
+        return {
+            "total": total_local,
+            "vitorias": vitorias_local,
+            "win_rate": win_rate_local,
+            "lucro_total_percent": lucro_total_percent_local,
+            "lucro_total_reais": lucro_total_reais_local,
+            "profit_factor": profit_factor_local,
+            "rr_medio": rr_medio_local,
+        }
+
+    try:
+        with sqlite3.connect(DB_NAME) as conn:
+            cursor = conn.cursor()
+            metricas_todas = _consultar_metricas(
+                cursor,
+                "tipo = 'paper' AND simbolo = ? AND status = 'closed'",
+                (symbol,),
+            )
+            metricas_filtradas = _consultar_metricas(
+                cursor,
+                "tipo = 'paper' AND simbolo = ? AND status = 'closed' AND filtros_aplicados = 1",
+                (symbol,),
+            )
+        if metricas_todas is None:
+            return None
+        return {
+            "symbol": symbol,
+            "todas": metricas_todas,
+            "filtradas": metricas_filtradas,
+        }
+    except Exception as exc:
+        logging.warning(f"Falha ao obter paper stats: {exc}")
+        return None
+
+
+def salvar_trade(direcao, resultado, score, lucro_percent, rr_planejado, db_name=DB_NAME):
+    try:
+        with sqlite3.connect(db_name) as conn:
+            cursor = conn.cursor()
+            timestamp = datetime.now().isoformat()
+            cursor.execute(
+                """
+                INSERT INTO trades (timestamp, direcao, resultado, score, lucro_percent, rr_planejado)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (timestamp, direcao, resultado, score, lucro_percent, rr_planejado),
+            )
+            conn.commit()
+        return True
+    except Exception as exc:
+        logging.warning(f"Falha ao salvar trade: {exc}")
+        return False
+
+
+def obter_estatisticas(db_name=DB_NAME):
+    try:
+        with sqlite3.connect(db_name) as conn:
+            cursor = conn.cursor()
+            total = cursor.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
+            if total == 0:
+                return None
+            vitorias = cursor.execute("SELECT COUNT(*) FROM trades WHERE resultado = 'GANHO'").fetchone()[0]
+            derrotas = total - vitorias
+            win_rate = (vitorias / total) * 100
+            lucro_total = cursor.execute("SELECT SUM(lucro_percent) FROM trades").fetchone()[0] or 0.0
+            score_vencedores = cursor.execute("SELECT AVG(score) FROM trades WHERE resultado = 'GANHO'").fetchone()[0]
+            score_perdedores = cursor.execute("SELECT AVG(score) FROM trades WHERE resultado = 'PERDA'").fetchone()[0]
+            trades_score_alto = cursor.execute("SELECT COUNT(*) FROM trades WHERE score > 8").fetchone()[0]
+            vitorias_score_alto = cursor.execute(
+                "SELECT COUNT(*) FROM trades WHERE score > 8 AND resultado = 'GANHO'"
+            ).fetchone()[0]
+            chance_alto = (vitorias_score_alto / trades_score_alto * 100) if trades_score_alto > 0 else 0.0
+            return {
+                "total": total,
+                "vitorias": vitorias,
+                "derrotas": derrotas,
+                "win_rate": win_rate,
+                "lucro_total": lucro_total,
+                "score_vencedores": score_vencedores,
+                "score_perdedores": score_perdedores,
+                "chance_alto": chance_alto,
+            }
+    except Exception as exc:
+        logging.warning(f"Falha ao obter estatísticas: {exc}")
+        return None
+
+
+def reset_db(db_name=DB_NAME):
+    try:
+        with sqlite3.connect(db_name) as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM trades")
+            conn.commit()
+        return True
+    except Exception as exc:
+        logging.warning(f"Falha ao resetar banco: {exc}")
+        return False
+
+
+def obter_ultimos_trades_paper(symbol="SOLUSDT", limite=30, db_name=DB_NAME):
+    try:
+        with sqlite3.connect(db_name) as conn:
+            cursor = conn.cursor()
+            rows = cursor.execute(
+                """
+                SELECT timestamp, resultado, lucro_percent, lucro_reais, filtros_aplicados
+                FROM trades
+                WHERE tipo = 'paper' AND simbolo = ? AND status = 'closed'
+                ORDER BY timestamp DESC
+                LIMIT ?
+                """,
+                (symbol, limite),
+            ).fetchall()
+        trades = []
+        for linha in rows:
+            trades.append(
+                {
+                    "timestamp": linha[0],
+                    "resultado": linha[1],
+                    "lucro_percent": float(linha[2] or 0.0),
+                    "lucro_reais": float(linha[3] or 0.0),
+                    "filtros_aplicados": bool(linha[4]),
+                }
+            )
+        return list(reversed(trades))
+    except Exception as exc:
+        logging.warning(f"Falha ao buscar ultimos trades paper: {exc}")
+        return []
+
+
+def calcular_metricas_trade_history(trades):
+    if not trades:
+        return None
+
+    trades_ordenados = sorted(trades, key=lambda item: item["timestamp"])
+    ganhos = [t for t in trades_ordenados if (t.get("lucro_reais") or 0.0) > 0]
+    perdas = [t for t in trades_ordenados if (t.get("lucro_reais") or 0.0) < 0]
+    lucro_bruto = sum(float(t.get("lucro_reais") or 0.0) for t in ganhos)
+    perda_bruta = abs(sum(float(t.get("lucro_reais") or 0.0) for t in perdas))
+    profit_factor = (lucro_bruto / perda_bruta) if perda_bruta > 0 else (float("inf") if lucro_bruto > 0 else 0.0)
+    win_rate = (len(ganhos) / len(trades_ordenados)) * 100 if trades_ordenados else 0.0
+
+    saldo = 100.0
+    pico = 100.0
+    drawdown_max = 0.0
+    for trade in trades_ordenados:
+        saldo += float(trade.get("lucro_percent") or 0.0)
+        if saldo > pico:
+            pico = saldo
+        if pico > 0:
+            drawdown_atual = ((pico - saldo) / pico) * 100
+            if drawdown_atual > drawdown_max:
+                drawdown_max = drawdown_atual
+
+    return {
+        "total": len(trades_ordenados),
+        "profit_factor": profit_factor,
+        "win_rate": win_rate,
+        "drawdown_max": drawdown_max,
+    }
+
+
+def registrar_validacao_sol(total_trades, profit_factor, win_rate, drawdown_max, resultado, comparacao_walkforward, db_name=DB_NAME):
+    try:
+        with sqlite3.connect(db_name) as conn:
+            cursor = conn.cursor()
+            timestamp = datetime.now(timezone.utc).isoformat()
+            cursor.execute(
+                """
+                INSERT INTO validacoes_sol (
+                    timestamp, total_trades, profit_factor, win_rate, drawdown_max, resultado, comparacao_walkforward
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    timestamp,
+                    total_trades,
+                    profit_factor,
+                    win_rate,
+                    drawdown_max,
+                    resultado,
+                    comparacao_walkforward,
+                ),
+            )
+            conn.commit()
+        return True
+    except Exception as exc:
+        logging.warning(f"Falha ao registrar validacao SOL: {exc}")
+        return False

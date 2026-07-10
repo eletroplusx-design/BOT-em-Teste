@@ -97,6 +97,28 @@ def extrair_fvg_bullish_abaixo(df, preco_atual):
     return melhor
 
 def tomar_decisao(df, symbol="BTCUSDT", modo="DECISOR", fonte_dados=None, strategy_version="v2_risk_safe"):
+    if df is None or df.empty or len(df) < 2:
+        return {
+            "decisao": "AGUARDAR",
+            "score": 0,
+            "entrada": None,
+            "stop_loss": None,
+            "take_profit": None,
+            "risco": None,
+            "recompensa": None,
+            "rr": None,
+            "motivo": "Dados insuficientes para análise.",
+            "zona_entrada_ideal": None,
+            "volume_status": "INDETERMINADO",
+            "volume_atual": None,
+            "volume_medio": None,
+            "funding_rate": None,
+            "funding_status": "INDISPONIVEL",
+            "rsi": None,
+            "rsi_status": "Neutro",
+            "regime": "INDEFINIDO",
+            "direcao": None,
+        }
     preco_atual = df['close'].iloc[-1]
     volume_atual = df['volume'].iloc[-1]
     atr = calcular_atr(df, 14)

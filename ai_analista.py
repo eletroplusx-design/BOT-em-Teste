@@ -1,11 +1,6 @@
-import os
-
-from dotenv import load_dotenv
 from openai import OpenAI
 
-load_dotenv()
-
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+from config import GROQ_API_KEY
 
 # Base de conhecimento SMC (injeta no prompt da IA)
 SMC_KNOWLEDGE = """
@@ -30,7 +25,8 @@ def gerar_comentario_ia(dados_resumidos):
     try:
         client = OpenAI(
             base_url="https://api.groq.com/openai/v1",
-            api_key=GROQ_API_KEY
+            api_key=GROQ_API_KEY,
+            timeout=30.0,
         )
 
         # Extrai valores

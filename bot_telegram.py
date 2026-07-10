@@ -2,8 +2,8 @@ import asyncio
 import math
 import time
 import logging
-import os
 import sqlite3
+from functools import wraps
 from datetime import datetime, timezone
 import httpx
 import telegram.error
@@ -19,14 +19,29 @@ from telegram.ext import (
     JobQueue
 )
 from telegram.request import HTTPXRequest
-from dotenv import load_dotenv
 import pandas as pd
 import warnings
 
 warnings.filterwarnings("ignore", message=".*per_message=False.*")
-load_dotenv()
 
 # --------------------- IMPORTAÇÕES DOS MÓDULOS PRÓPRIOS ---------------------
+from config import (
+    CAPITAL_PAPER,
+    CAPITAL_REAL,
+    GLOBAL_KILL_SWITCH,
+    KILLZONE_BTC,
+    KILLZONE_SOL as CONFIG_KILLZONE_SOL,
+    MODO_OPERACAO,
+    LIVE_TRADING_ENABLED,
+    PAPER_TRADING_ATIVO as CONFIG_PAPER_TRADING_ATIVO,
+    TELEGRAM_AUTHORIZED_IDS,
+    TRADING_ENABLED,
+    RISCO_PERCENTUAL_PADRAO,
+    TELEGRAM_BOT_TOKEN,
+    is_telegram_authorized,
+    live_trading_permitted,
+    validate_component_config,
+)
 from data_fetcher import baixar_dados_btc
 from analisador_fvg import identificar_fvg
 from analisador_contexto import tendencia_geral, ultimos_swings
@@ -39,6 +54,8 @@ from decisor import (
     obter_funding_rate   # <-- NOVA IMPORTAÇÃO
 )
 from ai_analista import gerar_comentario_ia
+import paper_engine as paper_engine_module
+from master_observer import gerar_resumo_mestre, obter_resumo_risco
 from storage import (
     buscar_ultimo_decision_log,
     buscar_ultimos_decision_logs,
@@ -46,29 +63,42 @@ from storage import (
     contar_trades_abertos_paper,
     contar_trades_fechados_hoje,
     criar_tabelas as criar_tabelas_observabilidade,
+    inicializar_banco as storage_inicializar_banco,
     log_decisao,
+    obter_estatisticas as storage_obter_estatisticas,
+    obter_paper_stats as storage_obter_paper_stats,
+    obter_trades_paper_abertos as storage_obter_trades_paper_abertos,
+    obter_ultimos_trades_paper as storage_obter_ultimos_trades_paper,
+    calcular_metricas_trade_history as storage_calcular_metricas_trade_history,
+    registrar_trade_paper as storage_registrar_trade_paper,
+    finalizar_trade_paper as storage_finalizar_trade_paper,
+    registrar_validacao_sol as storage_registrar_validacao_sol,
+    reset_db as storage_reset_db,
+    salvar_trade as storage_salvar_trade,
 )
 try:
     from risk_manager import (
         calcular_tamanho_posicao,
         verificar_limite_diario,
         verificar_sequencia_perdas,
+        validar_e_calcular,
     )
 except Exception:
     calcular_tamanho_posicao = None
     verificar_limite_diario = None
     verificar_sequencia_perdas = None
+    validar_e_calcular = None
 
 try:
     import backtester
 except Exception:
     backtester = None
 
+paper_engine_module.backtester = backtester
+
 # ---------- CHAVE SELETORA ----------
-MODO_OPERACAO = "FUTUROS"   # "FUTUROS" ou "SPOT"
-PAPER_TRADING_ATIVO = True
-KILLZONE_BTC = True
-KILLZONE_SOL = True
+PAPER_TRADING_ATIVO = CONFIG_PAPER_TRADING_ATIVO
+KILLZONE_SOL = CONFIG_KILLZONE_SOL
 PAPER_SYMBOL = "SOLUSDT"
 PAPER_JOB_NAME = "paper_sol"
 PAPER_CONFIG = {
@@ -78,6 +108,8 @@ PAPER_CONFIG = {
     "lookback_fvg": None,
     "exigir_rr_minimo": False,
 }
+ULTIMO_PRECO_CACHE = {}
+ULTIMO_LOG_CACHE = {}
 
 def esta_em_killzone():
     agora = datetime.now(timezone.utc)
@@ -88,357 +120,39 @@ def esta_em_killzone():
     ny_fim = 16 * 60
     return (londres_inicio <= minutos_utc < londres_fim) or (ny_inicio <= minutos_utc < ny_fim)
 
+
+def _responder_acesso_negado(update):
+    mensagem = "⛔ Acesso negado. Usuário não autorizado."
+    if getattr(update, "callback_query", None):
+        return update.callback_query.edit_message_text(mensagem)
+    if getattr(update, "message", None):
+        return update.message.reply_text(mensagem)
+    return None
+
+
+def requer_autorizacao(func):
+    @wraps(func)
+    async def wrapper(update, context, *args, **kwargs):
+        chat_id = getattr(getattr(update, "effective_chat", None), "id", None)
+        if not is_telegram_authorized(chat_id):
+            logging.warning("Acesso negado ao Telegram para chat_id=%s em %s", chat_id, func.__name__)
+            if getattr(update, "callback_query", None):
+                await update.callback_query.answer()
+                await update.callback_query.edit_message_text("⛔ Acesso negado. Usuário não autorizado.")
+            elif getattr(update, "message", None):
+                await update.message.reply_text("⛔ Acesso negado. Usuário não autorizado.")
+            return None
+        return await func(update, context, *args, **kwargs)
+
+    return wrapper
+
 # ---------- Estados do ConversationHandler ----------
 DIRECAO, RESULTADO, SCORE, LUCRO, RR = range(5)
 
 # ---------- Banco de Dados ----------
 DB_NAME = "trades.db"
 
-def garantir_schema_trades():
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS trades (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp TEXT NOT NULL,
-            direcao TEXT NOT NULL,
-            resultado TEXT NOT NULL,
-            score INTEGER NOT NULL,
-            lucro_percent REAL NOT NULL,
-            rr_planejado REAL NOT NULL
-        )
-    ''')
-    colunas = {
-        row[1] for row in c.execute("PRAGMA table_info(trades)").fetchall()
-    }
-    alteracoes = {
-        "tipo": "TEXT DEFAULT 'manual'",
-        "simbolo": "TEXT DEFAULT 'BTCUSDT'",
-        "status": "TEXT DEFAULT 'closed'",
-        "entrada": "REAL",
-        "stop_loss": "REAL",
-        "take_profit": "REAL",
-        "quantidade": "REAL",
-        "valor_arriscado": "REAL",
-        "aberto_em": "TEXT",
-        "fechado_em": "TEXT",
-        "saida": "REAL",
-        "lucro_reais": "REAL",
-        "motivo_saida": "TEXT",
-        "filtros_aplicados": "INTEGER DEFAULT 1",
-    }
-    for coluna, tipo in alteracoes.items():
-        if coluna not in colunas:
-            try:
-                c.execute(f"ALTER TABLE trades ADD COLUMN {coluna} {tipo}")
-            except sqlite3.OperationalError:
-                pass
-    c.execute(
-        """
-        CREATE TABLE IF NOT EXISTS validacoes_sol (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp TEXT NOT NULL,
-            total_trades INTEGER NOT NULL,
-            profit_factor REAL NOT NULL,
-            win_rate REAL NOT NULL,
-            drawdown_max REAL NOT NULL,
-            resultado TEXT NOT NULL,
-            comparacao_walkforward TEXT NOT NULL
-        )
-        """
-    )
-    conn.commit()
-    conn.close()
-
-def init_db():
-    criar_tabelas_observabilidade()
-    garantir_schema_trades()
-
-def salvar_trade(direcao, resultado, score, lucro_percent, rr_planejado):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    timestamp = datetime.now().isoformat()
-    c.execute('''
-        INSERT INTO trades (timestamp, direcao, resultado, score, lucro_percent, rr_planejado)
-        VALUES (?, ?, ?, ?, ?, ?)
-    ''', (timestamp, direcao, resultado, score, lucro_percent, rr_planejado))
-    conn.commit()
-    conn.close()
-
-def obter_estatisticas():
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    total = c.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
-    if total == 0:
-        conn.close()
-        return None
-
-    vitorias = c.execute("SELECT COUNT(*) FROM trades WHERE resultado = 'GANHO'").fetchone()[0]
-    derrotas = total - vitorias
-    win_rate = (vitorias / total) * 100
-    lucro_total = c.execute("SELECT SUM(lucro_percent) FROM trades").fetchone()[0] or 0.0
-    score_vencedores = c.execute("SELECT AVG(score) FROM trades WHERE resultado = 'GANHO'").fetchone()[0]
-    score_perdedores = c.execute("SELECT AVG(score) FROM trades WHERE resultado = 'PERDA'").fetchone()[0]
-    trades_score_alto = c.execute("SELECT COUNT(*) FROM trades WHERE score > 8").fetchone()[0]
-    vitorias_score_alto = c.execute("SELECT COUNT(*) FROM trades WHERE score > 8 AND resultado = 'GANHO'").fetchone()[0]
-    chance_alto = (vitorias_score_alto / trades_score_alto * 100) if trades_score_alto > 0 else 0.0
-    conn.close()
-
-    return {
-        "total": total,
-        "vitorias": vitorias,
-        "derrotas": derrotas,
-        "win_rate": win_rate,
-        "lucro_total": lucro_total,
-        "score_vencedores": score_vencedores,
-        "score_perdedores": score_perdedores,
-        "chance_alto": chance_alto
-    }
-
-def reset_db():
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("DELETE FROM trades")
-    conn.commit()
-    conn.close()
-
-
-def obter_trades_paper_abertos(symbol=PAPER_SYMBOL):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    linhas = c.execute(
-        "SELECT id, timestamp, simbolo, direcao, entrada, stop_loss, take_profit, quantidade, valor_arriscado, aberto_em "
-        "FROM trades WHERE tipo = 'paper' AND simbolo = ? AND status = 'open' ORDER BY timestamp ASC",
-        (symbol,),
-    ).fetchall()
-    conn.close()
-    trades = []
-    for linha in linhas:
-        trades.append(
-            {
-                "id": linha[0],
-                "timestamp": linha[1],
-                "symbol": linha[2],
-                "direcao": linha[3],
-                "entrada": float(linha[4]),
-                "stop_loss": float(linha[5]),
-                "take_profit": float(linha[6]),
-                "quantidade": float(linha[7] or 0.0),
-                "valor_arriscado": float(linha[8] or 0.0),
-                "aberto_em": linha[9],
-            }
-        )
-    return trades
-
-
-def registrar_trade_paper(symbol, direcao, entrada, stop_loss, take_profit, quantidade, valor_arriscado, rr_planejado, filtros_aplicados=True):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    timestamp = datetime.now(timezone.utc).isoformat()
-    c.execute(
-        """
-        INSERT INTO trades (
-            timestamp, tipo, simbolo, status, direcao, resultado, score,
-            lucro_percent, rr_planejado, entrada, stop_loss, take_profit,
-            quantidade, valor_arriscado, aberto_em, filtros_aplicados
-        )
-        VALUES (?, 'paper', ?, 'open', ?, 'PENDENTE', 0, 0.0, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            timestamp,
-            symbol,
-            direcao,
-            rr_planejado,
-            entrada,
-            stop_loss,
-            take_profit,
-            quantidade,
-            valor_arriscado,
-            timestamp,
-            1 if filtros_aplicados else 0,
-        ),
-    )
-    trade_id = c.lastrowid
-    conn.commit()
-    conn.close()
-    return trade_id
-
-
-def finalizar_trade_paper(trade_id, saida, lucro_percent, lucro_reais, resultado, motivo_saida):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    timestamp = datetime.now(timezone.utc).isoformat()
-    c.execute(
-        """
-        UPDATE trades
-        SET status = 'closed',
-            resultado = ?,
-            lucro_percent = ?,
-            lucro_reais = ?,
-            saida = ?,
-            fechado_em = ?,
-            motivo_saida = ?
-        WHERE id = ?
-        """,
-        (resultado, lucro_percent, lucro_reais, saida, timestamp, motivo_saida, trade_id),
-    )
-    conn.commit()
-    conn.close()
-
-
-def obter_paper_stats(symbol=PAPER_SYMBOL):
-    def _consultar_metricas(where_sql, parametros):
-        total_local = c.execute(
-            f"SELECT COUNT(*) FROM trades WHERE {where_sql}",
-            parametros,
-        ).fetchone()[0]
-        if total_local == 0:
-            return None
-
-        vitorias_local = c.execute(
-            f"SELECT COUNT(*) FROM trades WHERE {where_sql} AND resultado = 'GANHO'",
-            parametros,
-        ).fetchone()[0]
-        win_rate_local = (vitorias_local / total_local) * 100 if total_local > 0 else 0.0
-        lucro_total_percent_local = c.execute(
-            f"SELECT SUM(lucro_percent) FROM trades WHERE {where_sql}",
-            parametros,
-        ).fetchone()[0] or 0.0
-        lucro_total_reais_local = c.execute(
-            f"SELECT SUM(lucro_reais) FROM trades WHERE {where_sql}",
-            parametros,
-        ).fetchone()[0] or 0.0
-        lucro_bruto_local = c.execute(
-            f"SELECT SUM(lucro_reais) FROM trades WHERE {where_sql} AND lucro_reais > 0",
-            parametros,
-        ).fetchone()[0] or 0.0
-        perda_bruta_local = abs(c.execute(
-            f"SELECT SUM(lucro_reais) FROM trades WHERE {where_sql} AND lucro_reais < 0",
-            parametros,
-        ).fetchone()[0] or 0.0)
-        profit_factor_local = (lucro_bruto_local / perda_bruta_local) if perda_bruta_local > 0 else (float("inf") if lucro_bruto_local > 0 else 0.0)
-        rr_medio_local = c.execute(
-            f"SELECT AVG(rr_planejado) FROM trades WHERE {where_sql}",
-            parametros,
-        ).fetchone()[0] or 0.0
-        return {
-            "total": total_local,
-            "vitorias": vitorias_local,
-            "win_rate": win_rate_local,
-            "lucro_total_percent": lucro_total_percent_local,
-            "lucro_total_reais": lucro_total_reais_local,
-            "profit_factor": profit_factor_local,
-            "rr_medio": rr_medio_local,
-        }
-
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    metricas_todas = _consultar_metricas(
-        "tipo = 'paper' AND simbolo = ? AND status = 'closed'",
-        (symbol,),
-    )
-    metricas_filtradas = _consultar_metricas(
-        "tipo = 'paper' AND simbolo = ? AND status = 'closed' AND filtros_aplicados = 1",
-        (symbol,),
-    )
-    conn.close()
-
-    if metricas_todas is None:
-        return None
-
-    return {
-        "symbol": symbol,
-        "todas": metricas_todas,
-        "filtradas": metricas_filtradas,
-    }
-
-
-def obter_ultimos_trades_paper(symbol=PAPER_SYMBOL, limite=30):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    linhas = c.execute(
-        """
-        SELECT timestamp, resultado, lucro_percent, lucro_reais, filtros_aplicados
-        FROM trades
-        WHERE tipo = 'paper' AND simbolo = ? AND status = 'closed'
-        ORDER BY timestamp DESC
-        LIMIT ?
-        """,
-        (symbol, limite),
-    ).fetchall()
-    conn.close()
-
-    trades = []
-    for linha in linhas:
-        trades.append(
-            {
-                "timestamp": linha[0],
-                "resultado": linha[1],
-                "lucro_percent": float(linha[2] or 0.0),
-                "lucro_reais": float(linha[3] or 0.0),
-                "filtros_aplicados": bool(linha[4]),
-            }
-        )
-    return list(reversed(trades))
-
-
-def calcular_metricas_trade_history(trades):
-    if not trades:
-        return None
-
-    trades_ordenados = sorted(trades, key=lambda item: item["timestamp"])
-    ganhos = [t for t in trades_ordenados if (t.get("lucro_reais") or 0.0) > 0]
-    perdas = [t for t in trades_ordenados if (t.get("lucro_reais") or 0.0) < 0]
-    lucro_bruto = sum(float(t.get("lucro_reais") or 0.0) for t in ganhos)
-    perda_bruta = abs(sum(float(t.get("lucro_reais") or 0.0) for t in perdas))
-    profit_factor = (lucro_bruto / perda_bruta) if perda_bruta > 0 else (float("inf") if lucro_bruto > 0 else 0.0)
-    win_rate = (len(ganhos) / len(trades_ordenados)) * 100 if trades_ordenados else 0.0
-
-    saldo = 100.0
-    pico = 100.0
-    drawdown_max = 0.0
-    for trade in trades_ordenados:
-        saldo += float(trade.get("lucro_percent") or 0.0)
-        if saldo > pico:
-            pico = saldo
-        if pico > 0:
-            drawdown_atual = ((pico - saldo) / pico) * 100
-            if drawdown_atual > drawdown_max:
-                drawdown_max = drawdown_atual
-
-    return {
-        "total": len(trades_ordenados),
-        "profit_factor": profit_factor,
-        "win_rate": win_rate,
-        "drawdown_max": drawdown_max,
-    }
-
-
-def registrar_validacao_sol(total_trades, profit_factor, win_rate, drawdown_max, resultado, comparacao_walkforward):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    timestamp = datetime.now(timezone.utc).isoformat()
-    c.execute(
-        """
-        INSERT INTO validacoes_sol (
-            timestamp, total_trades, profit_factor, win_rate, drawdown_max, resultado, comparacao_walkforward
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            timestamp,
-            total_trades,
-            profit_factor,
-            win_rate,
-            drawdown_max,
-            resultado,
-            comparacao_walkforward,
-        ),
-    )
-    conn.commit()
-    conn.close()
-
-
+@requer_autorizacao
 async def validar_sol(update: Update, context: ContextTypes.DEFAULT_TYPE):
     trades = obter_ultimos_trades_paper(PAPER_SYMBOL, limite=30)
     if not trades:
@@ -490,373 +204,6 @@ async def validar_sol(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-def _obter_sinal_paper_sol():
-    if backtester is None:
-        return None
-    try:
-        df = backtester.baixar_dados_historicos(symbol=PAPER_SYMBOL)
-        if df is None or df.empty:
-            return None
-        try:
-            contextos = backtester._precomputar_contextos_otimizacao(df)
-        except Exception as e:
-            logging.warning(f"Falha ao precomputar contextos do paper SOL: {e}")
-            return None
-        if not contextos:
-            return None
-        contexto = contextos[-1]
-        return backtester._simular_decisao_contexto(
-            contexto,
-            volume_minimo_multiplicador=PAPER_CONFIG["volume_minimo_multiplicador"],
-            volume_alto_multiplicador=1.5,
-            exigir_rr_minimo=PAPER_CONFIG["exigir_rr_minimo"],
-            regime_modo=PAPER_CONFIG["regime_modo"],
-            exigir_fvg_nao_tocado=PAPER_CONFIG["exigir_fvg_nao_tocado"],
-            lookback_fvg=PAPER_CONFIG["lookback_fvg"] or 10,
-        )
-    except Exception as e:
-        logging.warning(f"Falha ao gerar sinal paper SOL: {e}")
-        return None
-
-
-def _avaliar_filtros_paper(df, sinal, decisao_info, regime_info):
-    if not KILLZONE_SOL or esta_em_killzone():
-        killzone_ok = True
-    else:
-        killzone_ok = False
-
-    adx = regime_info.get("adx")
-    rsi = decisao_info.get("rsi")
-    direcao = sinal.get("direcao")
-
-    adx_ok = adx is not None and adx >= 20
-    if direcao == "COMPRA":
-        rsi_ok = rsi is not None and rsi <= 55
-    else:
-        rsi_ok = rsi is not None and rsi >= 45
-
-    filtros_aplicados = killzone_ok and adx_ok and rsi_ok
-    detalhes = {
-        "killzone_ok": killzone_ok,
-        "adx_ok": adx_ok,
-        "rsi_ok": rsi_ok,
-    }
-    return filtros_aplicados, detalhes
-
-
-async def monitorar_paper_sol(context: ContextTypes.DEFAULT_TYPE):
-    if not PAPER_TRADING_ATIVO:
-        return
-
-    try:
-        chat_id = context.job.data["chat_id"]
-        if backtester is None:
-            registrar_decisao_observabilidade(
-                symbol=PAPER_SYMBOL,
-                modo="PAPER_SOL",
-                decisao="ERRO",
-                direcao="N/A",
-                preco=None,
-                regime="N/D",
-                adx=None,
-                volume_status="N/D",
-                motivo="Backtester indisponível para o paper trading.",
-                bloqueado_por="N/A",
-                fonte_dados="N/D",
-                erro="backtester indisponível",
-            )
-            return
-
-        df = backtester.baixar_dados_historicos(symbol=PAPER_SYMBOL)
-        if df is None or df.empty:
-            registrar_decisao_observabilidade(
-                symbol=PAPER_SYMBOL,
-                modo="PAPER_SOL",
-                decisao="AGUARDAR",
-                direcao="N/A",
-                preco=None,
-                regime="N/D",
-                adx=None,
-                volume_status="N/D",
-                motivo="Sem dados suficientes para monitorar o paper trading.",
-                bloqueado_por="N/D",
-                fonte_dados="N/D",
-                erro="N/D",
-            )
-            return
-
-        fonte_dados = obter_fonte_dados_df(df)
-        preco_atual = float(df["close"].iloc[-1])
-        candle = df.iloc[-1]
-        regime_info = classificar_regime(df)
-        aberto = obter_trades_paper_abertos(PAPER_SYMBOL)
-
-        if aberto:
-            for trade in aberto:
-                direcao = trade["direcao"]
-                stop_loss = trade["stop_loss"]
-                take_profit = trade["take_profit"]
-                quantidade = trade["quantidade"]
-                entrada = trade["entrada"]
-
-                stop_atingido = False
-                take_atingido = False
-                if direcao == "COMPRA":
-                    stop_atingido = float(candle["low"]) <= stop_loss
-                    take_atingido = float(candle["high"]) >= take_profit
-                    if stop_atingido:
-                        saida = stop_loss
-                        lucro_reais = quantidade * (saida - entrada)
-                        lucro_percent = (lucro_reais / 10000) * 100
-                        finalizar_trade_paper(trade["id"], saida, lucro_percent, lucro_reais, "PERDA", "STOP")
-                        registrar_decisao_observabilidade(
-                            symbol=PAPER_SYMBOL,
-                            modo="PAPER_SOL",
-                            decisao="TRADE_FECHADO",
-                            direcao=direcao,
-                            preco=saida,
-                            regime=regime_info.get("regime"),
-                            adx=regime_info.get("adx"),
-                            volume_status=regime_info.get("volatilidade"),
-                            motivo="Fechado no STOP",
-                            bloqueado_por="N/A",
-                            fonte_dados=fonte_dados,
-                            erro="N/A",
-                        )
-                        await context.bot.send_message(
-                            chat_id=chat_id,
-                            text=f"🧪 Paper SOL fechado por STOP. Resultado: {fmt_num(lucro_percent, '+.2f')}%",
-                        )
-                        continue
-                    if take_atingido:
-                        saida = take_profit
-                        lucro_reais = quantidade * (saida - entrada)
-                        lucro_percent = (lucro_reais / 10000) * 100
-                        finalizar_trade_paper(trade["id"], saida, lucro_percent, lucro_reais, "GANHO", "TAKE_PROFIT")
-                        registrar_decisao_observabilidade(
-                            symbol=PAPER_SYMBOL,
-                            modo="PAPER_SOL",
-                            decisao="TRADE_FECHADO",
-                            direcao=direcao,
-                            preco=saida,
-                            regime=regime_info.get("regime"),
-                            adx=regime_info.get("adx"),
-                            volume_status=regime_info.get("volatilidade"),
-                            motivo="Fechado no TAKE PROFIT",
-                            bloqueado_por="N/A",
-                            fonte_dados=fonte_dados,
-                            erro="N/A",
-                        )
-                        await context.bot.send_message(
-                            chat_id=chat_id,
-                            text=f"🧪 Paper SOL fechado por TAKE PROFIT. Resultado: {fmt_num(lucro_percent, '+.2f')}%",
-                        )
-                        continue
-                else:
-                    stop_atingido = float(candle["high"]) >= stop_loss
-                    take_atingido = float(candle["low"]) <= take_profit
-                    if stop_atingido:
-                        saida = stop_loss
-                        lucro_reais = quantidade * (entrada - saida)
-                        lucro_percent = (lucro_reais / 10000) * 100
-                        finalizar_trade_paper(trade["id"], saida, lucro_percent, lucro_reais, "PERDA", "STOP")
-                        registrar_decisao_observabilidade(
-                            symbol=PAPER_SYMBOL,
-                            modo="PAPER_SOL",
-                            decisao="TRADE_FECHADO",
-                            direcao=direcao,
-                            preco=saida,
-                            regime=regime_info.get("regime"),
-                            adx=regime_info.get("adx"),
-                            volume_status=regime_info.get("volatilidade"),
-                            motivo="Fechado no STOP",
-                            bloqueado_por="N/A",
-                            fonte_dados=fonte_dados,
-                            erro="N/A",
-                        )
-                        await context.bot.send_message(
-                            chat_id=chat_id,
-                            text=f"🧪 Paper SOL fechado por STOP. Resultado: {fmt_num(lucro_percent, '+.2f')}%",
-                        )
-                        continue
-                    if take_atingido:
-                        saida = take_profit
-                        lucro_reais = quantidade * (entrada - saida)
-                        lucro_percent = (lucro_reais / 10000) * 100
-                        finalizar_trade_paper(trade["id"], saida, lucro_percent, lucro_reais, "GANHO", "TAKE_PROFIT")
-                        registrar_decisao_observabilidade(
-                            symbol=PAPER_SYMBOL,
-                            modo="PAPER_SOL",
-                            decisao="TRADE_FECHADO",
-                            direcao=direcao,
-                            preco=saida,
-                            regime=regime_info.get("regime"),
-                            adx=regime_info.get("adx"),
-                            volume_status=regime_info.get("volatilidade"),
-                            motivo="Fechado no TAKE PROFIT",
-                            bloqueado_por="N/A",
-                            fonte_dados=fonte_dados,
-                            erro="N/A",
-                        )
-                        await context.bot.send_message(
-                            chat_id=chat_id,
-                            text=f"🧪 Paper SOL fechado por TAKE PROFIT. Resultado: {fmt_num(lucro_percent, '+.2f')}%",
-                        )
-                        continue
-            return
-
-        sinal = _obter_sinal_paper_sol()
-        if not sinal or sinal.get("direcao") not in ("COMPRA", "VENDA"):
-            registrar_decisao_observabilidade(
-                symbol=PAPER_SYMBOL,
-                modo="PAPER_SOL",
-                decisao="AGUARDAR",
-                direcao="N/A",
-                preco=preco_atual,
-                regime=regime_info.get("regime"),
-                adx=regime_info.get("adx"),
-                volume_status=regime_info.get("volatilidade"),
-                motivo="Sem sinal válido no momento.",
-                bloqueado_por="N/A",
-                fonte_dados=fonte_dados,
-                erro="N/A",
-            )
-            return
-
-        agora_utc = datetime.now(timezone.utc)
-        horario_utc = agora_utc.strftime("%H:%M")
-        if KILLZONE_SOL and not esta_em_killzone():
-            registrar_decisao_observabilidade(
-                symbol=PAPER_SYMBOL,
-                modo="PAPER_SOL",
-                decisao="BLOQUEADO_KILLZONE",
-                direcao=sinal.get("direcao"),
-                preco=preco_atual,
-                regime=regime_info.get("regime"),
-                adx=regime_info.get("adx"),
-                volume_status=regime_info.get("volatilidade"),
-                motivo="Fora da Killzone.",
-                bloqueado_por="KILLZONE",
-                fonte_dados=fonte_dados,
-                erro="N/A",
-            )
-            logging.info(f"Alerta bloqueado: fora da Killzone (Horário atual: {horario_utc} UTC)")
-            return
-
-        decisao_info = tomar_decisao(df, symbol=PAPER_SYMBOL, modo="PAPER_SOL", fonte_dados=fonte_dados)
-        filtros_aplicados, detalhes_filtros = _avaliar_filtros_paper(df, sinal, decisao_info, regime_info)
-
-        entrada = float(sinal["entrada"])
-        stop_loss = float(sinal["stop_loss"])
-        take_profit = float(sinal["take_profit"])
-        rr_planejado = float(sinal.get("rr") or 0.0)
-        capital_teste = 10000
-        quantidade, valor_arriscado = calcular_tamanho_posicao(capital_teste, 1.0, entrada, stop_loss)
-        if quantidade <= 0:
-            registrar_decisao_observabilidade(
-                symbol=PAPER_SYMBOL,
-                modo="PAPER_SOL",
-                decisao="BLOQUEADO_FILTRO",
-                direcao=sinal.get("direcao"),
-                preco=entrada,
-                regime=regime_info.get("regime"),
-                adx=regime_info.get("adx"),
-                volume_status=decisao_info.get("volume_status"),
-                motivo="Tamanho de posição inválido.",
-                bloqueado_por="RISK",
-                fonte_dados=fonte_dados,
-                erro="N/A",
-            )
-            return
-
-        trade_id = registrar_trade_paper(
-            PAPER_SYMBOL,
-            sinal["direcao"],
-            entrada,
-            stop_loss,
-            take_profit,
-            quantidade,
-            valor_arriscado,
-            rr_planejado,
-            filtros_aplicados=filtros_aplicados,
-        )
-
-        if filtros_aplicados:
-            registrar_decisao_observabilidade(
-                symbol=PAPER_SYMBOL,
-                modo="PAPER_SOL",
-                decisao="TRADE_ABERTO",
-                direcao=sinal["direcao"],
-                preco=entrada,
-                regime=regime_info.get("regime"),
-                adx=regime_info.get("adx"),
-                volume_status=decisao_info.get("volume_status"),
-                motivo=sinal.get("motivo") or decisao_info.get("motivo") or "Trade paper aberto.",
-                bloqueado_por="N/A",
-                fonte_dados=fonte_dados,
-                erro="N/A",
-            )
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=(
-                    f"🧪 *Paper SOL aberto*\n"
-                    f"Direção: {sinal['direcao']}\n"
-                    f"Entrada: {fmt_num(entrada, ',.4f')}\n"
-                    f"Stop: {fmt_num(stop_loss, ',.4f')}\n"
-                    f"Take: {fmt_num(take_profit, ',.4f')}\n"
-                    f"R/R: {fmt_num(rr_planejado)}\n"
-                    f"Trade ID: {trade_id}"
-                ),
-                parse_mode="Markdown",
-            )
-        else:
-            bloqueado_por = "FILTRO"
-            if not detalhes_filtros.get("killzone_ok"):
-                bloqueado_por = "KILLZONE"
-            elif not detalhes_filtros.get("adx_ok"):
-                bloqueado_por = "ADX"
-            elif not detalhes_filtros.get("rsi_ok"):
-                bloqueado_por = "RSI"
-            elif regime_info.get("regime") == "CHOP":
-                bloqueado_por = "CHOP"
-            registrar_decisao_observabilidade(
-                symbol=PAPER_SYMBOL,
-                modo="PAPER_SOL",
-                decisao="BLOQUEADO_FILTRO",
-                direcao=sinal.get("direcao"),
-                preco=entrada,
-                regime=regime_info.get("regime"),
-                adx=regime_info.get("adx"),
-                volume_status=decisao_info.get("volume_status"),
-                motivo=(
-                    f"Filtros bloquearam o sinal: ADX_ok={detalhes_filtros['adx_ok']}, "
-                    f"RSI_ok={detalhes_filtros['rsi_ok']}, Killzone_ok={detalhes_filtros['killzone_ok']}."
-                ),
-                bloqueado_por=bloqueado_por,
-                fonte_dados=fonte_dados,
-                erro="N/A",
-            )
-            logging.info(
-                "Paper SOL registrado sem alerta: filtros bloquearam o sinal "
-                f"(ADX_ok={detalhes_filtros['adx_ok']}, RSI_ok={detalhes_filtros['rsi_ok']}, Killzone_ok={detalhes_filtros['killzone_ok']})."
-            )
-    except Exception as e:
-        registrar_decisao_observabilidade(
-            symbol=PAPER_SYMBOL,
-            modo="PAPER_SOL",
-            decisao="ERRO",
-            direcao="N/A",
-            preco=None,
-            regime="N/D",
-            adx=None,
-            volume_status="N/D",
-            motivo="Falha no monitoramento do paper SOL.",
-            bloqueado_por="N/A",
-            fonte_dados="N/D",
-            erro=str(e),
-        )
-        logging.warning(f"Erro no monitoramento paper SOL: {e}")
-
 def obter_dados_risco_historico(capital):
     """
     Retorna perdas do dia em valor absoluto e histórico simples de resultados.
@@ -891,12 +238,12 @@ def obter_dados_risco_historico(capital):
     return perdas_hoje, historico
 
 
-def obter_contexto_risco(decisao_info, capital=10000, risco_percentual=1.0):
+def obter_contexto_risco(decisao_info, capital=CAPITAL_REAL, risco_percentual=RISCO_PERCENTUAL_PADRAO):
     """
     Calcula o contexto de risco para relatório e bloqueio operacional.
     Retorna None quando a gestão de risco não estiver disponível.
     """
-    if not all(
+    if not callable(validar_e_calcular) and not all(
         callable(func)
         for func in (
             calcular_tamanho_posicao,
@@ -912,12 +259,62 @@ def obter_contexto_risco(decisao_info, capital=10000, risco_percentual=1.0):
         if entrada is None or stop_loss is None:
             return None
 
-        quantidade, valor_arriscado = calcular_tamanho_posicao(
-            capital, risco_percentual, entrada, stop_loss
-        )
         perdas_hoje, historico = obter_dados_risco_historico(capital)
-        limite_diario_atingido = verificar_limite_diario(capital, perdas_hoje)
-        sequencia_perdas_atingida = verificar_sequencia_perdas(historico)
+        trades_hoje = sum(
+            1
+            for item in historico
+            if item in ("GANHO", "PERDA", True, False, 1, 0)
+        )
+        perdas_consecutivas = 0
+        for item in reversed(list(historico)):
+            if item in ("PERDA", "LOSS", False, 0):
+                perdas_consecutivas += 1
+            else:
+                break
+
+        if callable(validar_e_calcular):
+            resultado_risco = validar_e_calcular(
+                capital=capital,
+                risco_pct=risco_percentual,
+                entrada=entrada,
+                stop=stop_loss,
+                symbol=decisao_info.get("symbol", PAPER_SYMBOL),
+                alavancagem=10,
+                trades_abertos=None,
+                perdas_hoje=perdas_hoje,
+                trades_hoje=trades_hoje,
+                perdas_consecutivas=perdas_consecutivas,
+                regime=decisao_info.get("regime"),
+                adx=decisao_info.get("adx"),
+                volume_status=decisao_info.get("volume_status"),
+                fonte_dados=decisao_info.get("fonte_dados"),
+            )
+            if not resultado_risco:
+                return None
+            if not resultado_risco.get("aprovado"):
+                return {
+                    "capital": capital,
+                    "risco_percentual": risco_percentual,
+                    "entrada": entrada,
+                    "stop_loss": stop_loss,
+                    "quantidade": 0.0,
+                    "valor_arriscado": resultado_risco.get("valor_arriscado", 0.0),
+                    "perdas_hoje": perdas_hoje,
+                    "limite_diario_atingido": True,
+                    "sequencia_perdas_atingida": True,
+                    "motivo": resultado_risco.get("motivo"),
+                    "bloqueado": True,
+                }
+            quantidade = resultado_risco.get("quantidade", 0.0)
+            valor_arriscado = resultado_risco.get("valor_arriscado", 0.0)
+            limite_diario_atingido = verificar_limite_diario(capital, perdas_hoje)
+            sequencia_perdas_atingida = verificar_sequencia_perdas(historico)
+        else:
+            quantidade, valor_arriscado = calcular_tamanho_posicao(
+                capital, risco_percentual, entrada, stop_loss
+            )
+            limite_diario_atingido = verificar_limite_diario(capital, perdas_hoje)
+            sequencia_perdas_atingida = verificar_sequencia_perdas(historico)
 
         return {
             "capital": capital,
@@ -934,7 +331,7 @@ def obter_contexto_risco(decisao_info, capital=10000, risco_percentual=1.0):
         return None
 
 
-def aplicar_bloqueio_risco(decisao_info, capital=10000, risco_percentual=1.0):
+def aplicar_bloqueio_risco(decisao_info, capital=CAPITAL_REAL, risco_percentual=RISCO_PERCENTUAL_PADRAO):
     """
     Atualiza o veredito quando limites de risco forem atingidos.
     Retorna o contexto de risco para uso no relatório.
@@ -992,7 +389,30 @@ def registrar_decisao_segura(**kwargs):
 
 
 def registrar_decisao_observabilidade(**kwargs):
-    registrar_decisao_segura(**kwargs)
+    payload = dict(kwargs)
+    payload.setdefault("timestamp", datetime.now(timezone.utc).isoformat())
+    registrar_decisao_segura(**payload)
+    atualizar_cache_log(payload)
+
+
+def atualizar_cache_preco(symbol, preco, fonte_dados, modo):
+    if preco is None:
+        return
+    ULTIMO_PRECO_CACHE[symbol] = {
+        "preco": float(preco),
+        "fonte_dados": fonte_dados or "N/D",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "modo": modo,
+    }
+
+
+def atualizar_cache_log(log):
+    if not log:
+        return
+    modo = log.get("modo") or "N/D"
+    symbol = log.get("symbol") or "N/D"
+    ULTIMO_LOG_CACHE[modo] = log
+    ULTIMO_LOG_CACHE[symbol] = log
 
 # ---------- Variáveis globais do vigia ----------
 vigia_ativo = False
@@ -1105,7 +525,7 @@ def obter_analise():
             "direcao": None
         })
 
-    risco_contexto = aplicar_bloqueio_risco(decisao_info, capital=10000, risco_percentual=1.0)
+    risco_contexto = aplicar_bloqueio_risco(decisao_info, capital=CAPITAL_REAL, risco_percentual=RISCO_PERCENTUAL_PADRAO)
 
     preco_atual = df['close'].iloc[-1]
     volume = df['volume'].iloc[-1]
@@ -1210,10 +630,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "**🧪 Paper Trading**\n"
         "/paper_stats – Ver desempenho do paper trading da SOL\n"
         "/validar_sol – Validar a SOL com base no paper trading\n\n"
+        "**📊 Observabilidade**\n"
+        "/paper_status – Status geral do paper trading e vigia\n"
+        "/paper_abertos – Lista trades paper abertos com PnL\n"
+        "/paper_trades – Últimos 10 trades paper (abertos/fechados)\n"
+        "/paper_log – Últimas 10 decisões do bot\n"
+        "/mestre – Resumo inteligente do estado do bot\n\n"
         "**⚙️ Configuração**\n"
         "Use /status para checar o estado atual do bot e dos filtros"
     )
 
+@requer_autorizacao
 async def analisa(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ Buscando dados e calculando análise...")
     try:
@@ -1222,6 +649,7 @@ async def analisa(update: Update, context: ContextTypes.DEFAULT_TYPE):
         resultado = f"❌ Erro durante a análise: {e}"
     await update.message.reply_text(resultado)
 
+@requer_autorizacao
 async def comando_ia(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🧠 Consultando a IA, aguarde...")
 
@@ -1240,6 +668,7 @@ async def comando_ia(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Erro ao gerar análise com IA: {e}")
 
+@requer_autorizacao
 async def comando_backtest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ Iniciando backtest histórico. Isso pode levar alguns segundos...")
     try:
@@ -1272,12 +701,16 @@ async def monitorar_preco(context: ContextTypes.DEFAULT_TYPE):
     global vigia_ativo, ultimo_regime_vigia, ultimo_alerta_timestamp
     try:
         chat_id = context.job.data['chat_id']
+        if not is_telegram_authorized(chat_id):
+            logging.warning("Monitoramento BTC bloqueado para chat_id=%s", chat_id)
+            return
         df = baixar_dados_btc()
         if df.empty:
             return
 
         horario_utc = datetime.now(timezone.utc).strftime("%H:%M")
         preco_atual = df['close'].iloc[-1]
+        atualizar_cache_preco("BTCUSDT", preco_atual, obter_fonte_dados_df(df), "VIGIA_BTC")
         regime_info = classificar_regime(df)
         regime_atual = regime_info['regime']
 
@@ -1434,7 +867,7 @@ async def monitorar_preco(context: ContextTypes.DEFAULT_TYPE):
                 mensagem += f"⏳ *Horizonte Estimado:* {contexto}\n"
             mensagem += f"📊 *Funding Rate:* {funding_str}\n"
 
-            risco_contexto = aplicar_bloqueio_risco(decisao_info, capital=10000, risco_percentual=1.0)
+            risco_contexto = aplicar_bloqueio_risco(decisao_info, capital=CAPITAL_REAL, risco_percentual=RISCO_PERCENTUAL_PADRAO)
             linha_risco = None
             if risco_contexto:
                 if risco_contexto["limite_diario_atingido"]:
@@ -1534,6 +967,7 @@ async def monitorar_preco(context: ContextTypes.DEFAULT_TYPE):
         )
         logging.warning(f"Erro no monitoramento: {e}")
 
+@requer_autorizacao
 async def ativar_vigia(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global vigia_ativo, ultimo_regime_vigia
     if vigia_ativo:
@@ -1564,6 +998,7 @@ async def ativar_vigia(update: Update, context: ContextTypes.DEFAULT_TYPE):
     vigia_ativo = True
     await update.message.reply_text(f"🔍 Vigia ativado! Monitorando a cada 1 minuto. Adapta-se ao regime automaticamente.\nModo: {MODO_OPERACAO}\nPara parar, use /parar.")
 
+@requer_autorizacao
 async def parar_vigia(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global vigia_ativo, ultimo_regime_vigia
     jobs = context.job_queue.get_jobs_by_name("vigia_btc")
@@ -1580,6 +1015,7 @@ async def parar_vigia(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ultimo_regime_vigia = None
     await update.message.reply_text("🛑 Monitoramento parado com sucesso.")
 
+@requer_autorizacao
 async def status_vigia(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global vigia_ativo
     jobs = context.job_queue.get_jobs_by_name("vigia_btc")
@@ -1620,6 +1056,7 @@ async def status_vigia(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(status_msg)
 
 # ---------- Registro de Trade (/trade) ----------
+@requer_autorizacao
 async def trade_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("📈 Compra", callback_data='COMPRA')],
@@ -1629,6 +1066,7 @@ async def trade_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Qual foi a direção do trade?", reply_markup=reply_markup)
     return DIRECAO
 
+@requer_autorizacao
 async def trade_direcao(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1641,6 +1079,7 @@ async def trade_direcao(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text("Qual foi o resultado?", reply_markup=reply_markup)
     return RESULTADO
 
+@requer_autorizacao
 async def trade_resultado(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1648,6 +1087,7 @@ async def trade_resultado(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text("Qual era o Score de Confiança na hora? (digite um número de 0 a 10)")
     return SCORE
 
+@requer_autorizacao
 async def trade_score(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         score = int(update.message.text)
@@ -1661,6 +1101,7 @@ async def trade_score(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Valor inválido. Digite um número inteiro.")
         return SCORE
 
+@requer_autorizacao
 async def trade_lucro(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         lucro = float(update.message.text.replace(',', '.'))
@@ -1671,6 +1112,7 @@ async def trade_lucro(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Valor inválido. Digite um número decimal.")
         return LUCRO
 
+@requer_autorizacao
 async def trade_rr(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         rr = float(update.message.text.replace(',', '.'))
@@ -1694,11 +1136,13 @@ async def trade_rr(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Valor inválido. Digite um número decimal.")
         return RR
 
+@requer_autorizacao
 async def trade_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Registro cancelado.")
     return ConversationHandler.END
 
 # ---------- Estatísticas (/stats) ----------
+@requer_autorizacao
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stats_data = obter_estatisticas()
     if stats_data is None:
@@ -1722,6 +1166,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(mensagem)
 
 
+@requer_autorizacao
 async def paper_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stats_data = obter_paper_stats(PAPER_SYMBOL)
     if stats_data is None:
@@ -1768,51 +1213,70 @@ def _parse_dt_segura(valor):
 
 
 def _obter_preco_atual_referencia(symbol):
+    cache = ULTIMO_PRECO_CACHE.get(symbol)
+    if cache and cache.get("preco") is not None:
+        return float(cache["preco"]), cache.get("fonte_dados") or "N/D"
+
     try:
-        if symbol == PAPER_SYMBOL and backtester is not None:
-            df = backtester.baixar_dados_historicos(symbol=symbol)
-        else:
-            df = baixar_dados_btc(simbolo=symbol)
-        if df is not None and not df.empty:
-            return float(df["close"].iloc[-1]), obter_fonte_dados_df(df)
+        ultimo_log = buscar_ultimo_decision_log(modos=["PAPER_SOL", "VIGIA_BTC"])
+        if ultimo_log and ultimo_log.get("preco") is not None:
+            atualizar_cache_log(ultimo_log)
+            return float(ultimo_log["preco"]), ultimo_log.get("fonte_dados") or "N/D"
     except Exception as exc:
         logging.warning(f"Falha ao obter preço atual de referência para {symbol}: {exc}")
-
-    ultimo_log = buscar_ultimo_decision_log(modos=["PAPER_SOL", "VIGIA_BTC"])
-    if ultimo_log and ultimo_log.get("preco") is not None:
-        return float(ultimo_log["preco"]), ultimo_log.get("fonte_dados") or "N/D"
 
     return None, "N/D"
 
 
+
+@requer_autorizacao
 async def paper_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    ultimo_log = buscar_ultimo_decision_log(modos=["PAPER_SOL", "VIGIA_BTC"])
-    preco_atual, fonte_dados = _obter_preco_atual_referencia(PAPER_SYMBOL)
-    status_paper = "SIM" if PAPER_TRADING_ATIVO else "NÃO"
-    jobs_vigia = context.job_queue.get_jobs_by_name("vigia_btc")
-    status_vigia = "SIM" if jobs_vigia or vigia_ativo else "NÃO"
-    ultimo_horario = ultimo_log["timestamp"] if ultimo_log else "N/D"
-    ultima_decisao = ultimo_log["decisao"] if ultimo_log else "N/D"
-    ultimo_motivo = ultimo_log["motivo"] if ultimo_log else "N/D"
-    trades_abertos = contar_trades_abertos_paper(PAPER_SYMBOL)
-    trades_fechados_hoje = contar_trades_fechados_hoje(PAPER_SYMBOL)
-    preco_texto = fmt_num(preco_atual, ',.4f') if preco_atual is not None else "N/D"
+    status_msg = await update.message.reply_text("🔄 Coletando dados do paper trading, aguarde...")
+    try:
+        ultimo_log = ULTIMO_LOG_CACHE.get("PAPER_SOL") or ULTIMO_LOG_CACHE.get("VIGIA_BTC")
+        if not ultimo_log:
+            ultimo_log = buscar_ultimo_decision_log(modos=["PAPER_SOL", "VIGIA_BTC"])
+            atualizar_cache_log(ultimo_log)
 
-    mensagem = (
-        "📡 *Paper Status*\n\n"
-        f"Paper ativo: {status_paper}\n"
-        f"Vigia ativo: {status_vigia}\n"
-        f"Última checagem: {ultimo_horario}\n"
-        f"Último preço: {preco_texto}\n"
-        f"Fonte de dados: {fonte_dados}\n"
-        f"Última decisão: {ultima_decisao}\n"
-        f"Último motivo: {ultimo_motivo}\n"
-        f"Trades abertos: {trades_abertos}\n"
-        f"Trades fechados hoje: {trades_fechados_hoje}"
-    )
-    await update.message.reply_text(mensagem, parse_mode="Markdown")
+        preco_atual, fonte_dados = _obter_preco_atual_referencia(PAPER_SYMBOL)
+        status_paper = "SIM" if PAPER_TRADING_ATIVO else "NÃO"
+        jobs_vigia = context.job_queue.get_jobs_by_name("vigia_btc")
+        status_vigia = "SIM" if jobs_vigia or vigia_ativo else "NÃO"
+        ultimo_horario = ultimo_log["timestamp"] if ultimo_log else "N/D"
+        ultima_decisao = ultimo_log["decisao"] if ultimo_log else "N/D"
+        ultimo_motivo = ultimo_log["motivo"] if ultimo_log else "N/D"
+        trades_abertos = contar_trades_abertos_paper(PAPER_SYMBOL)
+        trades_fechados_hoje = contar_trades_fechados_hoje(PAPER_SYMBOL)
+        preco_texto = fmt_num(preco_atual, ",.4f") if preco_atual is not None else "N/D"
+        resumo_risco = obter_resumo_risco()
+        ultimo_bloqueio_risco = resumo_risco.get("ultimo_bloqueio")
+        if ultimo_bloqueio_risco:
+            bloqueio_motivo = ultimo_bloqueio_risco.get("motivo") or "N/D"
+            bloqueio_timestamp = ultimo_bloqueio_risco.get("timestamp") or "N/D"
+            bloqueio_texto = f"{bloqueio_motivo} | {bloqueio_timestamp}"
+        else:
+            bloqueio_texto = "Nenhum"
+
+        mensagem = (
+            "📡 *Paper Status*\n\n"
+            f"Paper ativo: {status_paper}\n"
+            f"Vigia ativo: {status_vigia}\n"
+            f"Última checagem: {ultimo_horario}\n"
+            f"Último preço: {preco_texto}\n"
+            f"Fonte de dados: {fonte_dados}\n"
+            f"Última decisão: {ultima_decisao}\n"
+            f"Último motivo: {ultimo_motivo}\n"
+            f"Trades abertos: {trades_abertos}\n"
+            f"Trades fechados hoje: {trades_fechados_hoje}\n"
+            f"Último bloqueio do risk manager: {bloqueio_texto}"
+        )
+        await status_msg.edit_text(mensagem)
+    except Exception as exc:
+        logging.warning(f"Falha ao montar paper_status: {exc}")
+        await status_msg.edit_text(f"❌ Falha ao montar o status do paper trading: {exc}")
 
 
+@requer_autorizacao
 async def paper_abertos(update: Update, context: ContextTypes.DEFAULT_TYPE):
     trades = obter_trades_paper_abertos(PAPER_SYMBOL)
     if not trades:
@@ -1853,6 +1317,7 @@ async def paper_abertos(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(linhas), parse_mode="Markdown")
 
 
+@requer_autorizacao
 async def paper_trades(update: Update, context: ContextTypes.DEFAULT_TYPE):
     trades = buscar_trades_paper(limite=10, symbol=PAPER_SYMBOL)
     if not trades:
@@ -1875,6 +1340,7 @@ async def paper_trades(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(linhas), parse_mode="Markdown")
 
 
+@requer_autorizacao
 async def paper_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logs = buscar_ultimos_decision_logs(limite=10)
     if not logs:
@@ -1892,10 +1358,17 @@ async def paper_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Bloqueado por: {log['bloqueado_por']}\n"
                 f"Fonte dados: {log['fonte_dados']}"
             )
-        )
+    )
     await update.message.reply_text("\n".join(linhas), parse_mode="Markdown")
 
 
+@requer_autorizacao
+async def mestre(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    resumo = gerar_resumo_mestre()
+    await update.message.reply_text(resumo, parse_mode="Markdown")
+
+
+@requer_autorizacao
 async def reset_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("Sim, resetar tudo", callback_data='confirm_reset')],
@@ -1904,6 +1377,7 @@ async def reset_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text("⚠️ Tem certeza que deseja apagar todo o histórico de trades?", reply_markup=reply_markup)
 
+@requer_autorizacao
 async def reset_stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1913,16 +1387,66 @@ async def reset_stats_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     else:
         await query.edit_message_text("❌ Reset cancelado.")
 
+# ---------- ConsolidaÃ§Ã£o de mÃ³dulos ----------
+PAPER_SYMBOL = paper_engine_module.PAPER_SYMBOL
+PAPER_JOB_NAME = paper_engine_module.PAPER_JOB_NAME
+PAPER_CONFIG = paper_engine_module.PAPER_CONFIG
+KILLZONE_SOL = paper_engine_module.KILLZONE_SOL
+PAPER_TRADING_ATIVO = paper_engine_module.PAPER_TRADING_ATIVO
+ULTIMO_PRECO_CACHE = paper_engine_module.ULTIMO_PRECO_CACHE
+ULTIMO_LOG_CACHE = paper_engine_module.ULTIMO_LOG_CACHE
+fmt_num = paper_engine_module.fmt_num
+obter_fonte_dados_df = paper_engine_module.obter_fonte_dados_df
+registrar_decisao_observabilidade = paper_engine_module.registrar_decisao_observabilidade
+atualizar_cache_preco = paper_engine_module.atualizar_cache_preco
+atualizar_cache_log = paper_engine_module.atualizar_cache_log
+esta_em_killzone = paper_engine_module.esta_em_killzone
+monitorar_paper_sol = paper_engine_module.monitorar_paper_sol
+salvar_trade = storage_salvar_trade
+obter_estatisticas = storage_obter_estatisticas
+reset_db = storage_reset_db
+obter_trades_paper_abertos = storage_obter_trades_paper_abertos
+registrar_trade_paper = storage_registrar_trade_paper
+finalizar_trade_paper = storage_finalizar_trade_paper
+obter_paper_stats = storage_obter_paper_stats
+obter_ultimos_trades_paper = storage_obter_ultimos_trades_paper
+calcular_metricas_trade_history = storage_calcular_metricas_trade_history
+registrar_validacao_sol = storage_registrar_validacao_sol
+init_db = storage_inicializar_banco
+paper_engine_module.backtester = backtester
+
 # ---------- Ponto de entrada ----------
 def main():
     init_db()
-    TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+    _valido, issues = validate_component_config("telegram")
+
+    TOKEN = TELEGRAM_BOT_TOKEN
+    if not TOKEN:
+        logging.error("TELEGRAM_BOT_TOKEN ausente. Bot nao sera iniciado.")
+        return
+
+    issues_fatais = [issue for issue in issues if "TELEGRAM_BOT_TOKEN" in issue]
+    if issues_fatais:
+        logging.error("Configuracao do Telegram invalida: %s", "; ".join(issues_fatais))
+        return
+
+    issues_nao_fatais = [issue for issue in issues if "TELEGRAM_AUTHORIZED_IDS" in issue]
+    if issues_nao_fatais:
+        logging.warning("; ".join(issues_nao_fatais))
+
+    if not live_trading_permitted():
+        logging.warning(
+            "Operacao real bloqueada por seguranca (TRADING_ENABLED=%s, LIVE_TRADING_ENABLED=%s, GLOBAL_KILL_SWITCH=%s).",
+            TRADING_ENABLED,
+            LIVE_TRADING_ENABLED,
+            GLOBAL_KILL_SWITCH,
+        )
 
     job_queue = JobQueue()
     request = HTTPXRequest(
-        read_timeout=45,
-        write_timeout=45,
-        connect_timeout=15,
+        read_timeout=30,
+        write_timeout=30,
+        connect_timeout=30,
     )
     app = Application.builder().token(TOKEN).request(request).job_queue(job_queue).build()
 
@@ -1941,6 +1465,7 @@ def main():
     app.add_handler(CommandHandler("paper_abertos", paper_abertos))
     app.add_handler(CommandHandler("paper_trades", paper_trades))
     app.add_handler(CommandHandler("paper_log", paper_log))
+    app.add_handler(CommandHandler("mestre", mestre))
 
     # ConversationHandler para /trade
     conv_handler = ConversationHandler(
