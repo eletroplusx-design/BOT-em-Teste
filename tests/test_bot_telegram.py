@@ -676,7 +676,12 @@ def test_obter_contexto_risco_aplicar_e_formatadores(monkeypatch, temp_db_path):
     contexto = bot_telegram.obter_contexto_risco({"entrada": 100.0, "stop_loss": 95.0, "symbol": "SOLUSDT", "regime": "BULL", "adx": 25, "volume_status": "NEUTRO", "fonte_dados": "BINANCE"})
     assert contexto["quantidade"] == 0.5
     assert contexto["valor_arriscado"] == 50.0
-    assert bot_telegram.aplicar_bloqueio_risco({"entrada": 100.0, "stop_loss": 95.0, "symbol": "SOLUSDT"}) == contexto or True
+    decisao_sem_bloqueio = {"entrada": 100.0, "stop_loss": 95.0, "symbol": "SOLUSDT"}
+    contexto_aplicado = bot_telegram.aplicar_bloqueio_risco(decisao_sem_bloqueio)
+    assert contexto_aplicado is not None
+    assert contexto_aplicado["quantidade"] == contexto["quantidade"]
+    assert contexto_aplicado["valor_arriscado"] == contexto["valor_arriscado"]
+    assert "decisao" not in decisao_sem_bloqueio
 
     monkeypatch.setattr(bot_telegram, "validar_e_calcular", lambda **kwargs: {"aprovado": False, "valor_arriscado": 10.0, "motivo": "bloqueado"})
     contexto_bloq = bot_telegram.obter_contexto_risco({"entrada": 100.0, "stop_loss": 95.0, "symbol": "SOLUSDT", "regime": "BULL", "adx": 25, "volume_status": "NEUTRO", "fonte_dados": "BINANCE"})
