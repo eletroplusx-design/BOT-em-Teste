@@ -9,13 +9,13 @@ on:
 permissions:
   contents: read
 
-  jobs:
-    test:
-      runs-on: ubuntu-latest
-      env:
-        CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
-      steps:
+    steps:
       - uses: actions/checkout@v4
 
       - name: Set up Python
