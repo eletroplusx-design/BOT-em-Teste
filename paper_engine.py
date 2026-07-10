@@ -17,6 +17,11 @@ from decisor import (
     extrair_fvg_bullish_abaixo,
 )
 from regime_classifier import classificar_regime
+from domain_models import (
+    TradeIntent,
+    TradeResult,
+    coerce_signal,
+)
 from storage import (
     buscar_ultimo_decision_log,
     finalizar_trade_paper,
@@ -48,6 +53,46 @@ PAPER_CONFIG = {
 
 ULTIMO_PRECO_CACHE = {}
 ULTIMO_LOG_CACHE = {}
+
+
+def _construir_trade_intent_paper(sinal, quantidade, valor_arriscado, fonte_dados):
+    return TradeIntent.from_mapping(
+        {
+            "symbol": PAPER_SYMBOL,
+            "direction": sinal.get("direcao"),
+            "entry": sinal.get("entrada"),
+            "stop_loss": sinal.get("stop_loss"),
+            "take_profit": sinal.get("take_profit"),
+            "quantity": quantidade,
+            "risk_amount": valor_arriscado,
+            "paper": True,
+            "created_at": datetime.now(timezone.utc),
+            "source": fonte_dados,
+            "strategy_version": STRATEGY_VERSION,
+            "exchange_info_ok": True,
+        }
+    )
+
+
+def _construir_trade_result_paper(trade, saida, lucro_percent, lucro_reais, fonte_dados, motivo_saida):
+    return TradeResult.from_mapping(
+        {
+            "symbol": PAPER_SYMBOL,
+            "direction": trade["direcao"],
+            "entry": trade["entrada"],
+            "exit_price": saida,
+            "quantity": trade["quantidade"],
+            "pnl_percent": lucro_percent,
+            "pnl_reais": lucro_reais,
+            "status": "closed",
+            "reason": motivo_saida,
+            "opened_at": trade.get("aberto_em") or trade.get("timestamp") or datetime.now(timezone.utc),
+            "closed_at": datetime.now(timezone.utc),
+            "source": fonte_dados,
+            "paper": True,
+            "strategy_version": STRATEGY_VERSION,
+        }
+    )
 
 
 def fmt_num(val, formato=".2f"):
@@ -117,7 +162,7 @@ def _obter_sinal_paper_sol():
         if not contextos:
             return None
         contexto = contextos[-1]
-        return backtester._simular_decisao_contexto(
+        sinal = backtester._simular_decisao_contexto(
             contexto,
             volume_minimo_multiplicador=PAPER_CONFIG["volume_minimo_multiplicador"],
             volume_alto_multiplicador=1.5,
@@ -126,6 +171,18 @@ def _obter_sinal_paper_sol():
             exigir_fvg_nao_tocado=PAPER_CONFIG["exigir_fvg_nao_tocado"],
             lookback_fvg=PAPER_CONFIG["lookback_fvg"] or 10,
         )
+        if not sinal:
+            return None
+        try:
+            sinal_model = coerce_signal(sinal)
+            payload = sinal_model.to_dict()
+            payload.setdefault("direcao", payload.get("direction"))
+            payload.setdefault("entrada", payload.get("entry"))
+            payload.setdefault("motivo", payload.get("reason"))
+            return payload
+        except Exception as exc:
+            logging.warning(f"Falha ao validar sinal paper SOL: {exc}")
+            return None
     except Exception as exc:
         logging.warning(f"Falha ao gerar sinal paper SOL: {exc}")
         return None
@@ -214,7 +271,22 @@ async def monitorar_paper_sol(context):
                         saida = stop_loss
                         lucro_reais = quantidade * (saida - entrada)
                         lucro_percent = (lucro_reais / CAPITAL_PAPER) * 100
-                        finalizar_trade_paper(trade["id"], saida, lucro_percent, lucro_reais, "PERDA", "STOP")
+                        resultado_trade = _construir_trade_result_paper(
+                            trade,
+                            saida,
+                            lucro_percent,
+                            lucro_reais,
+                            fonte_dados,
+                            "STOP",
+                        )
+                        finalizar_trade_paper(
+                            trade["id"],
+                            resultado_trade.exit_price,
+                            resultado_trade.pnl_percent,
+                            resultado_trade.pnl_reais,
+                            resultado_trade.resultado,
+                            resultado_trade.reason,
+                        )
                         registrar_decisao_observabilidade(
                             symbol=PAPER_SYMBOL,
                             modo="PAPER_SOL",
@@ -238,7 +310,22 @@ async def monitorar_paper_sol(context):
                         saida = take_profit
                         lucro_reais = quantidade * (saida - entrada)
                         lucro_percent = (lucro_reais / CAPITAL_PAPER) * 100
-                        finalizar_trade_paper(trade["id"], saida, lucro_percent, lucro_reais, "GANHO", "TAKE_PROFIT")
+                        resultado_trade = _construir_trade_result_paper(
+                            trade,
+                            saida,
+                            lucro_percent,
+                            lucro_reais,
+                            fonte_dados,
+                            "TAKE_PROFIT",
+                        )
+                        finalizar_trade_paper(
+                            trade["id"],
+                            resultado_trade.exit_price,
+                            resultado_trade.pnl_percent,
+                            resultado_trade.pnl_reais,
+                            resultado_trade.resultado,
+                            resultado_trade.reason,
+                        )
                         registrar_decisao_observabilidade(
                             symbol=PAPER_SYMBOL,
                             modo="PAPER_SOL",
@@ -265,7 +352,22 @@ async def monitorar_paper_sol(context):
                         saida = stop_loss
                         lucro_reais = quantidade * (entrada - saida)
                         lucro_percent = (lucro_reais / CAPITAL_PAPER) * 100
-                        finalizar_trade_paper(trade["id"], saida, lucro_percent, lucro_reais, "PERDA", "STOP")
+                        resultado_trade = _construir_trade_result_paper(
+                            trade,
+                            saida,
+                            lucro_percent,
+                            lucro_reais,
+                            fonte_dados,
+                            "STOP",
+                        )
+                        finalizar_trade_paper(
+                            trade["id"],
+                            resultado_trade.exit_price,
+                            resultado_trade.pnl_percent,
+                            resultado_trade.pnl_reais,
+                            resultado_trade.resultado,
+                            resultado_trade.reason,
+                        )
                         registrar_decisao_observabilidade(
                             symbol=PAPER_SYMBOL,
                             modo="PAPER_SOL",
@@ -289,7 +391,22 @@ async def monitorar_paper_sol(context):
                         saida = take_profit
                         lucro_reais = quantidade * (entrada - saida)
                         lucro_percent = (lucro_reais / CAPITAL_PAPER) * 100
-                        finalizar_trade_paper(trade["id"], saida, lucro_percent, lucro_reais, "GANHO", "TAKE_PROFIT")
+                        resultado_trade = _construir_trade_result_paper(
+                            trade,
+                            saida,
+                            lucro_percent,
+                            lucro_reais,
+                            fonte_dados,
+                            "TAKE_PROFIT",
+                        )
+                        finalizar_trade_paper(
+                            trade["id"],
+                            resultado_trade.exit_price,
+                            resultado_trade.pnl_percent,
+                            resultado_trade.pnl_reais,
+                            resultado_trade.resultado,
+                            resultado_trade.reason,
+                        )
                         registrar_decisao_observabilidade(
                             symbol=PAPER_SYMBOL,
                             modo="PAPER_SOL",
@@ -409,14 +526,15 @@ async def monitorar_paper_sol(context):
             )
             return
 
+        trade_intent = _construir_trade_intent_paper(sinal, quantidade, valor_arriscado, fonte_dados)
         trade_id = registrar_trade_paper(
-            PAPER_SYMBOL,
-            sinal["direcao"],
-            entrada,
-            stop_loss,
-            take_profit,
-            quantidade,
-            valor_arriscado,
+            trade_intent.symbol,
+            trade_intent.direction,
+            trade_intent.entry,
+            trade_intent.stop_loss,
+            trade_intent.take_profit,
+            trade_intent.quantity,
+            trade_intent.risk_amount,
             rr_planejado,
             filtros_aplicados=filtros_aplicados,
         )
