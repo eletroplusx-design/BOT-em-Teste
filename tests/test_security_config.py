@@ -11,7 +11,6 @@ ENV_KEYS = [
     "TELEGRAM_AUTHORIZED_CHAT_IDS",
     "TELEGRAM_GROUPS_ENABLED",
     "GROQ_API_KEY",
-    "NVIDIA_API_KEY",
     "TRADING_ENABLED",
     "LIVE_TRADING_ENABLED",
     "GLOBAL_KILL_SWITCH",
@@ -60,6 +59,7 @@ def test_valores_invalidos_e_vazios_fecham_seguro(monkeypatch, bad_value):
         GLOBAL_KILL_SWITCH=bad_value,
         TELEGRAM_BOT_TOKEN="token-teste",
         TELEGRAM_AUTHORIZED_IDS="123",
+        TELEGRAM_AUTHORIZED_CHAT_IDS="123",
     )
 
     assert config.TRADING_ENABLED is False
@@ -91,6 +91,7 @@ def test_tabela_verdade_completa(monkeypatch, trading, live, kill):
         GLOBAL_KILL_SWITCH="true" if kill else "false",
         TELEGRAM_BOT_TOKEN="token-teste",
         TELEGRAM_AUTHORIZED_IDS="123",
+        TELEGRAM_AUTHORIZED_CHAT_IDS="123",
     )
 
     assert config.TRADING_ENABLED is trading
@@ -105,6 +106,7 @@ def test_kill_switch_invalido_permanece_ligado(monkeypatch):
         GLOBAL_KILL_SWITCH="talvez",
         TELEGRAM_BOT_TOKEN="token-teste",
         TELEGRAM_AUTHORIZED_IDS="123",
+        TELEGRAM_AUTHORIZED_CHAT_IDS="123",
         TRADING_ENABLED="true",
         LIVE_TRADING_ENABLED="true",
     )
@@ -122,6 +124,7 @@ def test_config_contraditoria_falha_de_forma_segura(monkeypatch):
         GLOBAL_KILL_SWITCH="false",
         TELEGRAM_BOT_TOKEN="token-teste",
         TELEGRAM_AUTHORIZED_IDS="",
+        TELEGRAM_AUTHORIZED_CHAT_IDS="",
     )
 
     assert config.live_trading_permitted() is True
@@ -136,8 +139,8 @@ def test_ausencia_de_credenciais_e_ids(monkeypatch):
         monkeypatch,
         TELEGRAM_BOT_TOKEN="",
         GROQ_API_KEY="",
-        NVIDIA_API_KEY="",
         TELEGRAM_AUTHORIZED_IDS="",
+        TELEGRAM_AUTHORIZED_CHAT_IDS="",
     )
     valido, issues = config.validate_component_config("telegram")
     assert valido is False
@@ -156,8 +159,8 @@ def test_segredos_nao_vazam_nas_mensagens(monkeypatch):
         monkeypatch,
         TELEGRAM_BOT_TOKEN=secret,
         TELEGRAM_AUTHORIZED_IDS="abc",
+        TELEGRAM_AUTHORIZED_CHAT_IDS="123",
         GROQ_API_KEY=secret,
-        NVIDIA_API_KEY=secret,
         TRADING_ENABLED="maybe",
         LIVE_TRADING_ENABLED="maybe",
         GLOBAL_KILL_SWITCH="maybe",
@@ -171,3 +174,34 @@ def test_segredos_nao_vazam_nas_mensagens(monkeypatch):
     _, issues_live = config.validate_component_config("live")
     texto_live = " ".join(issues_live)
     assert secret not in texto_live
+
+
+def test_listas_de_ids_com_itens_vazios_sao_invalidas(monkeypatch):
+    config = _load_config(
+        monkeypatch,
+        TELEGRAM_BOT_TOKEN="token-teste",
+        TELEGRAM_AUTHORIZED_IDS="123,,456",
+        TELEGRAM_AUTHORIZED_CHAT_IDS="789, ,101",
+    )
+
+    assert config.TELEGRAM_AUTHORIZED_IDS_INVALID is True
+    assert config.TELEGRAM_AUTHORIZED_CHAT_IDS_INVALID is True
+    valido, issues = config.validate_component_config("telegram")
+    assert valido is False
+    assert any("TELEGRAM_AUTHORIZED_IDS" in issue for issue in issues)
+    assert any("TELEGRAM_AUTHORIZED_CHAT_IDS" in issue for issue in issues)
+
+
+def test_chat_type_ausente_ou_desconhecido_bloqueia(monkeypatch):
+    config = _load_config(
+        monkeypatch,
+        TELEGRAM_BOT_TOKEN="token-teste",
+        TELEGRAM_AUTHORIZED_IDS="123",
+        TELEGRAM_AUTHORIZED_CHAT_IDS="123",
+        TELEGRAM_GROUPS_ENABLED="true",
+    )
+
+    assert config.can_execute_sensitive_telegram_action(123, 123, None) is False
+    assert config.can_execute_sensitive_telegram_action(123, 123, "") is False
+    assert config.can_execute_sensitive_telegram_action(123, 123, "mystery") is False
+    assert config.can_execute_sensitive_telegram_action(123, 123, "group") is True

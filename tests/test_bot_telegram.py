@@ -328,7 +328,9 @@ def test_validar_sol_fluxos(monkeypatch):
     reg_mock = MagicMock(return_value=True)
     monkeypatch.setattr(bot_telegram, "registrar_validacao_sol", reg_mock)
     asyncio.run(bot_telegram.validar_sol(update_ok, context))
-    assert "SOL validada" in update_ok.message.reply_text.await_args_list[-1].args[0]
+    mensagem_validacao = update_ok.message.reply_text.await_args_list[-1].args[0].lower()
+    assert "resultado paper preliminar" in mensagem_validacao
+    assert "sol validada para operação real" not in mensagem_validacao
     assert reg_mock.called
 
 

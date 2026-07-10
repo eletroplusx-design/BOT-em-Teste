@@ -150,6 +150,25 @@ def calcular_posicao(
     if entrada <= 0 or stop <= 0:
         return {"aprovado": False, "motivo": "Entrada ou stop inválido (<= 0)"}
 
+    info = _buscar_exchange_info(symbol)
+    if not info.get("exchange_info_ok"):
+        return {
+            "aprovado": False,
+            "motivo": "Falha ao validar regras da exchange. Trade bloqueado por segurança.",
+            "quantidade": 0.0,
+            "valor_arriscado": capital * (risco_pct / 100),
+            "valor_nocional": 0.0,
+            "margem_necessaria": 0.0,
+            "alavancagem": alavancagem,
+            "risco_pct": risco_pct,
+            "entrada_ajustada": entrada,
+            "stop_ajustado": stop,
+            "distancia_pct": None,
+            "preco_precision": info.get("price_precision", 2),
+            "quantidade_precision": info.get("quantity_precision", 3),
+            "exchange_info_ok": False,
+        }
+
     distancia = abs(entrada - stop)
     if distancia <= 0:
         return {"aprovado": False, "motivo": "Distância entre entrada e stop é zero"}
@@ -173,7 +192,6 @@ def calcular_posicao(
     valor_arriscado = capital * (risco_pct / 100)
     quantidade_bruta = valor_arriscado / distancia
 
-    info = _buscar_exchange_info(symbol)
     step_size = info.get("step_size", 0.001)
     min_qty = info.get("min_qty", 0.001)
     max_qty = info.get("max_qty", 1000000)

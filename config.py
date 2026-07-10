@@ -34,7 +34,7 @@ def _parse_int_set(value: str | None) -> tuple[Set[int], bool]:
     for item in value.split(","):
         item = item.strip()
         if not item:
-            continue
+            return set(), True
         try:
             itens.add(int(item))
         except ValueError:
@@ -53,7 +53,6 @@ TELEGRAM_GROUPS_ENABLED, TELEGRAM_GROUPS_ENABLED_INVALID = _parse_bool(
 
 # APIs
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")
 
 # Trading switches
 TRADING_ENABLED, TRADING_ENABLED_INVALID = _parse_bool(os.getenv("TRADING_ENABLED"), False)
@@ -116,11 +115,20 @@ def can_execute_sensitive_telegram_action(
 ) -> bool:
     if not is_telegram_user_authorized(user_id):
         return False
-    if chat_type and str(chat_type).lower() != "private":
-        if not TELEGRAM_GROUPS_ENABLED or TELEGRAM_GROUPS_ENABLED_INVALID:
-            return False
-        if not is_telegram_chat_authorized(chat_id):
-            return False
+    if chat_type is None:
+        return False
+
+    normalized_chat_type = str(chat_type).strip().lower()
+    if not normalized_chat_type:
+        return False
+    if normalized_chat_type == "private":
+        return True
+    if normalized_chat_type not in {"group", "supergroup"}:
+        return False
+    if not TELEGRAM_GROUPS_ENABLED or TELEGRAM_GROUPS_ENABLED_INVALID:
+        return False
+    if not is_telegram_chat_authorized(chat_id):
+        return False
     return True
 
 
@@ -148,9 +156,6 @@ def validate_component_config(component: str) -> tuple[bool, list[str]]:
 
     if component in {"ai", "ia", "groq"} and not GROQ_API_KEY:
         issues.append("GROQ_API_KEY ausente ou invalida.")
-
-    if component in {"ai", "ia", "nvidia"} and not NVIDIA_API_KEY:
-        issues.append("NVIDIA_API_KEY ausente ou invalida.")
 
     if component in {"live", "orders", "execution"}:
         if TRADING_ENABLED_INVALID:

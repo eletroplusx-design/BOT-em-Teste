@@ -18,7 +18,6 @@ Copie `.env.example` para `.env` e preencha as variaveis necessarias:
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_AUTHORIZED_IDS`
 - `GROQ_API_KEY`
-- `NVIDIA_API_KEY`
 
 ## Executar o bot
 

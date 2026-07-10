@@ -182,16 +182,8 @@ async def validar_sol(update: Update, context: ContextTypes.DEFAULT_TYPE):
     drawdown_max = metricas["drawdown_max"]
     total = metricas["total"]
 
-    walkforward_pf = 1.34
-    walkforward_win = 45.56
-    walkforward_dd = 2.86
-    comparacao = (
-        f"Walk-forward: PF {fmt_num(walkforward_pf)}, Win {fmt_num(walkforward_win)}%, DD {fmt_num(walkforward_dd)}% | "
-        f"Paper: PF {fmt_num(pf)}, Win {fmt_num(win_rate)}%, DD {fmt_num(drawdown_max)}%"
-    )
-
     if pf > 1.0 and drawdown_max < 5.0:
-        resultado = f"✅ SOL validada para operação real (PF: {fmt_num(pf)}, Win: {fmt_num(win_rate)}%)"
+        resultado = f"✅ Resultado paper preliminar — não autoriza operação real (PF: {fmt_num(pf)}, Win: {fmt_num(win_rate)}%)"
     elif pf < 1.0:
         resultado = "❌ SOL ainda não validada. Aguarde mais trades ou ajuste os filtros."
     else:
@@ -203,7 +195,7 @@ async def validar_sol(update: Update, context: ContextTypes.DEFAULT_TYPE):
         win_rate=win_rate,
         drawdown_max=drawdown_max,
         resultado=resultado,
-        comparacao_walkforward=comparacao,
+        comparacao_walkforward="Resultado paper preliminar — sem métricas fixas de walk-forward na mensagem.",
     )
 
     await update.message.reply_text(
@@ -213,7 +205,7 @@ async def validar_sol(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Profit Factor: {fmt_num(pf)}\n"
         f"Win Rate: {fmt_num(win_rate)}%\n"
         f"Drawdown Máx.: {fmt_num(drawdown_max)}%\n\n"
-        f"{comparacao}"
+        "Resultado paper preliminar — não autoriza operação real."
     )
 
 

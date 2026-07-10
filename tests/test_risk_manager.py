@@ -54,7 +54,8 @@ def test_alavancagem_nao_multiplica_risco(monkeypatch):
     assert com_alavancagem["margem_necessaria"] == sem_alavancagem["valor_nocional"] / 10
 
 
-def test_bloqueio_distancia_zero():
+def test_bloqueio_distancia_zero(monkeypatch):
+    monkeypatch.setattr(risk_manager, "_buscar_exchange_info", lambda symbol, force_refresh=False: _fake_exchange_info())
     resultado = risk_manager.calcular_posicao(capital=10000, risco_pct=1.0, entrada=100, stop=100)
     assert resultado["aprovado"] is False
     assert "zero" in resultado["motivo"].lower()
@@ -127,3 +128,25 @@ def test_bloqueio_sequencia_perdas(monkeypatch):
     )
     assert resultado["aprovado"] is False
     assert "sequ" in resultado["motivo"].lower()
+
+
+def test_bloqueio_exchange_info_invalida(monkeypatch):
+    monkeypatch.setattr(
+        risk_manager,
+        "_buscar_exchange_info",
+        lambda symbol, force_refresh=False: {
+            "step_size": 0.001,
+            "min_qty": 0.001,
+            "max_qty": 1000,
+            "tick_size": 0.01,
+            "min_price": 0.01,
+            "max_price": 1000000,
+            "min_notional": 10.0,
+            "price_precision": 2,
+            "quantity_precision": 3,
+            "exchange_info_ok": False,
+        },
+    )
+    resultado = risk_manager.calcular_posicao(capital=10000, risco_pct=1.0, entrada=100, stop=95, symbol="BTCUSDT")
+    assert resultado["aprovado"] is False
+    assert "exchange" in resultado["motivo"].lower()
