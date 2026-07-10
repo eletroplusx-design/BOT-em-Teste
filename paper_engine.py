@@ -17,10 +17,12 @@ from decisor import (
     extrair_fvg_bullish_abaixo,
 )
 from regime_classifier import classificar_regime
-from domain_models import (
-    TradeIntent,
-    TradeResult,
-    coerce_signal,
+from domain import (
+    DomainValidationError,
+    legacy_signal_payload,
+    signal_from_legacy_mapping,
+    trade_intent_from_legacy_mapping,
+    trade_result_from_legacy_mapping,
 )
 from storage import (
     buscar_ultimo_decision_log,
@@ -56,7 +58,7 @@ ULTIMO_LOG_CACHE = {}
 
 
 def _construir_trade_intent_paper(sinal, quantidade, valor_arriscado, fonte_dados):
-    return TradeIntent.from_mapping(
+    return trade_intent_from_legacy_mapping(
         {
             "symbol": PAPER_SYMBOL,
             "direction": sinal.get("direcao"),
@@ -69,13 +71,12 @@ def _construir_trade_intent_paper(sinal, quantidade, valor_arriscado, fonte_dado
             "created_at": datetime.now(timezone.utc),
             "source": fonte_dados,
             "strategy_version": STRATEGY_VERSION,
-            "exchange_info_ok": True,
         }
     )
 
 
 def _construir_trade_result_paper(trade, saida, lucro_percent, lucro_reais, fonte_dados, motivo_saida):
-    return TradeResult.from_mapping(
+    return trade_result_from_legacy_mapping(
         {
             "symbol": PAPER_SYMBOL,
             "direction": trade["direcao"],
@@ -174,12 +175,13 @@ def _obter_sinal_paper_sol():
         if not sinal:
             return None
         try:
-            sinal_model = coerce_signal(sinal)
-            payload = sinal_model.to_dict()
-            payload.setdefault("direcao", payload.get("direction"))
-            payload.setdefault("entrada", payload.get("entry"))
+            sinal_model = signal_from_legacy_mapping(sinal, default_symbol=PAPER_SYMBOL)
+            payload = legacy_signal_payload(sinal_model)
             payload.setdefault("motivo", payload.get("reason"))
             return payload
+        except DomainValidationError as exc:
+            logging.warning(f"Falha ao validar sinal paper SOL: {exc}")
+            return None
         except Exception as exc:
             logging.warning(f"Falha ao validar sinal paper SOL: {exc}")
             return None
@@ -281,9 +283,9 @@ async def monitorar_paper_sol(context):
                         )
                         finalizar_trade_paper(
                             trade["id"],
-                            resultado_trade.exit_price,
-                            resultado_trade.pnl_percent,
-                            resultado_trade.pnl_reais,
+                            float(resultado_trade.exit_price),
+                            float(resultado_trade.pnl_percent),
+                            float(resultado_trade.pnl_reais),
                             resultado_trade.resultado,
                             resultado_trade.reason,
                         )
@@ -320,9 +322,9 @@ async def monitorar_paper_sol(context):
                         )
                         finalizar_trade_paper(
                             trade["id"],
-                            resultado_trade.exit_price,
-                            resultado_trade.pnl_percent,
-                            resultado_trade.pnl_reais,
+                            float(resultado_trade.exit_price),
+                            float(resultado_trade.pnl_percent),
+                            float(resultado_trade.pnl_reais),
                             resultado_trade.resultado,
                             resultado_trade.reason,
                         )
@@ -362,9 +364,9 @@ async def monitorar_paper_sol(context):
                         )
                         finalizar_trade_paper(
                             trade["id"],
-                            resultado_trade.exit_price,
-                            resultado_trade.pnl_percent,
-                            resultado_trade.pnl_reais,
+                            float(resultado_trade.exit_price),
+                            float(resultado_trade.pnl_percent),
+                            float(resultado_trade.pnl_reais),
                             resultado_trade.resultado,
                             resultado_trade.reason,
                         )
@@ -401,9 +403,9 @@ async def monitorar_paper_sol(context):
                         )
                         finalizar_trade_paper(
                             trade["id"],
-                            resultado_trade.exit_price,
-                            resultado_trade.pnl_percent,
-                            resultado_trade.pnl_reais,
+                            float(resultado_trade.exit_price),
+                            float(resultado_trade.pnl_percent),
+                            float(resultado_trade.pnl_reais),
                             resultado_trade.resultado,
                             resultado_trade.reason,
                         )
@@ -529,12 +531,12 @@ async def monitorar_paper_sol(context):
         trade_intent = _construir_trade_intent_paper(sinal, quantidade, valor_arriscado, fonte_dados)
         trade_id = registrar_trade_paper(
             trade_intent.symbol,
-            trade_intent.direction,
-            trade_intent.entry,
-            trade_intent.stop_loss,
-            trade_intent.take_profit,
-            trade_intent.quantity,
-            trade_intent.risk_amount,
+            trade_intent.direction.value,
+            float(trade_intent.entry),
+            float(trade_intent.stop_loss),
+            float(trade_intent.take_profit),
+            float(trade_intent.quantity),
+            float(trade_intent.risk_amount),
             rr_planejado,
             filtros_aplicados=filtros_aplicados,
         )
