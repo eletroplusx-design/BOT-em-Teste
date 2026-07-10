@@ -1,7 +1,7 @@
 python-telegram-bot==21.10
 python-dotenv==1.0.0
 pandas==2.2.0
-numpy==2.0.0
+numpy==1.26.4
 requests==2.31.0
 openai==1.30.0
 apscheduler==3.10.4

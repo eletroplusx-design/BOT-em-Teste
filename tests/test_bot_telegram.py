@@ -14,7 +14,11 @@ import bot_telegram
 @pytest.fixture(autouse=True)
 def _autorizar_chat_teste(monkeypatch):
     monkeypatch.setattr(config, "TELEGRAM_AUTHORIZED_IDS", {123})
+    monkeypatch.setattr(config, "TELEGRAM_AUTHORIZED_CHAT_IDS", {123})
+    monkeypatch.setattr(config, "TELEGRAM_GROUPS_ENABLED", False)
     monkeypatch.setattr(bot_telegram, "TELEGRAM_AUTHORIZED_IDS", {123})
+    monkeypatch.setattr(bot_telegram, "TELEGRAM_AUTHORIZED_CHAT_IDS", {123})
+    monkeypatch.setattr(bot_telegram, "TELEGRAM_GROUPS_ENABLED", False)
     yield
 
 
@@ -27,10 +31,11 @@ class FakeMessage:
 
 
 class FakeUpdate:
-    def __init__(self, text=None, callback_data=None):
+    def __init__(self, text=None, callback_data=None, user_id=123, chat_id=123, chat_type="private"):
         self.message = FakeMessage(text=text)
         self.callback_query = FakeCallbackQuery(callback_data) if callback_data is not None else None
-        self.effective_chat = SimpleNamespace(id=123)
+        self.effective_chat = SimpleNamespace(id=chat_id, type=chat_type)
+        self.effective_user = SimpleNamespace(id=user_id)
 
 
 class FakeCallbackQuery:
@@ -73,9 +78,9 @@ class FakeJobQueue:
 
 
 class FakeContext:
-    def __init__(self, job_queue=None, chat_id=123):
+    def __init__(self, job_queue=None, chat_id=123, user_id=123, chat_type="private"):
         self.job_queue = job_queue or FakeJobQueue()
-        self.job = SimpleNamespace(data={"chat_id": chat_id})
+        self.job = SimpleNamespace(data={"chat_id": chat_id, "user_id": user_id, "chat_type": chat_type})
         self.bot = SimpleNamespace(send_message=AsyncMock())
         self.user_data = {}
 
@@ -109,6 +114,37 @@ def test_start_exibe_observabilidade():
     assert "/paper_status" in mensagem
     assert "/paper_log" in mensagem
     assert "/mestre" in mensagem
+
+
+def test_autorizacao_privada_grupo_callback_e_job(monkeypatch):
+    import asyncio
+
+    update_privado_bloqueado = FakeUpdate(user_id=999)
+    contexto = FakeContext(user_id=999)
+    asyncio.run(bot_telegram.analisa(update_privado_bloqueado, contexto))
+    assert "Acesso negado" in update_privado_bloqueado.message.reply_text.await_args_list[-1].args[0]
+
+    update_chat_bloqueado = FakeUpdate(user_id=123, chat_id=123, chat_type="group")
+    asyncio.run(bot_telegram.analisa(update_chat_bloqueado, contexto))
+    assert "Acesso negado" in update_chat_bloqueado.message.reply_text.await_args_list[-1].args[0]
+
+    update_callback_bloqueado = FakeUpdate(callback_data="COMPRA", user_id=999)
+    asyncio.run(bot_telegram.trade_direcao(update_callback_bloqueado, contexto))
+    assert "Acesso negado" in update_callback_bloqueado.callback_query.edit_message_text.await_args_list[-1].args[0]
+
+    monkeypatch.setattr(bot_telegram, "baixar_dados_btc", lambda: (_ for _ in ()).throw(RuntimeError("nao deve chamar")))
+    contexto_job = FakeContext(user_id=999)
+    asyncio.run(bot_telegram.monitorar_preco(contexto_job))
+    assert contexto_job.bot.send_message.await_count == 0
+
+
+def test_vigia_grupo_desativado_por_padrao(monkeypatch):
+    import asyncio
+
+    update = FakeUpdate(user_id=123, chat_id=777, chat_type="group")
+    context = FakeContext(user_id=123, chat_id=777, chat_type="group")
+    asyncio.run(bot_telegram.ativar_vigia(update, context))
+    assert "Acesso negado" in update.message.reply_text.await_args_list[-1].args[0]
 
 
 def test_analisa_sucesso_e_erro(monkeypatch):

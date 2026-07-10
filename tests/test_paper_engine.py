@@ -13,12 +13,14 @@ import paper_engine
 @pytest.fixture(autouse=True)
 def _autorizar_chat_teste(monkeypatch):
     monkeypatch.setattr(config, "TELEGRAM_AUTHORIZED_IDS", {123})
+    monkeypatch.setattr(config, "TELEGRAM_AUTHORIZED_CHAT_IDS", {123})
+    monkeypatch.setattr(config, "TELEGRAM_GROUPS_ENABLED", False)
     yield
 
 
 class FakeContext:
-    def __init__(self, chat_id=123):
-        self.job = SimpleNamespace(data={"chat_id": chat_id})
+    def __init__(self, chat_id=123, user_id=123, chat_type="private"):
+        self.job = SimpleNamespace(data={"chat_id": chat_id, "user_id": user_id, "chat_type": chat_type})
         self.bot = SimpleNamespace(send_message=AsyncMock())
 
 
@@ -472,3 +474,16 @@ def test_monitorar_paper_sol_backtester_erro_generico(monkeypatch):
     contexto = FakeContext()
     asyncio.run(paper_engine.monitorar_paper_sol(contexto))
     assert any(call.kwargs.get("decisao") == "ERRO" for call in decisao_mock.call_args_list)
+
+
+def test_monitorar_paper_sol_bloqueia_usuario_nao_autorizado(monkeypatch):
+    fake_backtester = MagicMock()
+    fake_backtester.baixar_dados_historicos.return_value = _df_monitoramento_compra()
+    monkeypatch.setattr(paper_engine, "backtester", fake_backtester)
+    decisao_mock = MagicMock()
+    monkeypatch.setattr(paper_engine, "registrar_decisao_observabilidade", decisao_mock)
+
+    contexto = FakeContext(user_id=999)
+    asyncio.run(paper_engine.monitorar_paper_sol(contexto))
+
+    assert decisao_mock.call_count == 0

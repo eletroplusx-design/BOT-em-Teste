@@ -34,11 +34,15 @@ from config import (
     MODO_OPERACAO,
     LIVE_TRADING_ENABLED,
     PAPER_TRADING_ATIVO as CONFIG_PAPER_TRADING_ATIVO,
+    TELEGRAM_AUTHORIZED_CHAT_IDS,
     TELEGRAM_AUTHORIZED_IDS,
+    TELEGRAM_GROUPS_ENABLED,
     TRADING_ENABLED,
     RISCO_PERCENTUAL_PADRAO,
     TELEGRAM_BOT_TOKEN,
+    can_execute_sensitive_telegram_action,
     is_telegram_authorized,
+    is_telegram_chat_authorized,
     live_trading_permitted,
     validate_component_config,
 )
@@ -122,7 +126,7 @@ def esta_em_killzone():
 
 
 def _responder_acesso_negado(update):
-    mensagem = "⛔ Acesso negado. Usuário não autorizado."
+    mensagem = "⛔ Acesso negado."
     if getattr(update, "callback_query", None):
         return update.callback_query.edit_message_text(mensagem)
     if getattr(update, "message", None):
@@ -130,17 +134,26 @@ def _responder_acesso_negado(update):
     return None
 
 
+def _obter_contexto_autorizacao(update):
+    effective_user = getattr(update, "effective_user", None)
+    effective_chat = getattr(update, "effective_chat", None)
+    user_id = getattr(effective_user, "id", None)
+    chat_id = getattr(effective_chat, "id", None)
+    chat_type = getattr(effective_chat, "type", None)
+    return user_id, chat_id, chat_type
+
+
 def requer_autorizacao(func):
     @wraps(func)
     async def wrapper(update, context, *args, **kwargs):
-        chat_id = getattr(getattr(update, "effective_chat", None), "id", None)
-        if not is_telegram_authorized(chat_id):
-            logging.warning("Acesso negado ao Telegram para chat_id=%s em %s", chat_id, func.__name__)
+        user_id, chat_id, chat_type = _obter_contexto_autorizacao(update)
+        if not can_execute_sensitive_telegram_action(user_id, chat_id, chat_type):
+            logging.warning("Acesso negado ao Telegram.")
             if getattr(update, "callback_query", None):
                 await update.callback_query.answer()
-                await update.callback_query.edit_message_text("⛔ Acesso negado. Usuário não autorizado.")
+                await update.callback_query.edit_message_text("⛔ Acesso negado.")
             elif getattr(update, "message", None):
-                await update.message.reply_text("⛔ Acesso negado. Usuário não autorizado.")
+                await update.message.reply_text("⛔ Acesso negado.")
             return None
         return await func(update, context, *args, **kwargs)
 
@@ -700,9 +713,12 @@ async def comando_backtest(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def monitorar_preco(context: ContextTypes.DEFAULT_TYPE):
     global vigia_ativo, ultimo_regime_vigia, ultimo_alerta_timestamp
     try:
-        chat_id = context.job.data['chat_id']
-        if not is_telegram_authorized(chat_id):
-            logging.warning("Monitoramento BTC bloqueado para chat_id=%s", chat_id)
+        job_data = getattr(context.job, "data", {}) or {}
+        chat_id = job_data.get("chat_id")
+        user_id = job_data.get("user_id")
+        chat_type = job_data.get("chat_type")
+        if not can_execute_sensitive_telegram_action(user_id, chat_id, chat_type):
+            logging.warning("Monitoramento BTC bloqueado por autorizacao.")
             return
         df = baixar_dados_btc()
         if df.empty:
@@ -973,6 +989,7 @@ async def ativar_vigia(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if vigia_ativo:
         await update.message.reply_text("⚠️ Vigia já está ativo! Use /parar para desligar antes de ativar novamente.")
         return
+    user_id, chat_id, chat_type = _obter_contexto_autorizacao(update)
     jobs = context.job_queue.get_jobs_by_name("vigia_btc")
     if jobs:
         vigia_ativo = True
@@ -988,12 +1005,12 @@ async def ativar_vigia(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.job_queue.run_repeating(
         monitorar_preco, interval=60, first=10,
-        name="vigia_btc", data={'chat_id': update.effective_chat.id}
+        name="vigia_btc", data={'chat_id': chat_id, 'user_id': user_id, 'chat_type': chat_type}
     )
     if PAPER_TRADING_ATIVO and not context.job_queue.get_jobs_by_name(PAPER_JOB_NAME):
         context.job_queue.run_repeating(
             monitorar_paper_sol, interval=60, first=15,
-            name=PAPER_JOB_NAME, data={'chat_id': update.effective_chat.id}
+            name=PAPER_JOB_NAME, data={'chat_id': chat_id, 'user_id': user_id, 'chat_type': chat_type}
         )
     vigia_ativo = True
     await update.message.reply_text(f"🔍 Vigia ativado! Monitorando a cada 1 minuto. Adapta-se ao regime automaticamente.\nModo: {MODO_OPERACAO}\nPara parar, use /parar.")
@@ -1430,7 +1447,7 @@ def main():
         logging.error("Configuracao do Telegram invalida: %s", "; ".join(issues_fatais))
         return
 
-    issues_nao_fatais = [issue for issue in issues if "TELEGRAM_AUTHORIZED_IDS" in issue]
+    issues_nao_fatais = [issue for issue in issues if "TELEGRAM_BOT_TOKEN" not in issue]
     if issues_nao_fatais:
         logging.warning("; ".join(issues_nao_fatais))
 

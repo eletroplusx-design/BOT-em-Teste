@@ -9,7 +9,7 @@ from config import (
     STRATEGY_VERSION,
     VOLUME_MINIMO,
     KILLZONE_SOL,
-    is_telegram_authorized,
+    can_execute_sensitive_telegram_action,
 )
 from decisor import (
     tomar_decisao,
@@ -150,9 +150,12 @@ async def monitorar_paper_sol(context):
         return
 
     try:
-        chat_id = context.job.data["chat_id"]
-        if not is_telegram_authorized(chat_id):
-            logging.warning("Monitoramento paper SOL bloqueado para chat_id=%s", chat_id)
+        job_data = getattr(context.job, "data", {}) or {}
+        chat_id = job_data.get("chat_id")
+        user_id = job_data.get("user_id")
+        chat_type = job_data.get("chat_type")
+        if not can_execute_sensitive_telegram_action(user_id, chat_id, chat_type):
+            logging.warning("Monitoramento paper SOL bloqueado por autorizacao.")
             return
         if backtester is None:
             registrar_decisao_observabilidade(
