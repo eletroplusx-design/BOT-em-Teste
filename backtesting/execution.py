@@ -119,6 +119,20 @@ def resolve_gap_exit_execution(position: Position, candle: Candle, *, costs: Cos
     )
 
 
+def resolve_final_close_execution(position: Position, candle: Candle, *, costs: CostModel) -> ExecutionDecision:
+    breakdown = costs.build_exit(candle.close, position.quantity, position.direction)
+    return ExecutionDecision(
+        base_price=breakdown.base_price,
+        fill_price=breakdown.fill_price,
+        reason="FINAL_CLOSE",
+        timestamp=_coerce_utc(candle.close_time),
+        fee=breakdown.fee,
+        spread_cost=breakdown.spread_cost,
+        slippage_cost=breakdown.slippage_cost,
+        gap_handled=False,
+    )
+
+
 def build_entry_fill(order: PaperOrder, execution: ExecutionDecision) -> Fill:
     return Fill(
         price=execution.fill_price,

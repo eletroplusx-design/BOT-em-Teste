@@ -74,7 +74,8 @@ class Portfolio:
         if not risk_decision.allowed or not risk_decision.exchange_info_ok:
             raise BacktestConfigurationError("Risk decision blocks the position.")
 
-        required_cash = entry_execution.fill_price * order.quantity + entry_execution.fee
+        required_margin = (entry_execution.fill_price * order.quantity) / self.config.leverage
+        required_cash = required_margin + entry_execution.fee
         if required_cash > self.cash:
             raise BacktestConfigurationError("Insufficient capital for position.")
         position = Position(

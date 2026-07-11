@@ -21,6 +21,8 @@ from backtesting import (
 )
 from backtesting.errors import BacktestDataError
 from backtesting.models import ExecutedTrade, EquityPoint
+from backtesting.portfolio import Portfolio
+from backtesting.execution import ExecutionDecision
 from domain import Candle, DataSource, Direction, DomainValidationError, Fill, OrderStatus, PaperOrder, Position, PositionStatus, RiskDecision, Signal, TradeResult, TradeResultStatus, TradingMode
 
 
@@ -192,6 +194,61 @@ def test_engine_no_lookahead_and_prefix_only():
     assert result.final_capital == Decimal("10000")
 
 
+def test_engine_nao_vaza_lucro_futuro_e_mantem_snapshot_cronologico():
+    candles_a = (
+        _candle(datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc), "100", "101", "99", "100", "1000"),
+        _candle(datetime(2026, 1, 1, 1, 0, tzinfo=timezone.utc), "100", "101", "99", "100", "1000"),
+        _candle(datetime(2026, 1, 1, 2, 0, tzinfo=timezone.utc), "100", "101", "99", "100", "1000"),
+        _candle(datetime(2026, 1, 1, 3, 0, tzinfo=timezone.utc), "100", "101", "99", "100", "1000"),
+        _candle(datetime(2026, 1, 1, 4, 0, tzinfo=timezone.utc), "100", "101", "99", "100", "1000"),
+        _candle(datetime(2026, 1, 1, 5, 0, tzinfo=timezone.utc), "100", "112", "99", "111", "1000"),
+    )
+    candles_b = candles_a[:-1] + (
+        _candle(datetime(2026, 1, 1, 5, 0, tzinfo=timezone.utc), "100", "120", "99", "119", "1000"),
+    )
+
+    snapshots = []
+
+    def strategy(history, snapshot):
+        snapshots.append(
+            {
+                "timestamp": snapshot.timestamp,
+                "equity": snapshot.equity,
+                "cash": snapshot.cash,
+                "open_positions": snapshot.open_positions,
+                "realized_pnl": snapshot.realized_pnl,
+            }
+        )
+        if len(history) == 1:
+            return _signal(history[-1].close_time, entry=Decimal("100"), stop=Decimal("95"), take=Decimal("110"))
+        return None
+
+    engine = LeakFreeBacktestEngine(BacktestConfig(initial_capital=Decimal("10000"), risk_percent=Decimal("1")))
+    result_a = engine.run(candles_a, strategy)
+    snapshots_a = list(snapshots)
+
+    snapshots.clear()
+    result_b = engine.run(candles_b, strategy)
+    snapshots_b = list(snapshots)
+
+    assert len(result_a.trades) == 1
+    assert len(result_b.trades) == 1
+    assert result_a.trades[0].exit_index == 5
+    assert result_b.trades[0].exit_index == 5
+    assert result_a.trades[0].trade.reason == "TAKE_PROFIT"
+    assert result_b.trades[0].trade.reason == "TAKE_PROFIT"
+    assert result_a.trades[0].gap_handled is False
+    assert result_b.trades[0].gap_handled is False
+
+    assert snapshots_a == snapshots_b
+    assert all(item["realized_pnl"] == Decimal("0") for item in snapshots_a[1:5])
+    assert all(item["realized_pnl"] == Decimal("0") for item in snapshots_b[1:5])
+    assert all(item["open_positions"] == 1 for item in snapshots_a[1:5])
+    assert all(item["open_positions"] == 1 for item in snapshots_b[1:5])
+    assert snapshots_a[4]["cash"] == snapshots_b[4]["cash"]
+    assert snapshots_a[4]["equity"] == snapshots_b[4]["equity"]
+
+
 def test_engine_intrabar_stop_first_e_gap_open():
     candles = (
         _candle(datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc), "100", "101", "99", "100", "1000"),
@@ -271,7 +328,7 @@ def test_engine_gap_policy_open_price_and_strict_rejects_gap():
     engine = LeakFreeBacktestEngine(BacktestConfig(gap_policy=GapPolicy.OPEN_PRICE, slippage_rate=Decimal("0"), commission_rate=Decimal("0")))
     result = engine.run(open_price_candles, strategy)
     assert result.trades[0].trade.reason == "GAP_STOP"
-    assert result.trades[0].exit_fill.price == Decimal("90")
+    assert result.trades[0].exit_fill.price == Decimal("89.97750")
 
 
 def test_engine_allow_short_false_bloqueia_venda():
@@ -341,6 +398,23 @@ def test_engine_risk_decision_bloqueada_sem_fill():
     engine = LeakFreeBacktestEngine(BacktestConfig(slippage_rate=Decimal("0"), commission_rate=Decimal("0")))
     result = engine.run(candles, strategy, risk_decision_provider=blocked_risk)
     assert result.trades == ()
+
+
+def test_engine_risk_provider_invalido_falha_tipado():
+    candles = (
+        _candle(datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc), "100", "101", "99", "100", "1000"),
+        _candle(datetime(2026, 1, 1, 1, 0, tzinfo=timezone.utc), "100", "112", "94", "105", "1000"),
+    )
+
+    def strategy(history, snapshot):
+        if len(history) == 1:
+            return _signal(history[-1].close_time, entry=Decimal("100"), stop=Decimal("95"), take=Decimal("110"))
+        return None
+
+    engine = LeakFreeBacktestEngine(BacktestConfig(slippage_rate=Decimal("0"), commission_rate=Decimal("0")))
+
+    with pytest.raises(BacktestConfigurationError):
+        engine.run(candles, strategy, risk_decision_provider=lambda snapshot, order: {"allowed": True})
 
 
 def test_engine_exchange_info_false_bloqueia():
@@ -458,6 +532,63 @@ def test_metrics_sem_perdas_nao_retornam_infinito():
     assert metrics["average_loss"] is None
 
 
+def test_backtest_config_spread_default_e_leverage_efetiva():
+    config = BacktestConfig()
+    assert config.spread_bps > 0
+    assert config.leverage == Decimal("1")
+
+    order = PaperOrder(
+        symbol="BTCUSDT",
+        direction=Direction.COMPRA,
+        entry=Decimal("100"),
+        quantity=Decimal("1"),
+        stop_loss=Decimal("50"),
+        take_profit=Decimal("150"),
+        opened_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        status=OrderStatus.OPEN,
+        source=DataSource.PAPER,
+        paper=True,
+        trading_mode=TradingMode.PAPER,
+    )
+    entry_execution = ExecutionDecision(
+        base_price=Decimal("100"),
+        fill_price=Decimal("100"),
+        reason="ENTRY",
+        timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        fee=Decimal("0"),
+        spread_cost=Decimal("0"),
+        slippage_cost=Decimal("0"),
+    )
+    approved = RiskDecision(
+        allowed=True,
+        reason="ok",
+        blocked_by="N/A",
+        capital=Decimal("60"),
+        risk_percent=Decimal("1"),
+        exposure=Decimal("0"),
+        timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        exchange_info_ok=True,
+        strategy_version="v3_leak_free",
+        notes="",
+    )
+
+    portfolio_sem_leverage = Portfolio(
+        Decimal("60"),
+        BacktestConfig(initial_capital=Decimal("60"), leverage=Decimal("1"), slippage_rate=Decimal("0"), commission_rate=Decimal("0")),
+        cost_model=LeakFreeBacktestEngine(BacktestConfig(initial_capital=Decimal("60"), leverage=Decimal("1"), slippage_rate=Decimal("0"), commission_rate=Decimal("0"))).cost_model,
+    )
+    with pytest.raises(BacktestConfigurationError):
+        portfolio_sem_leverage.open_position(order, entry_execution, entry_index=0, risk_decision=approved)
+
+    portfolio_com_leverage = Portfolio(
+        Decimal("60"),
+        BacktestConfig(initial_capital=Decimal("60"), leverage=Decimal("2"), slippage_rate=Decimal("0"), commission_rate=Decimal("0")),
+        cost_model=LeakFreeBacktestEngine(BacktestConfig(initial_capital=Decimal("60"), leverage=Decimal("2"), slippage_rate=Decimal("0"), commission_rate=Decimal("0"))).cost_model,
+    )
+    position = portfolio_com_leverage.open_position(order, entry_execution, entry_index=0, risk_decision=approved)
+    assert position.symbol == "BTCUSDT"
+
+
 def test_engine_final_close_com_custos_e_exposicao_registrados():
     candles = (
         _candle(datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc), "100", "101", "99", "100", "1000"),
@@ -492,7 +623,7 @@ def test_engine_final_close_com_custos_e_exposicao_registrados():
     assert len(result.trades) == 1
     trade = result.trades[0]
     assert trade.trade.reason == "FINAL_CLOSE"
-    assert trade.gap_handled is True
+    assert trade.gap_handled is False
     assert trade.entry_fee > 0
     assert trade.exit_fee > 0
     assert trade.spread_cost > 0

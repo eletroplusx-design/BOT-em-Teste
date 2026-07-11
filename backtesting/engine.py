@@ -11,30 +11,13 @@ from domain.validation import DomainValidationError
 from .adapters import strategy_output_to_order
 from .costs import CostModel
 from .errors import BacktestConfigurationError, BacktestDataError, BacktestGapError
-from .execution import resolve_entry_execution, resolve_exit_execution, resolve_gap_exit_execution
+from .execution import resolve_entry_execution, resolve_exit_execution, resolve_final_close_execution
 from .metrics import compute_metrics
 from .models import BacktestConfig, BacktestResult, EquityPoint, PortfolioSnapshot
 from .portfolio import Portfolio
 
 
 RiskDecisionProvider = Callable[[PortfolioSnapshot, object], RiskDecision]
-
-
-def _approved_risk_decision(snapshot: PortfolioSnapshot, order: object) -> RiskDecision:
-    capital = snapshot.equity
-    risk_percent = Decimal("1")
-    return RiskDecision(
-        allowed=True,
-        reason="Approved for leak-free backtest.",
-        blocked_by="N/A",
-        capital=capital,
-        risk_percent=risk_percent,
-        exposure=Decimal("0"),
-        timestamp=snapshot.timestamp,
-        exchange_info_ok=True,
-        strategy_version="v3_leak_free",
-        notes="",
-    )
 
 
 class LeakFreeBacktestEngine:
@@ -45,6 +28,33 @@ class LeakFreeBacktestEngine:
             exit_fee_rate=self.config.exit_fee_rate,
             spread_bps=self.config.spread_bps,
             slippage_bps=self.config.slippage_bps,
+        )
+
+    def _default_risk_decision_provider(self, snapshot: PortfolioSnapshot, order: object) -> RiskDecision:
+        capital = snapshot.equity
+        quantity = getattr(order, "quantity", Decimal("0"))
+        entry = getattr(order, "entry", Decimal("0"))
+        leverage = self.config.leverage
+        exposure = Decimal("0")
+        try:
+            exposure = (Decimal(str(entry)) * Decimal(str(quantity))) / leverage if leverage > 0 else Decimal("0")
+        except Exception:
+            exposure = Decimal("0")
+
+        allowed = capital > 0 and quantity > 0 and exposure <= capital
+        reason = "Approved by default risk policy." if allowed else "Insufficient capital for default risk policy."
+        blocked_by = "N/A" if allowed else "RISK"
+        return RiskDecision(
+            allowed=allowed,
+            reason=reason,
+            blocked_by=blocked_by,
+            capital=capital,
+            risk_percent=self.config.risk_percent,
+            exposure=exposure,
+            timestamp=snapshot.timestamp,
+            exchange_info_ok=True,
+            strategy_version=self.config.strategy_version,
+            notes="",
         )
 
     def _validate_series(self, candles: Sequence[Candle]) -> None:
@@ -72,9 +82,11 @@ class LeakFreeBacktestEngine:
 
     def run(self, candles: Sequence[Candle], strategy, *, risk_decision_provider: RiskDecisionProvider | None = None) -> BacktestResult:
         self._validate_series(candles)
-        provider = risk_decision_provider or _approved_risk_decision
+        provider = risk_decision_provider or self._default_risk_decision_provider
         portfolio = Portfolio(self.config.initial_capital, self.config, self.cost_model)
         trades = []
+        pending_order = None
+        pending_risk_decision = None
 
         initial_timestamp = candles[0].open_time
         portfolio.equity_curve.append(
@@ -87,17 +99,49 @@ class LeakFreeBacktestEngine:
         )
 
         for idx, candle in enumerate(candles):
+            if pending_order is not None:
+                entry_execution = resolve_entry_execution(pending_order, candle, self.cost_model)
+                try:
+                    portfolio.open_position(
+                        pending_order,
+                        entry_execution,
+                        entry_index=idx,
+                        risk_decision=pending_risk_decision,
+                    )
+                except (BacktestConfigurationError, DomainValidationError):
+                    pending_order = None
+                    pending_risk_decision = None
+                else:
+                    pending_order = None
+                    pending_risk_decision = None
+
+            open_symbols = list(portfolio.open_positions.keys())
+            for symbol in open_symbols:
+                exit_decision = resolve_exit_execution(
+                    portfolio.open_positions[symbol].position,
+                    candle,
+                    costs=self.cost_model,
+                    intrabar_policy=self.config.intrabar_policy,
+                )
+                if exit_decision is None:
+                    continue
+                executed_trade = portfolio.close_position(
+                    symbol,
+                    exit_decision,
+                    exit_reason=exit_decision.reason,
+                    exit_index=idx,
+                    gap_handled=exit_decision.gap_handled,
+                )
+                trades.append(executed_trade)
+
             current_prices = {symbol: state.position.entry for symbol, state in portfolio.open_positions.items()}
             current_prices[candle.symbol] = candle.close
             portfolio.mark_equity(current_prices, candle.close_time)
 
+            snapshot = portfolio.snapshot(candle.close_time, current_prices)
             if idx >= len(candles) - 1:
                 continue
 
-            if portfolio.open_positions:
-                continue
-
-            snapshot = portfolio.snapshot(candle.close_time, current_prices)
             strategy_output = strategy(candles[: idx + 1], snapshot)
             order = strategy_output_to_order(
                 strategy_output,
@@ -106,63 +150,36 @@ class LeakFreeBacktestEngine:
             )
             if order is None:
                 continue
+            if portfolio.open_positions or pending_order is not None:
+                continue
             if order.direction.value == "VENDA" and not self.config.allow_short:
                 continue
 
             risk_decision = provider(snapshot, order)
+            if not isinstance(risk_decision, RiskDecision):
+                raise BacktestConfigurationError("risk_decision_provider must return RiskDecision.")
             if not risk_decision.allowed or not risk_decision.exchange_info_ok:
                 continue
 
             if order.symbol != self.config.symbol or self.config.interval != candle.interval:
                 continue
 
-            entry_idx = idx + 1
-            if entry_idx >= len(candles):
-                continue
-
-            entry_candle = candles[entry_idx]
-            entry_execution = resolve_entry_execution(order, entry_candle, self.cost_model)
-            try:
-                portfolio.open_position(order, entry_execution, entry_index=entry_idx, risk_decision=risk_decision)
-            except (BacktestConfigurationError, DomainValidationError):
-                continue
-
-            if entry_idx == len(candles) - 1:
-                continue
-
-            exit_idx = entry_idx
-            while exit_idx < len(candles):
-                active_candle = candles[exit_idx]
-                exit_decision = resolve_exit_execution(
-                    portfolio.open_positions[order.symbol].position,
-                    active_candle,
-                    costs=self.cost_model,
-                    intrabar_policy=self.config.intrabar_policy,
-                )
-                if exit_decision is not None:
-                    executed_trade = portfolio.close_position(
-                        order.symbol,
-                        exit_decision,
-                        exit_reason=exit_decision.reason,
-                        exit_index=exit_idx,
-                        gap_handled=exit_decision.gap_handled,
-                    )
-                    trades.append(executed_trade)
-                    break
-                exit_idx += 1
+            pending_order = order
+            pending_risk_decision = risk_decision
 
         if portfolio.open_positions and self.config.close_open_positions_at_end:
             final_candle = candles[-1]
             for symbol, state in list(portfolio.open_positions.items()):
-                exit_execution = resolve_gap_exit_execution(state.position, final_candle, costs=self.cost_model)
+                exit_execution = resolve_final_close_execution(state.position, final_candle, costs=self.cost_model)
                 executed_trade = portfolio.close_position(
                     symbol,
                     exit_execution,
                     exit_reason=exit_execution.reason,
                     exit_index=len(candles) - 1,
-                    gap_handled=True,
+                    gap_handled=False,
                 )
                 trades.append(executed_trade)
+            portfolio.mark_equity({symbol: state.position.entry for symbol, state in portfolio.open_positions.items()}, final_candle.close_time)
 
         summary = compute_metrics(
             trades,

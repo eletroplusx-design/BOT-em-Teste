@@ -31,7 +31,7 @@ class BacktestConfig:
     slippage_rate: Decimal | None = None
     entry_fee_rate: Decimal = Decimal("0.0004")
     exit_fee_rate: Decimal = Decimal("0.0004")
-    spread_bps: Decimal = Decimal("0")
+    spread_bps: Decimal = Decimal("5")
     slippage_bps: Decimal = Decimal("5")
     leverage: Decimal = Decimal("1")
     symbol: str = "BTCUSDT"

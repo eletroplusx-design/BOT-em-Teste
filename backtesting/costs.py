@@ -20,7 +20,7 @@ class CostBreakdown:
 class CostModel:
     entry_fee_rate: Decimal = Decimal("0.0004")
     exit_fee_rate: Decimal = Decimal("0.0004")
-    spread_bps: Decimal = Decimal("0")
+    spread_bps: Decimal = Decimal("5")
     slippage_bps: Decimal = Decimal("5")
 
     def __post_init__(self) -> None:
