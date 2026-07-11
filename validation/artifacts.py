@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
+import pandas as pd
+
 from .models import CandidateConfig, FrozenSelection, ValidationSplitConfig, WindowBounds
 
 
@@ -26,6 +28,62 @@ def _normalize(value: Any) -> Any:
     if hasattr(value, "as_dict"):
         return _normalize(value.as_dict())
     return value
+
+
+def _normalize_content_scalar(value: Any) -> Any:
+    if isinstance(value, datetime):
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("datetime must be timezone-aware")
+        return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    if isinstance(value, Decimal):
+        return str(value)
+    if pd.isna(value):
+        return None
+    if hasattr(value, "item"):
+        try:
+            value = value.item()
+        except Exception:
+            pass
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
+def build_data_signature(df: pd.DataFrame, *, symbol: str, interval: str) -> dict[str, Any]:
+    if df is None or df.empty:
+        return {
+            "symbol": symbol,
+            "interval": interval,
+            "rows": 0,
+            "first_open_time": None,
+            "last_open_time": None,
+            "content_hash": hashlib.sha256(b"").hexdigest(),
+        }
+
+    columns = [column for column in ("open_time", "open", "high", "low", "close", "volume") if column in df.columns]
+    payload_rows = []
+    for _, row in df[columns].iterrows():
+        payload_rows.append({column: _normalize_content_scalar(row[column]) for column in columns})
+    serialized = json.dumps(
+        {
+            "symbol": symbol,
+            "interval": interval,
+            "rows": payload_rows,
+        },
+        sort_keys=True,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    first_open = _normalize_content_scalar(df.iloc[0]["open_time"]) if "open_time" in df.columns else None
+    last_open = _normalize_content_scalar(df.iloc[-1]["open_time"]) if "open_time" in df.columns else None
+    return {
+        "symbol": symbol,
+        "interval": interval,
+        "rows": len(df),
+        "first_open_time": first_open,
+        "last_open_time": last_open,
+        "content_hash": hashlib.sha256(serialized.encode("utf-8")).hexdigest(),
+    }
 
 
 def manifest_hash(manifest: Mapping[str, Any]) -> str:

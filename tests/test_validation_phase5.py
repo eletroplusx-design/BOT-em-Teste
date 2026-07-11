@@ -15,12 +15,16 @@ from validation import (
     ValidationEvaluationError,
     ValidationFreezeError,
     ValidationSelectionError,
+    ValidationSplitError,
     ValidationSplitConfig,
     WalkForwardValidator,
     aggregate_run_statistics,
     aggregate_segment_metrics,
+    build_data_signature,
     build_manifest,
     build_expanding_windows,
+    build_segment_view,
+    build_window_segment_views,
     build_rolling_windows,
     compute_candidate_stability,
     freeze_selection,
@@ -30,6 +34,8 @@ from validation import (
 from validation.evaluation import evaluate_frozen_selection
 from validation.models import SegmentMetrics
 from validation.splits import slice_window_frames
+from backtesting import BacktestConfig, LeakFreeBacktestEngine, dataframe_to_candles
+from domain import DataSource, Direction, Signal
 
 
 def _metrics(
@@ -78,11 +84,89 @@ def _candidate(name: str, **parameters) -> CandidateConfig:
     return CandidateConfig.from_mapping(name, parameters)
 
 
+def _signal(timestamp, *, entry, stop, take):
+    return Signal(
+        symbol="BTCUSDT",
+        direction=Direction.COMPRA,
+        entry=entry,
+        stop_loss=stop,
+        take_profit=take,
+        rr=Decimal("2"),
+        timestamp=timestamp,
+        source=DataSource.PAPER,
+        score=Decimal("7"),
+        regime="BULL",
+        volume_status="ALTO",
+        reason="warmup gated",
+        strategy_version="v3_leak_free",
+    )
+
+
 def _window_runner_factory(train_validation_scores, test_scores):
     def runner(df, candidate, segment, context=None, frozen_selection=None):
+        context = context or {}
+        assert "slices" not in context
+        assert "test_metrics" not in context
+        assert "candidate_evaluations" not in context
+        assert "window" not in context
+        assert "test" not in context
+        assert "train" not in context
+        assert "validation" not in context
+        assert "segment" in context
+        segment_meta = context["segment"]
+        assert segment_meta["segment_end"] >= segment_meta["segment_start"]
+        assert len(df) == segment_meta["warmup_rows"] + segment_meta["segment_rows"]
+        assert context["trade_start_index"] == segment_meta["trade_start_index"]
+        if segment == "test":
+            assert "frozen_selection" in context
+        else:
+            assert "frozen_selection" not in context
         mapping = train_validation_scores if segment in {"train", "validation"} else test_scores
         metrics = mapping[candidate.name]
         return {"summary": metrics.as_dict()}
+
+    return runner
+
+
+def _engine_runner_factory():
+    def runner(df, candidate, segment, context=None, frozen_selection=None):
+        context = context or {}
+        segment_meta = context["segment"]
+        trade_start_index = segment_meta["trade_start_index"]
+        candles = dataframe_to_candles(df, symbol="BTCUSDT", interval="1h")
+        triggered = False
+
+        def strategy(history, snapshot):
+            nonlocal triggered
+            idx = len(history) - 1
+            if idx < trade_start_index:
+                return None
+            if not triggered and snapshot.open_positions == 0:
+                triggered = True
+                candle = history[-1]
+                entry = Decimal(str(candle.close))
+                return _signal(
+                    candle.close_time,
+                    entry=entry,
+                    stop=entry - Decimal("5"),
+                    take=entry + Decimal("10"),
+                )
+            return None
+
+        engine = LeakFreeBacktestEngine(
+            BacktestConfig(
+                initial_capital=Decimal("10000"),
+                risk_percent=Decimal("1"),
+                slippage_rate=Decimal("0"),
+                commission_rate=Decimal("0.0004"),
+                leverage=Decimal("1"),
+                symbol="BTCUSDT",
+                interval="1h",
+            )
+        )
+        result = engine.run(candles, strategy)
+        assert result.config.paper_only is True
+        return {"summary": result.summary}
 
     return runner
 
@@ -92,6 +176,7 @@ def _build_sample_frame(rows: int = 220) -> pd.DataFrame:
     base = pd.DataFrame(
         {
             "open_time": open_time,
+            "close_time": open_time + pd.Timedelta(hours=1) - pd.Timedelta(milliseconds=1),
             "open": [100 + i for i in range(rows)],
             "high": [101 + i for i in range(rows)],
             "low": [99 + i for i in range(rows)],
@@ -179,6 +264,7 @@ def test_manifest_and_freeze_are_deterministic_and_utc(sample_btc_data):
     config = ValidationSplitConfig()
     windows = build_rolling_windows(sample_btc_data.iloc[:220].copy(), config)
     candidate = _candidate("alpha", risk="low")
+    signature = build_data_signature(sample_btc_data.iloc[:220].copy(), symbol="BTCUSDT", interval="1h")
     manifest_a = build_manifest(
         symbol="BTCUSDT",
         interval="1h",
@@ -187,7 +273,7 @@ def test_manifest_and_freeze_are_deterministic_and_utc(sample_btc_data):
         split_config=config,
         candidate_grid=[candidate],
         windows=windows[:1],
-        data_signature={"rows": 220},
+        data_signature=signature,
         seed=7,
     )
     manifest_b = build_manifest(
@@ -198,7 +284,7 @@ def test_manifest_and_freeze_are_deterministic_and_utc(sample_btc_data):
         split_config=config,
         candidate_grid=[candidate],
         windows=windows[:1],
-        data_signature={"rows": 220},
+        data_signature=signature,
         seed=7,
     )
     assert manifest_hash(manifest_a) == manifest_hash(manifest_b)
@@ -213,6 +299,30 @@ def test_manifest_and_freeze_are_deterministic_and_utc(sample_btc_data):
         window_id="0:1:2",
     )
     assert frozen.as_dict()["frozen_at"] == "2026-07-10T12:00:00Z"
+
+
+def test_split_config_rejeita_step_bars_invalidos():
+    with pytest.raises(ValidationSplitError):
+        ValidationSplitConfig(step_bars=0)
+    with pytest.raises(ValidationSplitError):
+        ValidationSplitConfig(step_bars=-1)
+    with pytest.raises(ValidationSplitError):
+        ValidationSplitConfig(step_bars=False)
+    with pytest.raises(ValidationSplitError):
+        ValidationSplitConfig(step_bars=0.5)
+    with pytest.raises(ValidationSplitError):
+        ValidationSplitConfig(step_bars="5")
+
+
+def test_manifest_hash_muda_com_ohlcv_e_ordem(sample_btc_data):
+    signature_a = build_data_signature(sample_btc_data.iloc[:220].copy(), symbol="BTCUSDT", interval="1h")
+    altered = sample_btc_data.iloc[:220].copy()
+    altered.loc[10, "close"] = altered.loc[10, "close"] + 1
+    signature_b = build_data_signature(altered, symbol="BTCUSDT", interval="1h")
+    reordered = sample_btc_data.iloc[:220].copy().iloc[::-1].reset_index(drop=True)
+    signature_c = build_data_signature(reordered, symbol="BTCUSDT", interval="1h")
+    assert signature_a["content_hash"] != signature_b["content_hash"]
+    assert signature_a["content_hash"] != signature_c["content_hash"]
 
 
 def test_walk_forward_selection_ignores_test_metrics_and_freezes_once(sample_btc_data):
@@ -272,6 +382,57 @@ def test_walk_forward_selection_ignores_test_metrics_and_freezes_once(sample_btc
     assert result_b.windows[0].selected_candidate == alpha
     assert result_b.windows[0].test_metrics is not None
     assert result_a.windows[0].test_metrics != result_b.windows[0].test_metrics
+    with pytest.raises(ValidationFreezeError):
+        validator.run(sample_btc_data.iloc[:260].copy(), [alpha, beta], runner=runner_a)
+
+
+def test_runner_context_isolation_and_warmup_engine_integration(sample_btc_data):
+    alpha = _candidate("alpha", risk="low")
+    split_config = ValidationSplitConfig(
+        mode="rolling",
+        train_bars=120,
+        validation_bars=40,
+        test_bars=40,
+        warmup_bars=20,
+        purge_bars=5,
+        embargo_bars=5,
+        step_bars=40,
+    )
+    validator = WalkForwardValidator(split_config=split_config, selection_criteria=SelectionCriteria(min_total_trades=1))
+    runner = _engine_runner_factory()
+    result = validator.run(_build_sample_frame(260), [alpha], runner=runner)
+    assert result.windows
+    assert result.summary["total_windows"] >= 1
+    assert "manifest_hash" in result.summary
+
+
+def test_leak_free_engine_smoke_uses_costs_and_paper_only():
+    df = _build_sample_frame(5)
+    candles = dataframe_to_candles(df, symbol="BTCUSDT", interval="1h")
+    engine = LeakFreeBacktestEngine(
+        BacktestConfig(
+            initial_capital=Decimal("10000"),
+            risk_percent=Decimal("1"),
+            slippage_rate=Decimal("0"),
+            commission_rate=Decimal("0.0004"),
+            leverage=Decimal("1"),
+            symbol="BTCUSDT",
+            interval="1h",
+        )
+    )
+
+    def strategy(history, snapshot):
+        if len(history) == 1:
+            candle = history[-1]
+            entry = Decimal(str(candle.close))
+            return _signal(candle.close_time, entry=entry, stop=entry - Decimal("5"), take=entry + Decimal("10"))
+        return None
+
+    result = engine.run(candles, strategy)
+    assert result.trades
+    assert result.config.paper_only is True
+    assert result.summary["entry_fees"] > 0
+    assert all(trade.trade.paper is True for trade in result.trades)
 
 
 def test_validate_frozen_selection_blocks_mismatch_and_reselection(sample_btc_data):
@@ -331,7 +492,10 @@ def test_statistics_and_validation_errors_cover_edge_cases():
 
     stats = aggregate_run_statistics([])
     assert stats["total_windows"] == 0
-    assert stats["profit_factor"] == 0.0
+    assert stats["profit_factor"] is None
+    assert stats["trade_win_rate"] is None
+    assert stats["window_dispersion"] is None
+    assert stats["degradation_validation_test"] is None
 
 
 def test_validation_package_has_no_network_or_executor_tokens():

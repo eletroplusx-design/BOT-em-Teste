@@ -1,5 +1,5 @@
 from .adapters import LegacyBacktesterAdapter, adapt_legacy_report
-from .artifacts import build_manifest, freeze_selection, manifest_hash
+from .artifacts import build_data_signature, build_manifest, freeze_selection, manifest_hash
 from .errors import (
     ValidationError,
     ValidationEvaluationError,
@@ -13,6 +13,7 @@ from .models import (
     CandidateEvaluation,
     FrozenSelection,
     SegmentMetrics,
+    SegmentView,
     SelectionCriteria,
     ValidationRunResult,
     ValidationSplitConfig,
@@ -21,7 +22,7 @@ from .models import (
     WindowBounds,
 )
 from .selection import SelectionOutcome, select_configuration
-from .splits import build_expanding_windows, build_rolling_windows, build_windows
+from .splits import build_expanding_windows, build_rolling_windows, build_segment_view, build_window_segment_views, build_windows
 from .statistics import (
     aggregate_run_statistics,
     aggregate_segment_metrics,
@@ -35,6 +36,7 @@ __all__ = [
     "LegacyBacktesterAdapter",
     "adapt_legacy_report",
     "build_manifest",
+    "build_data_signature",
     "freeze_selection",
     "manifest_hash",
     "ValidationError",
@@ -48,6 +50,7 @@ __all__ = [
     "CandidateEvaluation",
     "FrozenSelection",
     "SegmentMetrics",
+    "SegmentView",
     "SelectionCriteria",
     "ValidationRunResult",
     "ValidationSplitConfig",
@@ -58,6 +61,8 @@ __all__ = [
     "select_configuration",
     "build_expanding_windows",
     "build_rolling_windows",
+    "build_segment_view",
+    "build_window_segment_views",
     "build_windows",
     "aggregate_run_statistics",
     "aggregate_segment_metrics",

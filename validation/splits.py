@@ -6,7 +6,7 @@ from typing import Sequence
 import pandas as pd
 
 from .errors import ValidationSplitError
-from .models import ValidationSplitConfig, WindowBounds
+from .models import SegmentView, ValidationSplitConfig, WindowBounds
 
 
 def _ensure_chronological(df: pd.DataFrame) -> pd.DataFrame:
@@ -73,7 +73,7 @@ def _build_windows(total: int, config: ValidationSplitConfig, *, expanding: bool
             start += step
 
         if expanding and train_bars + validation_bars + test_bars + purge_bars + embargo_bars > total:
-            continue
+            break
         if not expanding and start + train_bars + validation_bars + test_bars + purge_bars + embargo_bars > total:
             break
 
@@ -105,4 +105,34 @@ def slice_window_frames(df: pd.DataFrame, window: WindowBounds) -> dict[str, pd.
         "train": frame.iloc[window.train_start:window.train_end].copy(),
         "validation": frame.iloc[window.validation_start:window.validation_end].copy(),
         "test": frame.iloc[window.test_start:window.test_end].copy(),
+    }
+
+
+def build_segment_view(df: pd.DataFrame, *, segment_start: int, segment_end: int, warmup_bars: int, name: str) -> SegmentView:
+    frame = df.reset_index(drop=True)
+    if segment_start < 0 or segment_end < 0:
+        raise ValidationSplitError("segment bounds cannot be negative.")
+    if segment_end <= segment_start:
+        raise ValidationSplitError("segment_end must be greater than segment_start.")
+    if segment_end > len(frame):
+        raise ValidationSplitError("segment_end exceeds available candles.")
+    warmup_start = max(0, segment_start - warmup_bars)
+    segment_frame = frame.iloc[warmup_start:segment_end].copy()
+    return SegmentView(
+        name=name,
+        frame=segment_frame,
+        warmup_start=warmup_start,
+        segment_start=segment_start,
+        segment_end=segment_end,
+        trade_start_index=segment_start - warmup_start,
+        warmup_rows=segment_start - warmup_start,
+        segment_rows=segment_end - segment_start,
+    )
+
+
+def build_window_segment_views(df: pd.DataFrame, window: WindowBounds, warmup_bars: int) -> dict[str, SegmentView]:
+    return {
+        "train": build_segment_view(df, segment_start=window.train_start, segment_end=window.train_end, warmup_bars=warmup_bars, name="train"),
+        "validation": build_segment_view(df, segment_start=window.validation_start, segment_end=window.validation_end, warmup_bars=warmup_bars, name="validation"),
+        "test": build_segment_view(df, segment_start=window.test_start, segment_end=window.test_end, warmup_bars=warmup_bars, name="test"),
     }

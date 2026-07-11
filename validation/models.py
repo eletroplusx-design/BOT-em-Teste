@@ -37,6 +37,16 @@ def _to_decimal(value: Any, field_name: str, *, allow_none: bool = False) -> Dec
         raise ValidationSelectionError(f"{field_name} must be numeric.") from exc
 
 
+def _strict_int(value: Any, field_name: str, *, allow_zero: bool = False) -> int:
+    if type(value) is bool or not isinstance(value, int):
+        raise ValidationSplitError(f"{field_name} must be an integer.")
+    if not allow_zero and value <= 0:
+        raise ValidationSplitError(f"{field_name} must be greater than zero.")
+    if allow_zero and value < 0:
+        raise ValidationSplitError(f"{field_name} cannot be negative.")
+    return int(value)
+
+
 @dataclass(frozen=True, slots=True)
 class ValidationSplitConfig:
     mode: str = "rolling"
@@ -58,21 +68,16 @@ class ValidationSplitConfig:
         mode = str(self.mode).strip().lower()
         if mode not in {"rolling", "expanding"}:
             raise ValidationSplitError("mode must be rolling or expanding.")
-        values = {
-            "train_bars": self.train_bars,
-            "validation_bars": self.validation_bars,
-            "test_bars": self.test_bars,
-            "warmup_bars": self.warmup_bars,
-            "purge_bars": self.purge_bars,
-            "embargo_bars": self.embargo_bars,
-            "min_total_trades": self.min_total_trades,
-        }
-        for name, value in values.items():
-            if int(value) < 0:
-                raise ValidationSplitError(f"{name} cannot be negative.")
-        if int(self.train_bars) <= 0 or int(self.validation_bars) <= 0 or int(self.test_bars) <= 0:
-            raise ValidationSplitError("train_bars, validation_bars and test_bars must be positive.")
         object.__setattr__(self, "mode", mode)
+        object.__setattr__(self, "train_bars", _strict_int(self.train_bars, "train_bars"))
+        object.__setattr__(self, "validation_bars", _strict_int(self.validation_bars, "validation_bars"))
+        object.__setattr__(self, "test_bars", _strict_int(self.test_bars, "test_bars"))
+        if self.step_bars is not None:
+            object.__setattr__(self, "step_bars", _strict_int(self.step_bars, "step_bars"))
+        object.__setattr__(self, "warmup_bars", _strict_int(self.warmup_bars, "warmup_bars", allow_zero=True))
+        object.__setattr__(self, "purge_bars", _strict_int(self.purge_bars, "purge_bars", allow_zero=True))
+        object.__setattr__(self, "embargo_bars", _strict_int(self.embargo_bars, "embargo_bars", allow_zero=True))
+        object.__setattr__(self, "min_total_trades", _strict_int(self.min_total_trades, "min_total_trades", allow_zero=True))
         object.__setattr__(self, "min_net_return", _to_decimal(self.min_net_return, "min_net_return"))
         object.__setattr__(self, "max_drawdown_percent", _to_decimal(self.max_drawdown_percent, "max_drawdown_percent"))
         object.__setattr__(self, "min_expectancy", _to_decimal(self.min_expectancy, "min_expectancy"))
@@ -111,12 +116,7 @@ class SelectionCriteria:
     min_profit_factor: Decimal = Decimal("1")
 
     def __post_init__(self) -> None:
-        values = {
-            "min_total_trades": self.min_total_trades,
-        }
-        for name, value in values.items():
-            if int(value) < 0:
-                raise ValidationSelectionError(f"{name} cannot be negative.")
+        object.__setattr__(self, "min_total_trades", _strict_int(self.min_total_trades, "min_total_trades", allow_zero=True))
         object.__setattr__(self, "min_net_return", _to_decimal(self.min_net_return, "min_net_return"))
         object.__setattr__(self, "max_drawdown_percent", _to_decimal(self.max_drawdown_percent, "max_drawdown_percent"))
         object.__setattr__(self, "min_expectancy", _to_decimal(self.min_expectancy, "min_expectancy"))
@@ -170,6 +170,29 @@ class WindowBounds:
             "test_start": self.test_start,
             "test_end": self.test_end,
             "mode": self.mode,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class SegmentView:
+    name: str
+    frame: Any
+    warmup_start: int
+    segment_start: int
+    segment_end: int
+    trade_start_index: int
+    warmup_rows: int
+    segment_rows: int
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "warmup_start": self.warmup_start,
+            "segment_start": self.segment_start,
+            "segment_end": self.segment_end,
+            "trade_start_index": self.trade_start_index,
+            "warmup_rows": self.warmup_rows,
+            "segment_rows": self.segment_rows,
         }
 
 
