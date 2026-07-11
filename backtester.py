@@ -5,6 +5,8 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 import requests
 
+from backtesting import BacktestConfig, LeakFreeBacktestEngine, dataframe_to_candles
+
 from decisor import (
     extrair_fvg_bearish_acima,
     extrair_fvg_bullish_abaixo,
@@ -23,6 +25,12 @@ MULTI_ATIVOS_REPORT_PATH = ROOT_DIR / "backtest_multi_ativos.json"
 OTIMIZACAO_SOL_PATH = ROOT_DIR / "otimizacao_sol.json"
 OOS_SOL_PATH = ROOT_DIR / "oos_sol.json"
 WALKFORWARD_SOL_PATH = ROOT_DIR / "walkforward_sol.json"
+
+
+def executar_backtest_leak_free(df, strategy_callback, *, symbol="BTCUSDT", interval="1h", config=None, risk_decision_provider=None):
+    candles = dataframe_to_candles(df, symbol=symbol, interval=interval)
+    engine = LeakFreeBacktestEngine(config or BacktestConfig(symbol=symbol, interval=interval))
+    return engine.run(candles, strategy_callback, risk_decision_provider=risk_decision_provider).to_dict()
 
 
 def baixar_dados_historicos(symbol="BTCUSDT", intervalo="1h", limite=2000):
