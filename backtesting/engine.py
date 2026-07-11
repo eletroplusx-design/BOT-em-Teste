@@ -179,7 +179,13 @@ class LeakFreeBacktestEngine:
                     gap_handled=False,
                 )
                 trades.append(executed_trade)
-            portfolio.mark_equity({symbol: state.position.entry for symbol, state in portfolio.open_positions.items()}, final_candle.close_time)
+            if portfolio.equity_curve:
+                portfolio.equity_curve[-1] = EquityPoint(
+                    timestamp=final_candle.close_time,
+                    equity=portfolio.cash,
+                    cash=portfolio.cash,
+                    unrealized_pnl=Decimal("0"),
+                )
 
         summary = compute_metrics(
             trades,

@@ -60,6 +60,8 @@ def compute_metrics(
             "drawdown_max_percent": float(max_drawdown(equity_curve)),
             "sequencia_maxima_perdas": 0,
             "exposure_time_percent": 0.0,
+            "total_bars": total_bars,
+            "exposure_bars": exposure_bars,
         }
 
     gross_pnl = sum((trade.gross_pnl for trade in trades), Decimal("0"))
@@ -135,4 +137,6 @@ def compute_metrics(
         "drawdown_max_percent": float(round(max_drawdown(equity_curve), 2)),
         "sequencia_maxima_perdas": max_seq,
         "exposure_time_percent": float(round(exposure_time_percent, 2)),
+        "total_bars": total_bars,
+        "exposure_bars": exposure_bars,
     }

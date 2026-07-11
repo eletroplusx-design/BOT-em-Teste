@@ -247,6 +247,14 @@ def test_engine_nao_vaza_lucro_futuro_e_mantem_snapshot_cronologico():
     assert all(item["open_positions"] == 1 for item in snapshots_b[1:5])
     assert snapshots_a[4]["cash"] == snapshots_b[4]["cash"]
     assert snapshots_a[4]["equity"] == snapshots_b[4]["equity"]
+    assert len(result_a.equity_curve) == len(candles_a) + 1
+    assert len(result_b.equity_curve) == len(candles_b) + 1
+    assert len({point.timestamp for point in result_a.equity_curve}) == len(result_a.equity_curve)
+    assert len({point.timestamp for point in result_b.equity_curve}) == len(result_b.equity_curve)
+    assert result_a.summary["capital_final"] == round(float(result_a.final_capital), 2)
+    assert result_b.summary["capital_final"] == round(float(result_b.final_capital), 2)
+    assert result_a.final_capital == Decimal("10000") + sum(trade.net_pnl for trade in result_a.trades)
+    assert result_b.final_capital == Decimal("10000") + sum(trade.net_pnl for trade in result_b.trades)
 
 
 def test_engine_intrabar_stop_first_e_gap_open():
@@ -629,6 +637,11 @@ def test_engine_final_close_com_custos_e_exposicao_registrados():
     assert trade.spread_cost > 0
     assert trade.slippage_cost > 0
     assert trade.total_costs == trade.entry_fee + trade.exit_fee + trade.spread_cost + trade.slippage_cost
+    assert len(result.equity_curve) == len(candles) + 1
+    assert len({point.timestamp for point in result.equity_curve}) == len(result.equity_curve)
+    assert result.summary["capital_final"] == round(float(result.final_capital), 2)
+    assert result.final_capital == Decimal("10000") + sum(trade.net_pnl for trade in result.trades)
+    assert result.summary["total_bars"] == len(candles)
     assert result.summary["total_costs"] > 0
     assert result.summary["spread_cost"] > 0
     assert result.summary["slippage_cost"] > 0

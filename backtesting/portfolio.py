@@ -75,7 +75,8 @@ class Portfolio:
             raise BacktestConfigurationError("Risk decision blocks the position.")
 
         required_margin = (entry_execution.fill_price * order.quantity) / self.config.leverage
-        required_cash = required_margin + entry_execution.fee
+        entry_costs = entry_execution.fee + entry_execution.spread_cost + entry_execution.slippage_cost
+        required_cash = required_margin + entry_costs
         if required_cash > self.cash:
             raise BacktestConfigurationError("Insufficient capital for position.")
         position = Position(
@@ -92,7 +93,7 @@ class Portfolio:
             trading_mode=TradingMode.PAPER,
             unrealized_pnl=Decimal("0"),
         )
-        self.cash -= entry_execution.fee
+        self.cash -= entry_costs
         self.open_positions[order.symbol] = OpenPositionState(
             position=position,
             entry_fill=Fill(
@@ -117,6 +118,7 @@ class Portfolio:
 
         position = state.position
         entry_exec = state.entry_execution
+        cash_before_close = self.cash
         exit_fill = Fill(
             price=exit_execution.fill_price,
             quantity=position.quantity,
@@ -133,7 +135,8 @@ class Portfolio:
             gross_pnl = (entry_exec.base_price - exit_execution.base_price) * position.quantity
 
         net_pnl = gross_pnl - entry_exec.fee - exit_execution.fee - entry_exec.spread_cost - exit_execution.spread_cost - entry_exec.slippage_cost - exit_execution.slippage_cost
-        self.cash += net_pnl
+        cash_delta = gross_pnl - exit_execution.fee - exit_execution.spread_cost - exit_execution.slippage_cost
+        self.cash += cash_delta
         self.realized_pnl += net_pnl
 
         entry_notional = entry_exec.base_price * position.quantity
@@ -186,7 +189,7 @@ class Portfolio:
             slippage_cost=entry_exec.slippage_cost + exit_execution.slippage_cost,
             entry_index=state.entry_index,
             exit_index=exit_index,
-            capital_before=self.cash - net_pnl,
+            capital_before=cash_before_close,
             capital_after=self.cash,
             gap_handled=gap_handled,
             intrabar_policy=self.config.intrabar_policy,
