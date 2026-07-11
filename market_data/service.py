@@ -10,7 +10,7 @@ from .cache import MarketDataCache
 from .errors import MarketDataExpiredError, MarketDataError, MarketDataValidationError
 from .normalization import candles_to_dataframe, candles_to_market_snapshot
 from .provider import BinancePublicKlinesProvider
-from .validation import validate_klines_payload, validate_market_data_consistency, validate_symbol_interval
+from .validation import validate_klines_payload, validate_limit, validate_market_data_consistency, validate_symbol_interval
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,8 +57,23 @@ class TrustedMarketDataService:
             cache_status=cache_status,
         )
 
+    def _package_for_limit(self, package: MarketDataPackage, limit: int, cache_status: str) -> MarketDataPackage:
+        candles = package.candles[-limit:] if limit < len(package.candles) else package.candles
+        snapshot = candles_to_market_snapshot(candles)
+        return MarketDataPackage(
+            symbol=package.symbol,
+            interval=package.interval,
+            candles=candles,
+            snapshot=snapshot,
+            source=snapshot.source.value if hasattr(snapshot.source, "value") else str(snapshot.source),
+            fetched_at=package.fetched_at,
+            expires_at=package.expires_at,
+            cache_status=cache_status,
+        )
+
     def fetch(self, symbol: str = "BTCUSDT", interval: str = "1h", limit: int = 500) -> MarketDataPackage:
         symbol, interval = validate_symbol_interval(symbol, interval)
+        limit = validate_limit(limit)
         now = datetime.now(timezone.utc)
         cached = self.cache.get(symbol, interval)
         if cached is not None:
@@ -67,16 +82,18 @@ class TrustedMarketDataService:
             except (MarketDataExpiredError, MarketDataValidationError):
                 self.cache.discard(symbol, interval)
             else:
-                return MarketDataPackage(
-                    symbol=symbol,
-                    interval=interval,
-                    candles=cached.candles,
-                    snapshot=cached.snapshot,
-                    source=cached.snapshot.source.value if hasattr(cached.snapshot.source, "value") else str(cached.snapshot.source),
-                    fetched_at=cached.stored_at,
-                    expires_at=cached.expires_at,
-                    cache_status="hit",
-                )
+                if len(cached.candles) >= limit:
+                    cached_package = MarketDataPackage(
+                        symbol=symbol,
+                        interval=interval,
+                        candles=cached.candles,
+                        snapshot=cached.snapshot,
+                        source=cached.snapshot.source.value if hasattr(cached.snapshot.source, "value") else str(cached.snapshot.source),
+                        fetched_at=cached.stored_at,
+                        expires_at=cached.expires_at,
+                        cache_status="hit",
+                    )
+                    return self._package_for_limit(cached_package, limit, "hit")
 
         payload = self.provider.fetch_klines(symbol, interval, limit)
         candles = validate_klines_payload(payload, symbol=symbol, interval=interval, now=now)

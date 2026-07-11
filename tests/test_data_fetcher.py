@@ -13,8 +13,8 @@ def test_baixar_dados_btc_retorna_dataframe(monkeypatch):
     mock_response.status_code = 200
     now_ms = int(pd.Timestamp.now("UTC").timestamp() * 1000)
     mock_response.json.return_value = [
-        [now_ms - 7200000, "60000", "60100", "59900", "60050", "100", now_ms - 7140000, 0, 0, 0, 0, 0],
-        [now_ms - 3600000, "60050", "60200", "60000", "60150", "110", now_ms - 3540000, 0, 0, 0, 0, 0],
+        [now_ms - 7200000, "60000", "60100", "59900", "60050", "100", now_ms - 3600001, 0, 0, 0, 0, 0],
+        [now_ms - 3600000, "60050", "60200", "60000", "60150", "110", now_ms - 1, 0, 0, 0, 0, 0],
     ]
     mock_get = MagicMock(return_value=mock_response)
     monkeypatch.setattr(data_fetcher.trusted_market_data_service.provider.session, "get", mock_get)

@@ -15,6 +15,7 @@ from .validation import (
     ALLOWED_INTERVALS,
     validate_klines_payload,
     validate_market_data_consistency,
+    validate_limit,
     validate_symbol_interval,
 )
 
@@ -38,5 +39,6 @@ __all__ = [
     "trusted_market_data_service",
     "validate_klines_payload",
     "validate_market_data_consistency",
+    "validate_limit",
     "validate_symbol_interval",
 ]
