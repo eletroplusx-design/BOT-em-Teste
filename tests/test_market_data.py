@@ -251,6 +251,15 @@ def test_validate_klines_payload_rejeita_timestamp_naive():
         validate_klines_payload(candles, symbol="BTCUSDT", interval="1h", now=datetime(2024, 1, 1, 3, 30))
 
 
+@pytest.mark.parametrize("bad_value", ["invalid", None, 10**30])
+def test_row_to_candle_rejeita_timestamps_invalidos(bad_value):
+    from market_data import validation as validation_module
+
+    row = [bad_value, "100", "105", "98", "101", "1000", bad_value, 0, 0, 0, 0, 0]
+    with pytest.raises(MarketDataValidationError, match="Invalid timestamp in kline payload"):
+        validation_module._row_to_candle(row, "BTCUSDT", "1h")
+
+
 def test_service_ignora_candle_em_formacao_e_snapshot_usa_ultimo_fechado(monkeypatch):
     from market_data import service as service_module
     from market_data import validation as validation_module
@@ -265,8 +274,8 @@ def test_service_ignora_candle_em_formacao_e_snapshot_usa_ultimo_fechado(monkeyp
     monkeypatch.setattr(service_module, "datetime", FrozenDateTime)
     monkeypatch.setattr(validation_module, "datetime", FrozenDateTime)
 
-    payload = _payload_candles(int(datetime(2024, 1, 1, 2, 0, tzinfo=timezone.utc).timestamp() * 1000), count=2)
-    payload[1][6] = int((FrozenDateTime.current + timedelta(minutes=30)).timestamp() * 1000)
+    payload = _payload_candles(int(datetime(2024, 1, 1, 1, 0, tzinfo=timezone.utc).timestamp() * 1000), count=3)
+    payload[2][6] = int((FrozenDateTime.current + timedelta(minutes=30)).timestamp() * 1000)
     session = MagicMock()
     session.get.return_value = FakeResponse(payload=payload)
     provider = BinancePublicKlinesProvider(session=session)
@@ -274,7 +283,7 @@ def test_service_ignora_candle_em_formacao_e_snapshot_usa_ultimo_fechado(monkeyp
 
     package = service.fetch("BTCUSDT", "1h", 2)
 
-    assert len(package.candles) == 1
+    assert len(package.candles) == 2
     assert package.snapshot.timestamp == package.candles[-1].close_time
     assert package.candles[-1].close_time <= FrozenDateTime.current
 
@@ -326,9 +335,9 @@ def test_service_cache_valid_expired_and_isolation(monkeypatch):
 
     cache = MarketDataCache(ttl_seconds=1)
     session = MagicMock()
-    first_payload = _payload_candles(int(datetime(2024, 1, 1, 2, 0, tzinfo=timezone.utc).timestamp() * 1000), count=2)
-    second_payload = _payload_candles(int(datetime(2024, 1, 1, 4, 0, tzinfo=timezone.utc).timestamp() * 1000), count=2)
-    third_payload = _payload_candles(int(datetime(2024, 1, 1, 4, 0, tzinfo=timezone.utc).timestamp() * 1000), count=2)
+    first_payload = _payload_candles(int(datetime(2024, 1, 1, 1, 0, tzinfo=timezone.utc).timestamp() * 1000), count=3)
+    second_payload = _payload_candles(int(datetime(2024, 1, 1, 3, 0, tzinfo=timezone.utc).timestamp() * 1000), count=3)
+    third_payload = _payload_candles(int(datetime(2024, 1, 1, 3, 0, tzinfo=timezone.utc).timestamp() * 1000), count=3)
     session.get.side_effect = [FakeResponse(payload=first_payload), FakeResponse(payload=second_payload), FakeResponse(payload=third_payload)]
     provider = BinancePublicKlinesProvider(session=session)
     service = TrustedMarketDataService(provider=provider, cache=cache, ttl_seconds=1, max_age_seconds=3600)
@@ -376,6 +385,47 @@ def test_service_cache_respeita_limit_e_devolve_mais_recente():
     assert provider.fetch_klines.call_count == 1
     assert len(second.candles) == 2
     assert second.candles[-1] == first.candles[-1]
+
+
+def test_service_pede_um_candle_extra_e_ignora_candle_em_formacao(monkeypatch):
+    from market_data import service as service_module
+    from market_data import validation as validation_module
+
+    class FrozenDateTime(datetime):
+        current = datetime(2024, 2, 1, 12, 30, tzinfo=timezone.utc)
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls.current if tz is not None else cls.current.replace(tzinfo=None)
+
+    monkeypatch.setattr(service_module, "datetime", FrozenDateTime)
+    monkeypatch.setattr(validation_module, "datetime", FrozenDateTime)
+
+    start_ms = int((FrozenDateTime.current - timedelta(hours=501)).timestamp() * 1000)
+    payload = _payload_candles(start_ms, count=501)
+    payload[-1][6] = int((FrozenDateTime.current + timedelta(minutes=30)).timestamp() * 1000)
+
+    provider = MagicMock()
+    provider.fetch_klines.return_value = payload
+    service = TrustedMarketDataService(provider=provider, cache=MarketDataCache(), ttl_seconds=60, max_age_seconds=999999999)
+
+    package = service.fetch("BTCUSDT", "1h", 500)
+
+    assert provider.fetch_klines.call_args.args[2] == 501
+    assert len(package.candles) == 500
+    assert package.candles[-1].close_time <= FrozenDateTime.current
+
+
+def test_service_respeita_limit_maximo_da_binance():
+    provider = MagicMock()
+    payload = _payload_candles(1704067200000, count=1000)
+    provider.fetch_klines.return_value = payload
+    service = TrustedMarketDataService(provider=provider, cache=MarketDataCache(), ttl_seconds=60, max_age_seconds=999999999)
+
+    package = service.fetch("BTCUSDT", "1h", 1000)
+
+    assert provider.fetch_klines.call_args.args[2] == 1000
+    assert len(package.candles) == 1000
 
 
 @pytest.mark.parametrize(

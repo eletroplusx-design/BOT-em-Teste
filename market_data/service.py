@@ -10,7 +10,7 @@ from .cache import MarketDataCache
 from .errors import MarketDataExpiredError, MarketDataError, MarketDataValidationError
 from .normalization import candles_to_dataframe, candles_to_market_snapshot
 from .provider import BinancePublicKlinesProvider
-from .validation import validate_klines_payload, validate_limit, validate_market_data_consistency, validate_symbol_interval
+from .validation import MAX_BINANCE_LIMIT, validate_klines_payload, validate_limit, validate_market_data_consistency, validate_symbol_interval
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,9 +95,12 @@ class TrustedMarketDataService:
                     )
                     return self._package_for_limit(cached_package, limit, "hit")
 
-        payload = self.provider.fetch_klines(symbol, interval, limit)
+        request_limit = min(limit + 1, MAX_BINANCE_LIMIT) if limit < MAX_BINANCE_LIMIT else limit
+        payload = self.provider.fetch_klines(symbol, interval, request_limit)
         candles = validate_klines_payload(payload, symbol=symbol, interval=interval, now=now)
         validate_market_data_consistency(candles, max_age_seconds=self.max_age_seconds, now=now)
+        if len(candles) < limit:
+            raise MarketDataValidationError("Not enough closed candles available.")
         snapshot = candles_to_market_snapshot(candles)
         entry = self.cache.set(symbol, interval, tuple(candles), snapshot)
         return MarketDataPackage(

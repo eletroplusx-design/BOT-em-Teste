@@ -105,8 +105,11 @@ def _row_to_candle(row: Sequence[Any], symbol: str, interval: str) -> Candle:
     if len(row) < 7:
         raise MarketDataValidationError("Kline payload is partial.")
     open_time_ms, open_, high, low, close, volume, close_time_ms = row[:7]
-    open_time = datetime.fromtimestamp(int(open_time_ms) / 1000, tz=timezone.utc)
-    close_time = datetime.fromtimestamp(int(close_time_ms) / 1000, tz=timezone.utc)
+    try:
+        open_time = datetime.fromtimestamp(int(open_time_ms) / 1000, tz=timezone.utc)
+        close_time = datetime.fromtimestamp(int(close_time_ms) / 1000, tz=timezone.utc)
+    except (TypeError, ValueError, OverflowError, OSError) as exc:
+        raise MarketDataValidationError("Invalid timestamp in kline payload.") from exc
     try:
         candle = Candle.from_dict(
             {
