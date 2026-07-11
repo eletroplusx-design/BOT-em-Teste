@@ -44,9 +44,9 @@ class Portfolio:
                 continue
             current = prices[symbol]
             if state.position.direction == Direction.COMPRA:
-                unrealized += (current - state.position.entry) * state.position.quantity
+                unrealized += (current - state.entry_execution.base_price) * state.position.quantity
             else:
-                unrealized += (state.position.entry - current) * state.position.quantity
+                unrealized += (state.entry_execution.base_price - current) * state.position.quantity
         return self.cash + unrealized
 
     def snapshot(self, timestamp: datetime, prices: Dict[str, Decimal] | None = None) -> PortfolioSnapshot:
@@ -59,12 +59,12 @@ class Portfolio:
             timestamp=timestamp.astimezone(timezone.utc),
         )
 
-    def mark_equity(self, prices: Dict[str, Decimal], timestamp: datetime) -> Decimal:
+    def mark_equity(self, prices: Dict[str, Decimal], timestamp: datetime, *, exposed: bool | None = None) -> Decimal:
         equity = self._calculate_equity(prices)
         unrealized = equity - self.cash
         self.equity_curve.append(EquityPoint(timestamp=timestamp.astimezone(timezone.utc), equity=equity, cash=self.cash, unrealized_pnl=unrealized))
         self.total_bars += 1
-        if self.open_positions:
+        if exposed if exposed is not None else bool(self.open_positions):
             self.exposure_bars += 1
         return equity
 

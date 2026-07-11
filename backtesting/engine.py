@@ -99,6 +99,7 @@ class LeakFreeBacktestEngine:
         )
 
         for idx, candle in enumerate(candles):
+            bar_had_exposure = bool(portfolio.open_positions)
             if pending_order is not None:
                 entry_execution = resolve_entry_execution(pending_order, candle, self.cost_model)
                 try:
@@ -112,6 +113,7 @@ class LeakFreeBacktestEngine:
                     pending_order = None
                     pending_risk_decision = None
                 else:
+                    bar_had_exposure = True
                     pending_order = None
                     pending_risk_decision = None
 
@@ -133,10 +135,11 @@ class LeakFreeBacktestEngine:
                     gap_handled=exit_decision.gap_handled,
                 )
                 trades.append(executed_trade)
+                bar_had_exposure = True
 
             current_prices = {symbol: state.position.entry for symbol, state in portfolio.open_positions.items()}
             current_prices[candle.symbol] = candle.close
-            portfolio.mark_equity(current_prices, candle.close_time)
+            portfolio.mark_equity(current_prices, candle.close_time, exposed=bar_had_exposure or bool(portfolio.open_positions))
 
             snapshot = portfolio.snapshot(candle.close_time, current_prices)
             if idx >= len(candles) - 1:
