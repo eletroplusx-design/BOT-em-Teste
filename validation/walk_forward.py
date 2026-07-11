@@ -28,13 +28,25 @@ class WalkForwardValidator:
     seed: int | None = None
     _session_consumed: bool = field(default=False, init=False, repr=False)
 
-    def _window_manifest(self, window, candidates, data_signature: dict[str, Any], *, execution_contract: dict[str, Any]) -> dict[str, Any]:
+    def _window_manifest(
+        self,
+        window,
+        candidates,
+        data_signature: dict[str, Any],
+        *,
+        execution_contract: dict[str, Any],
+        window_signatures: dict[str, Any],
+        runner_trusted: bool,
+    ) -> dict[str, Any]:
         return build_manifest(
             symbol=self.symbol,
             interval=self.interval,
             strategy_version=self.strategy_version,
             costs=self.costs,
+            selection_criteria=self.selection_criteria.as_dict(),
             execution_contract=execution_contract,
+            window_signatures=window_signatures,
+            runner_trusted=runner_trusted,
             split_config=self.split_config,
             candidate_grid=candidates,
             windows=[window],
@@ -118,6 +130,16 @@ class WalkForwardValidator:
                 raise ValidationFreezeError(f"runner execution contract mismatch for {key}.")
         return expected
 
+    def _window_signatures(self, segment_views: dict[str, SegmentView]) -> dict[str, Any]:
+        signatures: dict[str, Any] = {}
+        for name, view in segment_views.items():
+            frame = view.frame
+            warmup_rows = int(view.warmup_rows)
+            segment_rows = int(view.segment_rows)
+            signatures[f"warmup_{name}"] = build_data_signature(frame.iloc[:warmup_rows].copy(), symbol=self.symbol, interval=self.interval)
+            signatures[name] = build_data_signature(frame.iloc[warmup_rows:warmup_rows + segment_rows].copy(), symbol=self.symbol, interval=self.interval)
+        return signatures
+
     def _segment_signature(self, segment_view: SegmentView) -> dict[str, Any]:
         return build_data_signature(segment_view.frame, symbol=self.symbol, interval=self.interval)
 
@@ -141,8 +163,11 @@ class WalkForwardValidator:
         *,
         runner,
         execution_contract: dict[str, Any] | None = None,
+        window_signatures: dict[str, Any] | None = None,
+        runner_trusted: bool = False,
     ) -> WalkForwardWindowResult:
         segment_views = build_window_segment_views(df, window, self.split_config.warmup_bars)
+        signatures = window_signatures or self._window_signatures(segment_views)
         candidate_evaluations: list[CandidateEvaluation] = []
         for candidate in candidate_grid:
             train_view = segment_views["train"]
@@ -172,8 +197,14 @@ class WalkForwardValidator:
             )
 
         outcome = self._select_window(candidate_evaluations)
-        test_signature = self._segment_signature(segment_views["test"])
-        manifest = self._window_manifest(window, candidate_grid, test_signature, execution_contract=execution_contract or {})
+        manifest = self._window_manifest(
+            window,
+            candidate_grid,
+            signatures["test"],
+            execution_contract=execution_contract or {},
+            window_signatures=signatures,
+            runner_trusted=runner_trusted,
+        )
         if not outcome.approved or outcome.candidate is None:
             return WalkForwardWindowResult(
                 bounds=window,
@@ -211,6 +242,8 @@ class WalkForwardValidator:
         *,
         runner,
         execution_contract: dict[str, Any] | None = None,
+        window_signatures: dict[str, Any] | None = None,
+        runner_trusted: bool = False,
     ) -> WalkForwardWindowResult:
         if not window_result.approved or window_result.selected_candidate is None or window_result.frozen_selection is None:
             return window_result
@@ -235,6 +268,12 @@ class WalkForwardValidator:
             reason=window_result.reason,
         )
 
+    def _window_contract(self, runner) -> tuple[dict[str, Any], bool]:
+        contract = self._runner_execution_contract(runner)
+        runner_trusted = contract is not None
+        validated_contract = self._validate_execution_contract(contract)
+        return validated_contract, runner_trusted
+
     def evaluate_window(
         self,
         df: pd.DataFrame,
@@ -243,24 +282,69 @@ class WalkForwardValidator:
         *,
         runner,
     ) -> WalkForwardWindowResult:
-        contract = self._validate_execution_contract(self._runner_execution_contract(runner))
-        selection_result = self._evaluate_window_selection(df, window, candidate_grid, runner=runner, execution_contract=contract)
-        return self._evaluate_window_test(df, selection_result, runner=runner, execution_contract=contract)
+        contract, runner_trusted = self._window_contract(runner)
+        segment_views = build_window_segment_views(df, window, self.split_config.warmup_bars)
+        window_signatures = self._window_signatures(segment_views)
+        selection_result = self._evaluate_window_selection(
+            df,
+            window,
+            candidate_grid,
+            runner=runner,
+            execution_contract=contract,
+            window_signatures=window_signatures,
+            runner_trusted=runner_trusted,
+        )
+        return self._evaluate_window_test(
+            df,
+            selection_result,
+            runner=runner,
+            execution_contract=contract,
+            window_signatures=window_signatures,
+            runner_trusted=runner_trusted,
+        )
 
     def run(self, df: pd.DataFrame, candidate_grid: Sequence[CandidateConfig], *, runner) -> WalkForwardResult:
         if self._session_consumed:
             raise ValidationFreezeError("validator session already consumed; create a new instance to rerun.")
         windows = build_windows(df, self.split_config)
-        contract = self._validate_execution_contract(self._runner_execution_contract(runner))
-        selection_results = [self._evaluate_window_selection(df, window, candidate_grid, runner=runner, execution_contract=contract) for window in windows]
-        results = [self._evaluate_window_test(df, window_result, runner=runner, execution_contract=contract) for window_result in selection_results]
+        contract, runner_trusted = self._window_contract(runner)
+        window_signatures_list = []
+        for window in windows:
+            segment_views = build_window_segment_views(df, window, self.split_config.warmup_bars)
+            window_signatures_list.append(self._window_signatures(segment_views))
+        selection_results = [
+            self._evaluate_window_selection(
+                df,
+                window,
+                candidate_grid,
+                runner=runner,
+                execution_contract=contract,
+                window_signatures=window_signatures,
+                runner_trusted=runner_trusted,
+            )
+            for window, window_signatures in zip(windows, window_signatures_list)
+        ]
+        results = [
+            self._evaluate_window_test(
+                df,
+                window_result,
+                runner=runner,
+                execution_contract=contract,
+                window_signatures=window_signatures,
+                runner_trusted=runner_trusted,
+            )
+            for window_result, window_signatures in zip(selection_results, window_signatures_list)
+        ]
         data_signature = build_data_signature(df, symbol=self.symbol, interval=self.interval)
         manifest = build_manifest(
             symbol=self.symbol,
             interval=self.interval,
             strategy_version=self.strategy_version,
             costs=self.costs,
+            selection_criteria=self.selection_criteria.as_dict(),
             execution_contract=contract,
+            window_signatures={"windows": window_signatures_list},
+            runner_trusted=runner_trusted,
             split_config=self.split_config,
             candidate_grid=candidate_grid,
             windows=windows,
@@ -273,6 +357,7 @@ class WalkForwardValidator:
         summary["symbol"] = self.symbol
         summary["interval"] = self.interval
         summary["mode"] = self.split_config.mode
+        summary["runner_trusted"] = runner_trusted
         if any(window.test_metrics is not None for window in results):
             self._session_consumed = True
         return WalkForwardResult(windows=tuple(results), summary=summary, manifest=manifest)

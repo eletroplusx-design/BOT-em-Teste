@@ -716,6 +716,144 @@ def test_trusted_runner_excludes_warmup_from_segment_metrics(sample_btc_data):
     assert result.summary["total_trades"] == result.windows[0].test_metrics.total_trades
 
 
+def test_trusted_runner_uses_single_engine_instance_and_manifest_tracks_selection_context(sample_btc_data):
+    alpha = _candidate("alpha", risk="low")
+    split_config = ValidationSplitConfig(
+        mode="rolling",
+        train_bars=120,
+        validation_bars=40,
+        test_bars=40,
+        warmup_bars=20,
+        purge_bars=5,
+        embargo_bars=5,
+        step_bars=40,
+    )
+    engine_creations = {"count": 0}
+
+    def engine_factory():
+        engine_creations["count"] += 1
+        if engine_creations["count"] == 1:
+            return LeakFreeBacktestEngine(
+                BacktestConfig(
+                    initial_capital=Decimal("10000"),
+                    risk_percent=Decimal("1"),
+                    entry_fee_rate=Decimal("0"),
+                    exit_fee_rate=Decimal("0"),
+                    spread_bps=Decimal("0"),
+                    slippage_bps=Decimal("0"),
+                    leverage=Decimal("1"),
+                    symbol="BTCUSDT",
+                    interval="1h",
+                    strategy_version="v4_walk_forward",
+                )
+            )
+        return LeakFreeBacktestEngine(
+            BacktestConfig(
+                initial_capital=Decimal("10000"),
+                risk_percent=Decimal("1"),
+                entry_fee_rate=Decimal("0.001"),
+                exit_fee_rate=Decimal("0.001"),
+                spread_bps=Decimal("8"),
+                slippage_bps=Decimal("12"),
+                leverage=Decimal("2"),
+                symbol="BTCUSDT",
+                interval="1h",
+                strategy_version="v4_walk_forward",
+            )
+        )
+
+    def strategy_factory(candidate):
+        def strategy(history, snapshot):
+            candle = history[-1]
+            entry = Decimal(str(candle.close))
+            return _signal(candle.close_time, entry=entry, stop=entry - Decimal("5"), take=entry + Decimal("10"))
+
+        return strategy
+
+    runner = TrustedLeakFreeBacktestRunner(
+        engine_factory=engine_factory,
+        strategy_factory=strategy_factory,
+        symbol="BTCUSDT",
+        interval="1h",
+    )
+    def make_validator(symbol="BTCUSDT"):
+        return WalkForwardValidator(
+            split_config=split_config,
+            selection_criteria=SelectionCriteria(min_total_trades=0, require_defined_profit_factor=False, min_profit_factor=Decimal("0")),
+            strategy_version="v4_walk_forward",
+            costs={"entry_fee_rate": "0", "exit_fee_rate": "0", "spread_bps": "0", "slippage_bps": "0", "leverage": "1"},
+            symbol=symbol,
+            interval="1h",
+        )
+
+    result = make_validator().run(sample_btc_data.iloc[:260].copy(), [alpha], runner=runner)
+    assert engine_creations["count"] == 1
+    assert result.manifest["runner_trusted"] is True
+    assert result.summary["runner_trusted"] is True
+    assert result.manifest["selection_criteria"]["min_total_trades"] == 0
+    assert "window_signatures" in result.manifest
+    window_signatures = result.manifest["window_signatures"]["windows"][0]
+    assert set(window_signatures) >= {"warmup_train", "train", "warmup_validation", "validation", "warmup_test", "test"}
+    assert result.windows[0].frozen_selection is not None
+    assert result.windows[0].frozen_selection.manifest_hash == result.windows[0].manifest_hash
+    assert result.windows[0].selected_candidate == alpha
+
+    altered_train = sample_btc_data.iloc[:260].copy()
+    altered_train.loc[:30, "open"] = altered_train.loc[:30, "open"] + 777
+    altered_train.loc[:30, "high"] = altered_train.loc[:30, "high"] + 777
+    altered_train.loc[:30, "low"] = altered_train.loc[:30, "low"] + 777
+    altered_train.loc[:30, "close"] = altered_train.loc[:30, "close"] + 777
+    result_train_changed = make_validator().run(altered_train, [alpha], runner=runner)
+    assert result.manifest["manifest_hash"] != result_train_changed.manifest["manifest_hash"]
+
+    altered_validation = sample_btc_data.iloc[:260].copy()
+    altered_validation.loc[130:150, "open"] = altered_validation.loc[130:150, "open"] + 333
+    altered_validation.loc[130:150, "high"] = altered_validation.loc[130:150, "high"] + 333
+    altered_validation.loc[130:150, "low"] = altered_validation.loc[130:150, "low"] + 333
+    altered_validation.loc[130:150, "close"] = altered_validation.loc[130:150, "close"] + 333
+    result_validation_changed = make_validator().run(altered_validation, [alpha], runner=runner)
+    assert result.manifest["manifest_hash"] != result_validation_changed.manifest["manifest_hash"]
+
+    altered_test = sample_btc_data.iloc[:260].copy()
+    altered_test.loc[210:240, "open"] = altered_test.loc[210:240, "open"] + 999
+    altered_test.loc[210:240, "high"] = altered_test.loc[210:240, "high"] + 999
+    altered_test.loc[210:240, "low"] = altered_test.loc[210:240, "low"] + 999
+    altered_test.loc[210:240, "close"] = altered_test.loc[210:240, "close"] + 999
+    result_test_changed = make_validator().run(altered_test, [alpha], runner=runner)
+    assert result.manifest["manifest_hash"] != result_test_changed.manifest["manifest_hash"]
+    assert result.windows[0].selected_candidate == result_test_changed.windows[0].selected_candidate
+
+
+def test_generic_runner_marks_manifest_as_untrusted(sample_btc_data):
+    alpha = _candidate("alpha", risk="low")
+    split_config = ValidationSplitConfig(
+        mode="rolling",
+        train_bars=120,
+        validation_bars=40,
+        test_bars=40,
+        warmup_bars=20,
+        purge_bars=5,
+        embargo_bars=5,
+        step_bars=40,
+    )
+
+    def runner(df, candidate, segment, context=None, frozen_selection=None):
+        metrics = _metrics(net_return_percent="5", expectancy="1", profit_factor="1.5", drawdown_max_percent="2", win_rate="60", total_trades=10)
+        return {"summary": metrics.as_dict()}
+
+    validator = WalkForwardValidator(
+        split_config=split_config,
+        selection_criteria=SelectionCriteria(min_total_trades=1),
+        strategy_version="v4_walk_forward",
+        costs={"entry_fee_rate": "0", "exit_fee_rate": "0", "spread_bps": "0", "slippage_bps": "0", "leverage": "1"},
+        symbol="BTCUSDT",
+        interval="1h",
+    )
+    result = validator.run(sample_btc_data.iloc[:260].copy(), [alpha], runner=runner)
+    assert result.manifest["runner_trusted"] is False
+    assert result.summary["runner_trusted"] is False
+
+
 def test_runner_context_isolation_and_warmup_engine_integration(sample_btc_data):
     alpha = _candidate("alpha", risk="low")
     split_config = ValidationSplitConfig(

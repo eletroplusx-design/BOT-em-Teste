@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 
@@ -75,6 +75,8 @@ class TrustedLeakFreeBacktestRunner:
     strategy_factory: Callable[[CandidateConfig], Callable[[Any, Any], object | None]]
     symbol: str
     interval: str
+    _engine: Any | None = field(default=None, init=False, repr=False, compare=False)
+    _execution_contract: dict[str, Any] | None = field(default=None, init=False, repr=False, compare=False)
 
     @staticmethod
     def _normalize_value(value: Any) -> Any:
@@ -84,12 +86,22 @@ class TrustedLeakFreeBacktestRunner:
             return value.value
         return value
 
+    def _ensure_engine(self) -> Any:
+        engine = self._engine
+        if engine is None:
+            engine = self.engine_factory()
+            object.__setattr__(self, "_engine", engine)
+        return engine
+
     def execution_contract(self) -> dict[str, Any]:
-        engine = self.engine_factory()
+        cached = self._execution_contract
+        if cached is not None:
+            return dict(cached)
+        engine = self._ensure_engine()
         config = getattr(engine, "config", None)
         if not isinstance(config, BacktestConfig):
             raise ValidationEvaluationError("engine config must be BacktestConfig.")
-        return {
+        contract = {
             "entry_fee_rate": self._normalize_value(config.entry_fee_rate),
             "exit_fee_rate": self._normalize_value(config.exit_fee_rate),
             "spread_bps": self._normalize_value(config.spread_bps),
@@ -102,6 +114,8 @@ class TrustedLeakFreeBacktestRunner:
             "interval": config.interval,
             "strategy_version": config.strategy_version,
         }
+        object.__setattr__(self, "_execution_contract", contract)
+        return dict(contract)
 
     def normalized_warmup_summary(self, summary: Mapping[str, Any], *, segment_view: SegmentView) -> dict[str, Any]:
         normalized = dict(summary)
@@ -136,7 +150,7 @@ class TrustedLeakFreeBacktestRunner:
             return strategy_callback(history, snapshot)
 
         candles = dataframe_to_candles(df, symbol=self.symbol, interval=self.interval)
-        engine = self.engine_factory()
+        engine = self._ensure_engine()
         actual_contract = self.execution_contract()
         if actual_contract["symbol"] != self.symbol or actual_contract["interval"] != self.interval:
             raise ValidationEvaluationError("engine symbol or interval diverges from trusted runner contract.")
