@@ -387,6 +387,19 @@ def test_service_cache_respeita_limit_e_devolve_mais_recente():
     assert second.candles[-1] == first.candles[-1]
 
 
+def test_service_primeiro_fetch_retorna_exatamente_limit():
+    provider = MagicMock()
+    payload_501 = _payload_candles(1704067200000, count=501)
+    provider.fetch_klines.return_value = payload_501
+    service = TrustedMarketDataService(provider=provider, cache=MarketDataCache(), ttl_seconds=60, max_age_seconds=999999999)
+
+    package = service.fetch("BTCUSDT", "1h", 500)
+
+    assert provider.fetch_klines.call_args.args[2] == 501
+    assert len(package.candles) == 500
+    assert package.candles == tuple(validate_klines_payload(payload_501, symbol="BTCUSDT", interval="1h", now=datetime(2024, 1, 25, 0, 30, tzinfo=timezone.utc))[-500:])
+
+
 def test_service_pede_um_candle_extra_e_ignora_candle_em_formacao(monkeypatch):
     from market_data import service as service_module
     from market_data import validation as validation_module
@@ -416,16 +429,75 @@ def test_service_pede_um_candle_extra_e_ignora_candle_em_formacao(monkeypatch):
     assert package.candles[-1].close_time <= FrozenDateTime.current
 
 
-def test_service_respeita_limit_maximo_da_binance():
-    provider = MagicMock()
-    payload = _payload_candles(1704067200000, count=1000)
-    provider.fetch_klines.return_value = payload
-    service = TrustedMarketDataService(provider=provider, cache=MarketDataCache(), ttl_seconds=60, max_age_seconds=999999999)
+def test_service_limit_maximo_busca_candle_historico_faltante():
+    from market_data import service as service_module
+    from market_data import validation as validation_module
 
-    package = service.fetch("BTCUSDT", "1h", 1000)
+    class FrozenDateTime(datetime):
+        current = datetime(2024, 2, 1, 12, 30, tzinfo=timezone.utc)
 
-    assert provider.fetch_klines.call_args.args[2] == 1000
-    assert len(package.candles) == 1000
+        @classmethod
+        def now(cls, tz=None):
+            return cls.current if tz is not None else cls.current.replace(tzinfo=None)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(service_module, "datetime", FrozenDateTime)
+    monkeypatch.setattr(validation_module, "datetime", FrozenDateTime)
+    try:
+        start_ms = int((FrozenDateTime.current - timedelta(hours=1001)).timestamp() * 1000)
+        first_payload = _payload_candles(start_ms, count=1000)
+        first_payload[-1][6] = int((FrozenDateTime.current + timedelta(minutes=30)).timestamp() * 1000)
+        fallback_payload = _payload_candles(start_ms - 3600000, count=1)
+
+        provider = MagicMock()
+        provider.fetch_klines.side_effect = [first_payload, fallback_payload]
+        service = TrustedMarketDataService(provider=provider, cache=MarketDataCache(), ttl_seconds=60, max_age_seconds=999999999)
+
+        package = service.fetch("BTCUSDT", "1h", 1000)
+
+        assert provider.fetch_klines.call_args_list[0].args[2] == 1000
+        assert provider.fetch_klines.call_args_list[1].args[2] == 1
+        assert "end_time" in provider.fetch_klines.call_args_list[1].kwargs
+        assert len(package.candles) == 1000
+        assert package.candles[-1].close_time <= FrozenDateTime.current
+    finally:
+        monkeypatch.undo()
+
+
+def test_service_limit_maximo_rejeita_resposta_fallback_duplicada_ou_com_lacuna():
+    from market_data import service as service_module
+    from market_data import validation as validation_module
+
+    class FrozenDateTime(datetime):
+        current = datetime(2024, 2, 1, 12, 30, tzinfo=timezone.utc)
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls.current if tz is not None else cls.current.replace(tzinfo=None)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(service_module, "datetime", FrozenDateTime)
+    monkeypatch.setattr(validation_module, "datetime", FrozenDateTime)
+    try:
+        start_ms = int((FrozenDateTime.current - timedelta(hours=1001)).timestamp() * 1000)
+        first_payload = _payload_candles(start_ms, count=1000)
+        first_payload[-1][6] = int((FrozenDateTime.current + timedelta(minutes=30)).timestamp() * 1000)
+        duplicate_payload = _payload_candles(start_ms, count=1)
+        gap_payload = _payload_candles(start_ms - 7200000, count=1)
+
+        provider = MagicMock()
+        provider.fetch_klines.side_effect = [first_payload, duplicate_payload]
+        service = TrustedMarketDataService(provider=provider, cache=MarketDataCache(), ttl_seconds=60, max_age_seconds=999999999)
+        with pytest.raises(MarketDataValidationError):
+            service.fetch("BTCUSDT", "1h", 1000)
+
+        provider = MagicMock()
+        provider.fetch_klines.side_effect = [first_payload, gap_payload]
+        service = TrustedMarketDataService(provider=provider, cache=MarketDataCache(), ttl_seconds=60, max_age_seconds=999999999)
+        with pytest.raises(MarketDataValidationError):
+            service.fetch("BTCUSDT", "1h", 1000)
+    finally:
+        monkeypatch.undo()
 
 
 @pytest.mark.parametrize(

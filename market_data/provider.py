@@ -20,11 +20,14 @@ class BinancePublicKlinesProvider:
         self.timeout = timeout
         self.session = session or requests.Session()
 
-    def fetch_klines(self, symbol: str, interval: str, limit: int = 500) -> list[Any]:
+    def fetch_klines(self, symbol: str, interval: str, limit: int = 500, *, end_time: int | None = None) -> list[Any]:
+        params = {"symbol": symbol, "interval": interval, "limit": limit}
+        if end_time is not None:
+            params["endTime"] = end_time
         try:
             response = self.session.get(
                 self.base_url,
-                params={"symbol": symbol, "interval": interval, "limit": limit},
+                params=params,
                 timeout=self.timeout,
             )
         except requests.Timeout as exc:

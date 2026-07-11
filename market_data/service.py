@@ -71,6 +71,27 @@ class TrustedMarketDataService:
             cache_status=cache_status,
         )
 
+    def _candles_to_payload(self, candles: tuple[Candle, ...]) -> list[list[Any]]:
+        payload: list[list[Any]] = []
+        for candle in candles:
+            payload.append(
+                [
+                    int(candle.open_time.timestamp() * 1000),
+                    str(candle.open),
+                    str(candle.high),
+                    str(candle.low),
+                    str(candle.close),
+                    str(candle.volume),
+                    int(candle.close_time.timestamp() * 1000),
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                ]
+            )
+        return payload
+
     def fetch(self, symbol: str = "BTCUSDT", interval: str = "1h", limit: int = 500) -> MarketDataPackage:
         symbol, interval = validate_symbol_interval(symbol, interval)
         limit = validate_limit(limit)
@@ -100,10 +121,22 @@ class TrustedMarketDataService:
         candles = validate_klines_payload(payload, symbol=symbol, interval=interval, now=now)
         validate_market_data_consistency(candles, max_age_seconds=self.max_age_seconds, now=now)
         if len(candles) < limit:
-            raise MarketDataValidationError("Not enough closed candles available.")
+            if limit != MAX_BINANCE_LIMIT or len(candles) < limit - 1 or not candles:
+                raise MarketDataValidationError("Not enough closed candles available.")
+            previous_end_time = int((candles[0].open_time - timedelta(milliseconds=1)).timestamp() * 1000)
+            fallback_payload = self.provider.fetch_klines(symbol, interval, 1, end_time=previous_end_time)
+            fallback_candles = validate_klines_payload(fallback_payload, symbol=symbol, interval=interval, now=now)
+            if len(fallback_candles) != 1:
+                raise MarketDataValidationError("Not enough closed candles available.")
+            merged = fallback_candles + candles
+            merged = validate_klines_payload(self._candles_to_payload(tuple(merged)), symbol=symbol, interval=interval, now=now)
+            validate_market_data_consistency(merged, max_age_seconds=self.max_age_seconds, now=now)
+            candles = merged
+            if len(candles) < limit:
+                raise MarketDataValidationError("Not enough closed candles available.")
         snapshot = candles_to_market_snapshot(candles)
         entry = self.cache.set(symbol, interval, tuple(candles), snapshot)
-        return MarketDataPackage(
+        full_package = MarketDataPackage(
             symbol=symbol,
             interval=interval,
             candles=entry.candles,
@@ -113,6 +146,7 @@ class TrustedMarketDataService:
             expires_at=entry.expires_at,
             cache_status="miss",
         )
+        return self._package_for_limit(full_package, limit, "miss")
 
 
 trusted_market_data_service = TrustedMarketDataService()
