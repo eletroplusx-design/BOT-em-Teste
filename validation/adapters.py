@@ -8,6 +8,7 @@ from typing import Any
 import pandas as pd
 
 from backtesting import dataframe_to_candles
+from backtesting import BacktestResult, LeakFreeBacktestEngine
 from backtesting.models import BacktestConfig, GapPolicy, IntrabarPolicy
 
 from .errors import ValidationEvaluationError
@@ -90,6 +91,8 @@ class TrustedLeakFreeBacktestRunner:
         engine = self._engine
         if engine is None:
             engine = self.engine_factory()
+            if not isinstance(engine, LeakFreeBacktestEngine):
+                raise ValidationEvaluationError("trusted runner requires LeakFreeBacktestEngine.")
             object.__setattr__(self, "_engine", engine)
         return engine
 
@@ -157,6 +160,15 @@ class TrustedLeakFreeBacktestRunner:
         if actual_contract["paper_only"] is not True:
             raise ValidationEvaluationError("engine must remain paper_only.")
         result = engine.run(candles, guarded_strategy)
+        if not isinstance(result, BacktestResult):
+            raise ValidationEvaluationError("trusted runner must return BacktestResult.")
+        if result.config != engine.config:
+            raise ValidationEvaluationError("result config must match engine config.")
+        for trade in result.trades:
+            if trade.order.paper is not True or trade.trade.paper is not True:
+                raise ValidationEvaluationError("trusted runner trades must remain paper.")
+            if trade.entry_fill.is_real is not False or trade.exit_fill.is_real is not False:
+                raise ValidationEvaluationError("trusted runner fills must remain paper.")
         if any(trade.entry_index < segment_view.trade_start_index for trade in result.trades):
             raise ValidationEvaluationError("warm-up trade leakage detected.")
         return {"summary": self.normalized_warmup_summary(result.summary, segment_view=segment_view), "execution_contract": actual_contract}

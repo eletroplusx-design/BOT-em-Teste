@@ -468,6 +468,7 @@ def test_walk_forward_selection_ignores_test_metrics_and_freezes_once(sample_btc
         symbol="BTCUSDT",
         interval="1h",
         seed=11,
+        require_trusted_runner=False,
     )
     train_validation_scores = {
         "alpha": _metrics(net_return_percent="12", expectancy="3", profit_factor="2.5", drawdown_max_percent="2", win_rate="70"),
@@ -499,6 +500,7 @@ def test_walk_forward_selection_ignores_test_metrics_and_freezes_once(sample_btc
         symbol="BTCUSDT",
         interval="1h",
         seed=11,
+        require_trusted_runner=False,
     )
     result_b = validator_b.run(sample_btc_data.iloc[:260].copy(), [alpha, beta], runner=runner_b)
     assert result_b.windows[0].selected_candidate == alpha
@@ -552,12 +554,12 @@ def test_walk_forward_two_phase_selection_and_segment_signatures_are_isolated(sa
 
     events_a: list[tuple[str, str]] = []
     contexts_a: list[dict[str, object]] = []
-    validator_a = WalkForwardValidator(split_config=split_config, selection_criteria=SelectionCriteria(min_total_trades=1))
+    validator_a = WalkForwardValidator(split_config=split_config, selection_criteria=SelectionCriteria(min_total_trades=1), require_trusted_runner=False)
     result_a = validator_a.run(base_df, [alpha, beta], runner=make_runner(events_a, contexts_a))
 
     events_b: list[tuple[str, str]] = []
     contexts_b: list[dict[str, object]] = []
-    validator_b = WalkForwardValidator(split_config=split_config, selection_criteria=SelectionCriteria(min_total_trades=1))
+    validator_b = WalkForwardValidator(split_config=split_config, selection_criteria=SelectionCriteria(min_total_trades=1), require_trusted_runner=False)
     result_b = validator_b.run(altered_df, [alpha, beta], runner=make_runner(events_b, contexts_b))
 
     assert result_a.windows[0].selected_candidate == result_b.windows[0].selected_candidate
@@ -625,6 +627,7 @@ def test_trusted_runner_contract_mismatch_and_manifest_costs_are_effective(sampl
         costs={"entry_fee_rate": "0", "exit_fee_rate": "0", "spread_bps": "0", "slippage_bps": "0", "leverage": "1"},
         symbol="BTCUSDT",
         interval="1h",
+        require_trusted_runner=False,
     )
     result = validator.run(sample_btc_data.iloc[:260].copy(), [alpha], runner=runner)
     assert result.manifest["execution_contract"]["paper_only"] is True
@@ -640,6 +643,7 @@ def test_trusted_runner_contract_mismatch_and_manifest_costs_are_effective(sampl
         costs={"entry_fee_rate": "0.0002", "exit_fee_rate": "0.0002", "spread_bps": "0", "slippage_bps": "0", "leverage": "1"},
         symbol="BTCUSDT",
         interval="1h",
+        require_trusted_runner=False,
     )
     changed_result = changed_validator.run(sample_btc_data.iloc[:260].copy(), [alpha], runner=changed_cost_runner)
     assert result.manifest["manifest_hash"] != changed_result.manifest["manifest_hash"]
@@ -651,6 +655,7 @@ def test_trusted_runner_contract_mismatch_and_manifest_costs_are_effective(sampl
         costs={"entry_fee_rate": "0", "exit_fee_rate": "0", "spread_bps": "0", "slippage_bps": "0", "leverage": "1"},
         symbol="ETHUSDT",
         interval="1h",
+        require_trusted_runner=False,
     )
     with pytest.raises(ValidationFreezeError):
         mismatch_validator.run(sample_btc_data.iloc[:260].copy(), [alpha], runner=runner)
@@ -703,6 +708,7 @@ def test_trusted_runner_excludes_warmup_from_segment_metrics(sample_btc_data):
         costs={"entry_fee_rate": "0", "exit_fee_rate": "0", "spread_bps": "0", "slippage_bps": "0", "leverage": "1"},
         symbol="BTCUSDT",
         interval="1h",
+        require_trusted_runner=False,
     )
     result = validator.run(sample_btc_data.iloc[:260].copy(), [alpha], runner=runner)
     assert result.windows[0].test_metrics is not None
@@ -824,6 +830,146 @@ def test_trusted_runner_uses_single_engine_instance_and_manifest_tracks_selectio
     assert result.windows[0].selected_candidate == result_test_changed.windows[0].selected_candidate
 
 
+def test_generic_runner_with_execution_contract_stays_untrusted_and_official_mode_blocks_it(sample_btc_data):
+    alpha = _candidate("alpha", risk="low")
+    split_config = ValidationSplitConfig(
+        mode="rolling",
+        train_bars=120,
+        validation_bars=40,
+        test_bars=40,
+        warmup_bars=20,
+        purge_bars=5,
+        embargo_bars=5,
+        step_bars=40,
+    )
+
+    class FakeTrustedRunner:
+        def execution_contract(self):
+            return {
+                "entry_fee_rate": "0",
+                "exit_fee_rate": "0",
+                "spread_bps": "0",
+                "slippage_bps": "0",
+                "leverage": "1",
+                "intrabar_policy": "STOP_FIRST",
+                "gap_policy": "OPEN_PRICE",
+                "paper_only": True,
+                "symbol": "BTCUSDT",
+                "interval": "1h",
+                "strategy_version": "v4_walk_forward",
+            }
+
+        def __call__(self, df, candidate, segment, context=None, frozen_selection=None):
+            metrics = _metrics(net_return_percent="3", expectancy="1", profit_factor="1.2", drawdown_max_percent="2", win_rate="60", total_trades=5)
+            return {"summary": metrics.as_dict()}
+
+    permissive_validator = WalkForwardValidator(
+        split_config=split_config,
+        selection_criteria=SelectionCriteria(min_total_trades=1),
+        strategy_version="v4_walk_forward",
+        costs={"entry_fee_rate": "0", "exit_fee_rate": "0", "spread_bps": "0", "slippage_bps": "0", "leverage": "1"},
+        symbol="BTCUSDT",
+        interval="1h",
+        require_trusted_runner=False,
+    )
+    permissive_result = permissive_validator.run(sample_btc_data.iloc[:260].copy(), [alpha], runner=FakeTrustedRunner())
+    assert permissive_result.manifest["runner_trusted"] is False
+    assert permissive_result.summary["runner_trusted"] is False
+
+    strict_validator = WalkForwardValidator(
+        split_config=split_config,
+        selection_criteria=SelectionCriteria(min_total_trades=1),
+        strategy_version="v4_walk_forward",
+        costs={"entry_fee_rate": "0", "exit_fee_rate": "0", "spread_bps": "0", "slippage_bps": "0", "leverage": "1"},
+        symbol="BTCUSDT",
+        interval="1h",
+        require_trusted_runner=True,
+    )
+    with pytest.raises(ValidationFreezeError):
+        strict_validator.run(sample_btc_data.iloc[:260].copy(), [alpha], runner=FakeTrustedRunner())
+
+
+def test_trusted_runner_rejects_fake_engine_and_fake_result(sample_btc_data):
+    alpha = _candidate("alpha", risk="low")
+    split_config = ValidationSplitConfig(
+        mode="rolling",
+        train_bars=120,
+        validation_bars=40,
+        test_bars=40,
+        warmup_bars=20,
+        purge_bars=5,
+        embargo_bars=5,
+        step_bars=40,
+    )
+
+    class FakeEngine:
+        def __init__(self):
+            self.config = BacktestConfig(
+                initial_capital=Decimal("10000"),
+                risk_percent=Decimal("1"),
+                entry_fee_rate=Decimal("0"),
+                exit_fee_rate=Decimal("0"),
+                spread_bps=Decimal("0"),
+                slippage_bps=Decimal("0"),
+                leverage=Decimal("1"),
+                symbol="BTCUSDT",
+                interval="1h",
+                strategy_version="v4_walk_forward",
+            )
+
+        def run(self, candles, strategy):
+            return object()
+
+    def strategy_factory(candidate):
+        def strategy(history, snapshot):
+            candle = history[-1]
+            entry = Decimal(str(candle.close))
+            return _signal(candle.close_time, entry=entry, stop=entry - Decimal("5"), take=entry + Decimal("10"))
+
+        return strategy
+
+    fake_engine_runner = TrustedLeakFreeBacktestRunner(
+        engine_factory=lambda: FakeEngine(),
+        strategy_factory=strategy_factory,
+        symbol="BTCUSDT",
+        interval="1h",
+    )
+    validator = WalkForwardValidator(
+        split_config=split_config,
+        selection_criteria=SelectionCriteria(min_total_trades=1),
+        strategy_version="v4_walk_forward",
+        costs={"entry_fee_rate": "0", "exit_fee_rate": "0", "spread_bps": "0", "slippage_bps": "0", "leverage": "1"},
+        symbol="BTCUSDT",
+        interval="1h",
+    )
+    with pytest.raises(ValidationEvaluationError):
+        validator.run(sample_btc_data.iloc[:260].copy(), [alpha], runner=fake_engine_runner)
+
+    real_engine = LeakFreeBacktestEngine(
+        BacktestConfig(
+            initial_capital=Decimal("10000"),
+            risk_percent=Decimal("1"),
+            entry_fee_rate=Decimal("0"),
+            exit_fee_rate=Decimal("0"),
+            spread_bps=Decimal("0"),
+            slippage_bps=Decimal("0"),
+            leverage=Decimal("1"),
+            symbol="BTCUSDT",
+            interval="1h",
+            strategy_version="v4_walk_forward",
+        )
+    )
+    real_engine.run = lambda candles, strategy: object()
+    fake_result_runner = TrustedLeakFreeBacktestRunner(
+        engine_factory=lambda: real_engine,
+        strategy_factory=strategy_factory,
+        symbol="BTCUSDT",
+        interval="1h",
+    )
+    with pytest.raises(ValidationEvaluationError):
+        validator.run(sample_btc_data.iloc[:260].copy(), [alpha], runner=fake_result_runner)
+
+
 def test_generic_runner_marks_manifest_as_untrusted(sample_btc_data):
     alpha = _candidate("alpha", risk="low")
     split_config = ValidationSplitConfig(
@@ -848,6 +994,7 @@ def test_generic_runner_marks_manifest_as_untrusted(sample_btc_data):
         costs={"entry_fee_rate": "0", "exit_fee_rate": "0", "spread_bps": "0", "slippage_bps": "0", "leverage": "1"},
         symbol="BTCUSDT",
         interval="1h",
+        require_trusted_runner=False,
     )
     result = validator.run(sample_btc_data.iloc[:260].copy(), [alpha], runner=runner)
     assert result.manifest["runner_trusted"] is False
@@ -866,7 +1013,7 @@ def test_runner_context_isolation_and_warmup_engine_integration(sample_btc_data)
         embargo_bars=5,
         step_bars=40,
     )
-    validator = WalkForwardValidator(split_config=split_config, selection_criteria=SelectionCriteria(min_total_trades=1))
+    validator = WalkForwardValidator(split_config=split_config, selection_criteria=SelectionCriteria(min_total_trades=1), require_trusted_runner=False)
     runner = _engine_runner_factory()
     result = validator.run(_build_sample_frame(260), [alpha], runner=runner)
     assert result.windows
@@ -901,6 +1048,8 @@ def test_leak_free_engine_smoke_uses_costs_and_paper_only():
     assert result.config.paper_only is True
     assert result.summary["entry_fees"] > 0
     assert all(trade.trade.paper is True for trade in result.trades)
+    assert all(trade.entry_fill.is_real is False for trade in result.trades)
+    assert all(trade.exit_fill.is_real is False for trade in result.trades)
 
 
 def test_validate_frozen_selection_blocks_mismatch_and_reselection(sample_btc_data):
@@ -916,7 +1065,7 @@ def test_validate_frozen_selection_blocks_mismatch_and_reselection(sample_btc_da
         embargo_bars=5,
         step_bars=40,
     )
-    validator = WalkForwardValidator(split_config=split_config, selection_criteria=SelectionCriteria(min_total_trades=1))
+    validator = WalkForwardValidator(split_config=split_config, selection_criteria=SelectionCriteria(min_total_trades=1), require_trusted_runner=False)
     runner = _window_runner_factory(
         {
             "alpha": _metrics(net_return_percent="5", expectancy="1", profit_factor="1.5", drawdown_max_percent="2", win_rate="60"),

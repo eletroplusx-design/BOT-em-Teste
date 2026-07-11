@@ -9,6 +9,7 @@ from typing import Any
 import pandas as pd
 
 from .artifacts import build_data_signature, build_manifest, freeze_selection
+from .adapters import TrustedLeakFreeBacktestRunner
 from .errors import ValidationFreezeError
 from .evaluation import evaluate_frozen_selection, evaluate_segment
 from .models import CandidateConfig, CandidateEvaluation, FrozenSelection, SegmentView, SelectionCriteria, ValidationSplitConfig, WalkForwardResult, WalkForwardWindowResult
@@ -26,6 +27,7 @@ class WalkForwardValidator:
     symbol: str = "BTCUSDT"
     interval: str = "1h"
     seed: int | None = None
+    require_trusted_runner: bool = True
     _session_consumed: bool = field(default=False, init=False, repr=False)
 
     def _window_manifest(
@@ -100,6 +102,8 @@ class WalkForwardValidator:
         }
 
     def _runner_execution_contract(self, runner) -> dict[str, Any] | None:
+        if not isinstance(runner, TrustedLeakFreeBacktestRunner):
+            return None
         contract_fn = getattr(runner, "execution_contract", None)
         if contract_fn is None:
             return None
@@ -270,7 +274,11 @@ class WalkForwardValidator:
 
     def _window_contract(self, runner) -> tuple[dict[str, Any], bool]:
         contract = self._runner_execution_contract(runner)
-        runner_trusted = contract is not None
+        if contract is None:
+            if self.require_trusted_runner:
+                raise ValidationFreezeError("trusted runner is required for this validation workflow.")
+            return {}, False
+        runner_trusted = True
         validated_contract = self._validate_execution_contract(contract)
         return validated_contract, runner_trusted
 
@@ -363,7 +371,7 @@ class WalkForwardValidator:
         return WalkForwardResult(windows=tuple(results), summary=summary, manifest=manifest)
 
 
-def run_walk_forward_validation(df: pd.DataFrame, candidate_grid: Sequence[CandidateConfig], *, runner, split_config: ValidationSplitConfig | None = None, selection_criteria: SelectionCriteria | None = None, strategy_version: str = "v4_walk_forward", symbol: str = "BTCUSDT", interval: str = "1h", costs: dict[str, Any] | None = None, seed: int | None = None) -> WalkForwardResult:
+def run_walk_forward_validation(df: pd.DataFrame, candidate_grid: Sequence[CandidateConfig], *, runner, split_config: ValidationSplitConfig | None = None, selection_criteria: SelectionCriteria | None = None, strategy_version: str = "v4_walk_forward", symbol: str = "BTCUSDT", interval: str = "1h", costs: dict[str, Any] | None = None, seed: int | None = None, require_trusted_runner: bool = True) -> WalkForwardResult:
     validator = WalkForwardValidator(
         split_config=split_config or ValidationSplitConfig(),
         selection_criteria=selection_criteria or SelectionCriteria(),
@@ -372,5 +380,6 @@ def run_walk_forward_validation(df: pd.DataFrame, candidate_grid: Sequence[Candi
         symbol=symbol,
         interval=interval,
         seed=seed,
+        require_trusted_runner=require_trusted_runner,
     )
     return validator.run(df, candidate_grid, runner=runner)
