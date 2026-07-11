@@ -48,6 +48,16 @@ _INTERVAL_SECONDS = {
 }
 
 
+def _is_month_start(dt: datetime) -> bool:
+    return dt.day == 1 and dt.hour == 0 and dt.minute == 0 and dt.second == 0 and dt.microsecond == 0
+
+
+def _next_month_start(dt: datetime) -> datetime:
+    year = dt.year + (1 if dt.month == 12 else 0)
+    month = 1 if dt.month == 12 else dt.month + 1
+    return datetime(year, month, 1, tzinfo=timezone.utc)
+
+
 def _finite_decimal(value: Any, field_name: str, *, allow_zero: bool = True) -> Decimal:
     try:
         dec = Decimal(str(value))
@@ -118,7 +128,7 @@ def validate_klines_payload(
     if current_time.tzinfo is None or current_time.utcoffset() is None:
         raise MarketDataValidationError("Reference time must include timezone information.")
 
-    for row in payload:
+    for idx, row in enumerate(payload):
         if not isinstance(row, (list, tuple)):
             raise MarketDataValidationError("Malformed kline row.")
         candle = _row_to_candle(row, symbol, interval)
@@ -128,12 +138,34 @@ def validate_klines_payload(
             raise MarketDataValidationError("Duplicate candle detected.")
         if candle.open_time > current_time:
             raise MarketDataValidationError("Future candle detected.")
-        if last_open_time is not None:
-            delta = int((candle.open_time - last_open_time).total_seconds())
-            if delta < expected_gap:
-                raise MarketDataValidationError("Klines are out of order.")
-            if delta > expected_gap:
-                raise MarketDataValidationError("Missing candle detected.")
+
+        if interval == "1M":
+            if not _is_month_start(candle.open_time):
+                raise MarketDataValidationError("Monthly candles must start at month boundaries.")
+            expected_open_time = _next_month_start(last_open_time) if last_open_time is not None else candle.open_time
+            if last_open_time is not None:
+                if candle.open_time < expected_open_time:
+                    raise MarketDataValidationError("Klines are out of order.")
+                if candle.open_time > expected_open_time:
+                    raise MarketDataValidationError("Missing candle detected.")
+            next_month = _next_month_start(candle.open_time)
+            if candle.close_time > next_month:
+                raise MarketDataValidationError("Monthly candle closes beyond its calendar boundary.")
+        else:
+            if last_open_time is not None:
+                delta = int((candle.open_time - last_open_time).total_seconds())
+                if delta < expected_gap:
+                    raise MarketDataValidationError("Klines are out of order.")
+                if delta > expected_gap:
+                    raise MarketDataValidationError("Missing candle detected.")
+
+        if candle.close_time > current_time:
+            if idx != len(payload) - 1:
+                raise MarketDataValidationError("Open candle detected before the end of the series.")
+            if not candles:
+                raise MarketDataValidationError("No closed candles available.")
+            break
+
         if candle.high < candle.low:
             raise MarketDataValidationError("high must be >= low.")
         if not (candle.low <= candle.open <= candle.high):

@@ -59,22 +59,28 @@ class TrustedMarketDataService:
 
     def fetch(self, symbol: str = "BTCUSDT", interval: str = "1h", limit: int = 500) -> MarketDataPackage:
         symbol, interval = validate_symbol_interval(symbol, interval)
+        now = datetime.now(timezone.utc)
         cached = self.cache.get(symbol, interval)
         if cached is not None:
-            return MarketDataPackage(
-                symbol=symbol,
-                interval=interval,
-                candles=cached.candles,
-                snapshot=cached.snapshot,
-                source=cached.snapshot.source.value if hasattr(cached.snapshot.source, "value") else str(cached.snapshot.source),
-                fetched_at=cached.stored_at,
-                expires_at=cached.expires_at,
-                cache_status="hit",
-            )
+            try:
+                validate_market_data_consistency(cached.candles, max_age_seconds=self.max_age_seconds, now=now)
+            except (MarketDataExpiredError, MarketDataValidationError):
+                self.cache.discard(symbol, interval)
+            else:
+                return MarketDataPackage(
+                    symbol=symbol,
+                    interval=interval,
+                    candles=cached.candles,
+                    snapshot=cached.snapshot,
+                    source=cached.snapshot.source.value if hasattr(cached.snapshot.source, "value") else str(cached.snapshot.source),
+                    fetched_at=cached.stored_at,
+                    expires_at=cached.expires_at,
+                    cache_status="hit",
+                )
 
         payload = self.provider.fetch_klines(symbol, interval, limit)
-        candles = validate_klines_payload(payload, symbol=symbol, interval=interval)
-        validate_market_data_consistency(candles, max_age_seconds=self.max_age_seconds)
+        candles = validate_klines_payload(payload, symbol=symbol, interval=interval, now=now)
+        validate_market_data_consistency(candles, max_age_seconds=self.max_age_seconds, now=now)
         snapshot = candles_to_market_snapshot(candles)
         entry = self.cache.set(symbol, interval, tuple(candles), snapshot)
         return MarketDataPackage(

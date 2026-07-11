@@ -50,6 +50,35 @@ def _payload_candles(start_ms: int, step_ms: int = 3600000, count: int = 2, clos
     return payload
 
 
+def _monthly_payload(starts: list[datetime]):
+    payload = []
+    for idx, open_time in enumerate(starts):
+        if open_time.tzinfo is None:
+            raise ValueError("open_time must be timezone-aware")
+        year = open_time.year + (1 if open_time.month == 12 else 0)
+        month = 1 if open_time.month == 12 else open_time.month + 1
+        next_month = datetime(year, month, 1, tzinfo=timezone.utc)
+        close_time = next_month - timedelta(seconds=1)
+        base = 200 + idx
+        payload.append(
+            [
+                int(open_time.timestamp() * 1000),
+                str(base),
+                str(base + 5),
+                str(base - 2),
+                str(base + 1),
+                str(1000 + idx),
+                int(close_time.timestamp() * 1000),
+                0,
+                0,
+                0,
+                0,
+                0,
+            ]
+        )
+    return payload
+
+
 class FakeResponse:
     def __init__(self, *, status_code=200, payload=None, json_error=None):
         self.status_code = status_code
@@ -101,8 +130,12 @@ def test_provider_network_failures(side_effect, expected):
 
 def test_provider_http_and_rate_limit_errors():
     session = MagicMock()
-    session.get.return_value = FakeResponse(status_code=429, payload=[])
+    session.get.return_value = FakeResponse(status_code=400, payload=[])
     provider = BinancePublicKlinesProvider(session=session)
+    with pytest.raises(MarketDataHTTPError):
+        provider.fetch_klines("BTCUSDT", "1h", 2)
+
+    session.get.return_value = FakeResponse(status_code=429, payload=[])
     with pytest.raises(MarketDataRateLimitError):
         provider.fetch_klines("BTCUSDT", "1h", 2)
 
@@ -184,8 +217,60 @@ def test_validate_klines_payload_rejeita_ohlc_incoerente_nan_inf_timezone_e_futu
 
 def test_validate_klines_payload_rejeita_timestamp_naive():
     candles = _payload_candles(1704067200000)
-    parsed = validate_klines_payload(candles, symbol="BTCUSDT", interval="1h", now=datetime(2024, 1, 1, 3, 30, tzinfo=timezone.utc))
-    assert parsed[0].open_time.tzinfo == timezone.utc
+    with pytest.raises(MarketDataValidationError):
+        validate_klines_payload(candles, symbol="BTCUSDT", interval="1h", now=datetime(2024, 1, 1, 3, 30))
+
+
+def test_service_ignora_candle_em_formacao_e_snapshot_usa_ultimo_fechado(monkeypatch):
+    from market_data import service as service_module
+    from market_data import validation as validation_module
+
+    class FrozenDateTime(datetime):
+        current = datetime(2024, 1, 1, 3, 30, tzinfo=timezone.utc)
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls.current if tz is not None else cls.current.replace(tzinfo=None)
+
+    monkeypatch.setattr(service_module, "datetime", FrozenDateTime)
+    monkeypatch.setattr(validation_module, "datetime", FrozenDateTime)
+
+    payload = _payload_candles(int(datetime(2024, 1, 1, 2, 0, tzinfo=timezone.utc).timestamp() * 1000), count=2, close_delta=60000)
+    payload[1][6] = int((FrozenDateTime.current + timedelta(minutes=30)).timestamp() * 1000)
+    session = MagicMock()
+    session.get.return_value = FakeResponse(payload=payload)
+    provider = BinancePublicKlinesProvider(session=session)
+    service = TrustedMarketDataService(provider=provider, cache=MarketDataCache(ttl_seconds=60), ttl_seconds=60, max_age_seconds=999999)
+
+    package = service.fetch("BTCUSDT", "1h", 2)
+
+    assert len(package.candles) == 1
+    assert package.snapshot.timestamp == package.candles[-1].close_time
+    assert package.candles[-1].close_time <= FrozenDateTime.current
+
+
+def test_service_bloqueia_quando_todos_os_candles_estao_abertos(monkeypatch):
+    from market_data import service as service_module
+    from market_data import validation as validation_module
+
+    class FrozenDateTime(datetime):
+        current = datetime(2024, 1, 1, 3, 30, tzinfo=timezone.utc)
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls.current if tz is not None else cls.current.replace(tzinfo=None)
+
+    monkeypatch.setattr(service_module, "datetime", FrozenDateTime)
+    monkeypatch.setattr(validation_module, "datetime", FrozenDateTime)
+
+    payload = _payload_candles(int(datetime(2024, 1, 1, 3, 0, tzinfo=timezone.utc).timestamp() * 1000), count=1, close_delta=3600000)
+    session = MagicMock()
+    session.get.return_value = FakeResponse(payload=payload)
+    provider = BinancePublicKlinesProvider(session=session)
+    service = TrustedMarketDataService(provider=provider, cache=MarketDataCache(ttl_seconds=60), ttl_seconds=60, max_age_seconds=999999)
+
+    with pytest.raises(MarketDataValidationError, match="No closed candles available"):
+        service.fetch("BTCUSDT", "1h", 1)
 
 
 def test_validate_klines_payload_rejeita_duplicado():
@@ -196,24 +281,44 @@ def test_validate_klines_payload_rejeita_duplicado():
 
 
 def test_service_cache_valid_expired_and_isolation(monkeypatch):
+    from market_data import service as service_module
+    from market_data import validation as validation_module
+
+    class FrozenDateTime(datetime):
+        current = datetime(2024, 1, 1, 3, 30, tzinfo=timezone.utc)
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls.current if tz is not None else cls.current.replace(tzinfo=None)
+
+    monkeypatch.setattr(service_module, "datetime", FrozenDateTime)
+    monkeypatch.setattr(validation_module, "datetime", FrozenDateTime)
+
     cache = MarketDataCache(ttl_seconds=1)
     session = MagicMock()
-    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-    session.get.return_value = FakeResponse(payload=_payload_candles(now_ms - 2 * 3600000))
+    first_payload = _payload_candles(int(datetime(2024, 1, 1, 2, 0, tzinfo=timezone.utc).timestamp() * 1000), count=2, close_delta=60000)
+    second_payload = _payload_candles(int(datetime(2024, 1, 1, 4, 0, tzinfo=timezone.utc).timestamp() * 1000), count=2, close_delta=60000)
+    third_payload = _payload_candles(int(datetime(2024, 1, 1, 4, 0, tzinfo=timezone.utc).timestamp() * 1000), count=2, close_delta=60000)
+    session.get.side_effect = [FakeResponse(payload=first_payload), FakeResponse(payload=second_payload), FakeResponse(payload=third_payload)]
     provider = BinancePublicKlinesProvider(session=session)
-    service = TrustedMarketDataService(provider=provider, cache=cache, ttl_seconds=1, max_age_seconds=999999)
+    service = TrustedMarketDataService(provider=provider, cache=cache, ttl_seconds=1, max_age_seconds=3600)
 
     first = service.fetch("BTCUSDT", "1h", 2)
     assert first.cache_status == "miss"
     assert service.cache.status("BTCUSDT", "1h") == "hit"
 
+    FrozenDateTime.current = FrozenDateTime.current + timedelta(hours=2)
     second = service.fetch("BTCUSDT", "1h", 2)
-    assert second.cache_status == "hit"
-    assert session.get.call_count == 1
+    assert second.cache_status == "miss"
+    assert session.get.call_count == 2
+
+    assert service.cache.status("BTCUSDT", "15m") == "miss"
+    assert service.cache.peek("BTCUSDT", "15m") is None
 
     other = service.fetch("ETHUSDT", "1h", 2)
     assert other.symbol == "ETHUSDT"
     assert service.cache.status("ETHUSDT", "1h") == "hit"
+    assert session.get.call_count == 3
 
     cached = service.cache.peek("BTCUSDT", "1h")
     assert cached is not None
@@ -232,6 +337,57 @@ def test_service_expired_data_and_no_silent_reuse(monkeypatch):
     service = TrustedMarketDataService(provider=provider, cache=cache, ttl_seconds=1, max_age_seconds=1)
     with pytest.raises(MarketDataExpiredError):
         service.fetch("BTCUSDT", "1h", 2)
+
+
+def test_validate_klines_payload_interval_mensal_calendar_aware():
+    jan = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    feb = datetime(2024, 2, 1, tzinfo=timezone.utc)
+    mar = datetime(2024, 3, 1, tzinfo=timezone.utc)
+    parsed = validate_klines_payload(
+        _monthly_payload([jan, feb, mar]),
+        symbol="BTCUSDT",
+        interval="1M",
+        now=datetime(2024, 4, 1, tzinfo=timezone.utc),
+    )
+    assert [c.open_time for c in parsed] == [jan, feb, mar]
+
+
+def test_validate_klines_payload_interval_mensal_febrero_marco_ano_comum():
+    feb = datetime(2025, 2, 1, tzinfo=timezone.utc)
+    mar = datetime(2025, 3, 1, tzinfo=timezone.utc)
+    apr = datetime(2025, 4, 1, tzinfo=timezone.utc)
+    parsed = validate_klines_payload(
+        _monthly_payload([feb, mar, apr]),
+        symbol="BTCUSDT",
+        interval="1M",
+        now=datetime(2025, 5, 1, tzinfo=timezone.utc),
+    )
+    assert parsed[-1].open_time == apr
+
+
+def test_validate_klines_payload_interval_mensal_febrero_marco_ano_bissexto():
+    feb = datetime(2024, 2, 1, tzinfo=timezone.utc)
+    mar = datetime(2024, 3, 1, tzinfo=timezone.utc)
+    apr = datetime(2024, 4, 1, tzinfo=timezone.utc)
+    parsed = validate_klines_payload(
+        _monthly_payload([feb, mar, apr]),
+        symbol="BTCUSDT",
+        interval="1M",
+        now=datetime(2024, 5, 1, tzinfo=timezone.utc),
+    )
+    assert parsed[0].open_time == feb
+
+
+def test_validate_klines_payload_interval_mensal_rejeita_lacuna_real():
+    jan = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    mar = datetime(2024, 3, 1, tzinfo=timezone.utc)
+    with pytest.raises(MarketDataValidationError, match="Missing candle detected"):
+        validate_klines_payload(
+            _monthly_payload([jan, mar]),
+            symbol="BTCUSDT",
+            interval="1M",
+            now=datetime(2024, 4, 1, tzinfo=timezone.utc),
+        )
 
 
 def test_service_rejeita_resposta_vazia(monkeypatch):

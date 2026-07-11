@@ -69,3 +69,6 @@ class MarketDataCache:
 
     def clear(self) -> None:
         self._entries.clear()
+
+    def discard(self, symbol: str, interval: str) -> None:
+        self._entries.pop((symbol.upper(), interval), None)
