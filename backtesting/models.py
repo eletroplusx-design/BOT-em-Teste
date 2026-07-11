@@ -6,9 +6,9 @@ from decimal import Decimal
 from enum import Enum
 from typing import Any, Callable, Sequence
 
-from domain import Candle, DataSource, Direction, Fill, OrderStatus, PaperOrder, Position, PositionStatus, TradeResult, TradeResultStatus, TradingMode
+from domain import Candle, DataSource, Direction, Fill, OrderStatus, PaperOrder, Position, PositionStatus, RiskDecision, TradeResult, TradeResultStatus, TradingMode
 from domain.serialization import serialize_value
-from domain.validation import DomainValidationError, parse_decimal, parse_symbol
+from domain.validation import DomainValidationError, parse_bool_false_only, parse_decimal, parse_symbol, parse_strict_bool
 
 from .errors import BacktestConfigurationError
 
@@ -27,8 +27,13 @@ class GapPolicy(str, Enum):
 class BacktestConfig:
     initial_capital: Decimal = Decimal("10000")
     risk_percent: Decimal = Decimal("1")
-    commission_rate: Decimal = Decimal("0.0004")
-    slippage_rate: Decimal = Decimal("0.0005")
+    commission_rate: Decimal | None = None
+    slippage_rate: Decimal | None = None
+    entry_fee_rate: Decimal = Decimal("0.0004")
+    exit_fee_rate: Decimal = Decimal("0.0004")
+    spread_bps: Decimal = Decimal("0")
+    slippage_bps: Decimal = Decimal("5")
+    leverage: Decimal = Decimal("1")
     symbol: str = "BTCUSDT"
     interval: str = "1h"
     paper_only: bool = True
@@ -41,8 +46,11 @@ class BacktestConfig:
     def __post_init__(self) -> None:
         initial_capital = parse_decimal(self.initial_capital, "initial_capital")
         risk_percent = parse_decimal(self.risk_percent, "risk_percent")
-        commission_rate = parse_decimal(self.commission_rate, "commission_rate", allow_zero=True)
-        slippage_rate = parse_decimal(self.slippage_rate, "slippage_rate", allow_zero=True)
+        entry_fee_rate = parse_decimal(self.entry_fee_rate, "entry_fee_rate", allow_zero=True)
+        exit_fee_rate = parse_decimal(self.exit_fee_rate, "exit_fee_rate", allow_zero=True)
+        spread_bps = parse_decimal(self.spread_bps, "spread_bps", allow_zero=True)
+        slippage_bps = parse_decimal(self.slippage_bps, "slippage_bps", allow_zero=True)
+        leverage = parse_decimal(self.leverage, "leverage")
         symbol = parse_symbol(self.symbol)
         interval = str(self.interval).strip()
         if not interval:
@@ -55,13 +63,32 @@ class BacktestConfig:
             raise BacktestConfigurationError("intrabar_policy is invalid.")
         if not isinstance(self.gap_policy, GapPolicy):
             raise BacktestConfigurationError("gap_policy is invalid.")
+        if risk_percent <= 0 or risk_percent > 100:
+            raise BacktestConfigurationError("risk_percent must be between 0 and 100.")
+        if leverage <= 0:
+            raise BacktestConfigurationError("leverage must be greater than zero.")
+        if self.commission_rate is not None:
+            entry_fee_rate = exit_fee_rate = parse_decimal(self.commission_rate, "commission_rate", allow_zero=True)
+        if self.slippage_rate is not None:
+            slippage_bps = parse_decimal(self.slippage_rate, "slippage_rate", allow_zero=True) * Decimal("10000")
         object.__setattr__(self, "initial_capital", initial_capital)
         object.__setattr__(self, "risk_percent", risk_percent)
-        object.__setattr__(self, "commission_rate", commission_rate)
-        object.__setattr__(self, "slippage_rate", slippage_rate)
+        object.__setattr__(self, "entry_fee_rate", entry_fee_rate)
+        object.__setattr__(self, "exit_fee_rate", exit_fee_rate)
+        object.__setattr__(self, "spread_bps", spread_bps)
+        object.__setattr__(self, "slippage_bps", slippage_bps)
+        object.__setattr__(self, "leverage", leverage)
         object.__setattr__(self, "symbol", symbol)
         object.__setattr__(self, "interval", interval)
         object.__setattr__(self, "strategy_version", self.strategy_version.strip() or "v3_leak_free")
+
+    @property
+    def commission_rate_effective(self) -> Decimal:
+        return self.entry_fee_rate
+
+    @property
+    def slippage_rate_effective(self) -> Decimal:
+        return self.slippage_bps / Decimal("10000")
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,10 +114,19 @@ class ExecutedTrade:
     exit_fill: Fill
     trade: TradeResult
     realized_rr: Decimal
+    gross_pnl: Decimal
+    net_pnl: Decimal
+    entry_fee: Decimal
+    exit_fee: Decimal
+    spread_cost: Decimal
+    slippage_cost: Decimal
     entry_index: int
     exit_index: int
+    capital_before: Decimal
+    capital_after: Decimal
     gap_handled: bool = False
     intrabar_policy: IntrabarPolicy = IntrabarPolicy.STOP_FIRST
+    risk_decision: RiskDecision | None = None
 
     @property
     def resultado(self) -> str:
@@ -111,6 +147,10 @@ class ExecutedTrade:
     @property
     def direction(self) -> Direction:
         return self.trade.direction
+
+    @property
+    def total_costs(self) -> Decimal:
+        return self.entry_fee + self.exit_fee + self.spread_cost + self.slippage_cost
 
 
 @dataclass(frozen=True, slots=True)

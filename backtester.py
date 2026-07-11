@@ -27,10 +27,10 @@ OOS_SOL_PATH = ROOT_DIR / "oos_sol.json"
 WALKFORWARD_SOL_PATH = ROOT_DIR / "walkforward_sol.json"
 
 
-def executar_backtest_leak_free(df, strategy_callback, *, symbol="BTCUSDT", interval="1h", config=None):
+def executar_backtest_leak_free(df, strategy_callback, *, symbol="BTCUSDT", interval="1h", config=None, risk_decision_provider=None):
     candles = dataframe_to_candles(df, symbol=symbol, interval=interval)
     engine = LeakFreeBacktestEngine(config or BacktestConfig(symbol=symbol, interval=interval))
-    return engine.run(candles, strategy_callback).to_dict()
+    return engine.run(candles, strategy_callback, risk_decision_provider=risk_decision_provider).to_dict()
 
 
 def baixar_dados_historicos(symbol="BTCUSDT", intervalo="1h", limite=2000):
