@@ -35,10 +35,15 @@ def aggregate_segment_metrics(metrics: Iterable[SegmentMetrics]) -> dict[str, An
             "profit_factor": None,
             "payoff": None,
             "win_rate": 0.0,
+            "trade_win_rate": 0.0,
             "dispersion": 0.0,
             "worst_window": None,
             "proportion_lucrative": 0.0,
             "degradation_validation_test": 0.0,
+            "winning_trades": 0,
+            "losing_trades": 0,
+            "gross_profit": 0.0,
+            "gross_loss": 0.0,
         }
 
     total_trades = sum(item.total_trades for item in itens)
@@ -50,29 +55,38 @@ def aggregate_segment_metrics(metrics: Iterable[SegmentMetrics]) -> dict[str, An
     slippage_cost = sum((item.slippage_cost for item in itens), Decimal("0"))
     capital_initial = itens[0].capital_initial
     capital_final = capital_initial + net_pnl
-    gross_profit = sum((item.net_pnl for item in itens if item.net_pnl > 0), Decimal("0"))
-    gross_loss = abs(sum((item.net_pnl for item in itens if item.net_pnl < 0), Decimal("0")))
-    profit_factor = None
-    if gross_loss > 0:
-        profit_factor = gross_profit / gross_loss
-    elif gross_profit > 0:
-        profit_factor = None
+    winning_trades = 0
+    losing_trades = 0
+    gross_profit = Decimal("0")
+    gross_loss = Decimal("0")
+    for item in itens:
+        inferred_wins = item.winning_trades
+        inferred_losses = item.losing_trades
+        if inferred_wins == 0 and item.total_trades > 0:
+            inferred_wins = int(round(float(item.win_rate) / 100.0 * item.total_trades))
+        if inferred_losses == 0 and item.total_trades >= inferred_wins:
+            inferred_losses = item.total_trades - inferred_wins
+        winning_trades += inferred_wins
+        losing_trades += inferred_losses
+        if item.gross_profit != Decimal("0") or item.gross_loss != Decimal("0"):
+            gross_profit += item.gross_profit
+            gross_loss += item.gross_loss
+        else:
+            if item.net_pnl > 0:
+                gross_profit += item.net_pnl
+            elif item.net_pnl < 0:
+                gross_loss += abs(item.net_pnl)
+    profit_factor = gross_profit / gross_loss if gross_loss > 0 else None
     payoff = None
-    winning = [item for item in itens if item.net_pnl > 0]
-    losing = [item for item in itens if item.net_pnl < 0]
-    average_gain = (sum((item.net_pnl for item in winning), Decimal("0")) / Decimal(len(winning))) if winning else None
-    average_loss = (
-        abs(sum((item.net_pnl for item in losing), Decimal("0")) / Decimal(len(losing)))
-        if losing
-        else None
-    )
-    win_rate = (Decimal(len(winning)) / Decimal(len(itens)) * Decimal("100")) if itens else Decimal("0")
+    average_gain = (gross_profit / Decimal(winning_trades)) if winning_trades else None
+    average_loss = (gross_loss / Decimal(losing_trades)) if losing_trades else None
+    win_rate = (Decimal(winning_trades) / Decimal(total_trades) * Decimal("100")) if total_trades else Decimal("0")
+    trade_win_rate = win_rate
     if average_gain is not None and average_loss not in (None, Decimal("0")):
         payoff = average_gain / average_loss
     expectancy = Decimal("0")
-    if average_gain is not None and average_loss is not None:
-        win_ratio = win_rate / Decimal("100")
-        expectancy = win_ratio * average_gain - (Decimal("1") - win_ratio) * average_loss
+    if total_trades > 0:
+        expectancy = net_pnl / Decimal(total_trades)
     return {
         "total_trades": total_trades,
         "net_pnl": float(round(net_pnl, 6)),
@@ -89,7 +103,12 @@ def aggregate_segment_metrics(metrics: Iterable[SegmentMetrics]) -> dict[str, An
         "profit_factor": float(round(profit_factor, 6)) if profit_factor is not None else None,
         "payoff": float(round(payoff, 6)) if payoff is not None else None,
         "win_rate": float(round(win_rate, 4)),
+        "trade_win_rate": float(round(trade_win_rate, 4)),
         "dispersion": float(round(Decimal(str(pstdev([float(item.net_return_percent) for item in itens]))) if len(itens) > 1 else Decimal("0"), 6)),
+        "winning_trades": winning_trades,
+        "losing_trades": losing_trades,
+        "gross_profit": float(round(gross_profit, 6)),
+        "gross_loss": float(round(gross_loss, 6)),
     }
 
 
@@ -163,13 +182,21 @@ def aggregate_run_statistics(window_results: Iterable[WalkForwardWindowResult]) 
         "profit_factor": aggregate_tests["profit_factor"] if aggregate_tests is not None else None,
         "payoff": aggregate_tests["payoff"] if aggregate_tests is not None else None,
         "win_rate": aggregate_tests["win_rate"] if aggregate_tests is not None else None,
-        "trade_win_rate": aggregate_tests["win_rate"] if aggregate_tests is not None else None,
-        "validation_trade_win_rate": aggregate_validation["win_rate"] if aggregate_validation is not None else None,
+        "trade_win_rate": aggregate_tests["trade_win_rate"] if aggregate_tests is not None else None,
+        "validation_trade_win_rate": aggregate_validation["trade_win_rate"] if aggregate_validation is not None else None,
         "window_dispersion": dispersion["window_dispersion"],
         "worst_window": dispersion["worst_window"],
         "proportion_lucrative_windows": dispersion["proportion_lucrative_windows"],
         "degradation_validation_test": degradation,
         "validation_net_return_percent": aggregate_validation["net_return_percent"] if aggregate_validation is not None else None,
         "selected_test_net_return_percent": aggregate_tests["net_return_percent"] if aggregate_tests is not None else None,
+        "selected_test_winning_trades": aggregate_tests["winning_trades"] if aggregate_tests is not None else 0,
+        "selected_test_losing_trades": aggregate_tests["losing_trades"] if aggregate_tests is not None else 0,
+        "selected_test_gross_profit": aggregate_tests["gross_profit"] if aggregate_tests is not None else None,
+        "selected_test_gross_loss": aggregate_tests["gross_loss"] if aggregate_tests is not None else None,
+        "validation_winning_trades": aggregate_validation["winning_trades"] if aggregate_validation is not None else 0,
+        "validation_losing_trades": aggregate_validation["losing_trades"] if aggregate_validation is not None else 0,
+        "validation_gross_profit": aggregate_validation["gross_profit"] if aggregate_validation is not None else None,
+        "validation_gross_loss": aggregate_validation["gross_loss"] if aggregate_validation is not None else None,
     }
     return {key: sanitize_metric_value(value, default=None) for key, value in summary.items()}

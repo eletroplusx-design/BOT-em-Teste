@@ -1,4 +1,4 @@
-from .adapters import LegacyBacktesterAdapter, adapt_legacy_report
+from .adapters import LegacyBacktesterAdapter, TrustedLeakFreeBacktestRunner, adapt_legacy_report
 from .artifacts import build_data_signature, build_manifest, freeze_selection, manifest_hash
 from .errors import (
     ValidationError,
@@ -34,6 +34,7 @@ from .walk_forward import WalkForwardValidator, run_walk_forward_validation
 
 __all__ = [
     "LegacyBacktesterAdapter",
+    "TrustedLeakFreeBacktestRunner",
     "adapt_legacy_report",
     "build_manifest",
     "build_data_signature",

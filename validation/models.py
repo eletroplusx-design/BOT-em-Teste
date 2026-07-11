@@ -227,6 +227,8 @@ class SegmentMetrics:
     net_pnl: Decimal
     net_return_percent: Decimal
     gross_pnl: Decimal
+    gross_profit: Decimal
+    gross_loss: Decimal
     total_costs: Decimal
     total_fees: Decimal
     spread_cost: Decimal
@@ -237,6 +239,8 @@ class SegmentMetrics:
     payoff: Decimal | None
     win_rate: Decimal
     total_trades: int
+    winning_trades: int = 0
+    losing_trades: int = 0
     average_gain: Decimal | None = None
     average_loss: Decimal | None = None
     sequencia_maxima_perdas: int = 0
@@ -248,6 +252,8 @@ class SegmentMetrics:
             "net_pnl": self.net_pnl,
             "net_return_percent": self.net_return_percent,
             "gross_pnl": self.gross_pnl,
+            "gross_profit": self.gross_profit,
+            "gross_loss": self.gross_loss,
             "total_costs": self.total_costs,
             "total_fees": self.total_fees,
             "spread_cost": self.spread_cost,
@@ -258,6 +264,8 @@ class SegmentMetrics:
             "payoff": self.payoff,
             "win_rate": self.win_rate,
             "total_trades": self.total_trades,
+            "winning_trades": self.winning_trades,
+            "losing_trades": self.losing_trades,
             "average_gain": self.average_gain,
             "average_loss": self.average_loss,
             "sequencia_maxima_perdas": self.sequencia_maxima_perdas,
@@ -273,6 +281,8 @@ class SegmentMetrics:
             net_pnl=_to_decimal(summary.get("net_pnl", 0), "net_pnl") or Decimal("0"),
             net_return_percent=_to_decimal(summary.get("return_net_percent", summary.get("lucro_total_percent", 0)), "net_return_percent") or Decimal("0"),
             gross_pnl=_to_decimal(summary.get("gross_pnl", 0), "gross_pnl") or Decimal("0"),
+            gross_profit=_to_decimal(summary.get("gross_profit", 0), "gross_profit") or Decimal("0"),
+            gross_loss=_to_decimal(summary.get("gross_loss", 0), "gross_loss") or Decimal("0"),
             total_costs=_to_decimal(summary.get("total_costs", summary.get("total_fees", 0)), "total_costs") or Decimal("0"),
             total_fees=_to_decimal(summary.get("total_fees", 0), "total_fees") or Decimal("0"),
             spread_cost=_to_decimal(summary.get("spread_cost", 0), "spread_cost") or Decimal("0"),
@@ -283,6 +293,8 @@ class SegmentMetrics:
             payoff=_to_decimal(summary.get("payoff"), "payoff", allow_none=True) if summary.get("payoff") is not None else None,
             win_rate=_to_decimal(summary.get("win_rate", 0), "win_rate") or Decimal("0"),
             total_trades=int(summary.get("total_trades", 0) or 0),
+            winning_trades=int(summary.get("winning_trades", 0) or 0),
+            losing_trades=int(summary.get("losing_trades", 0) or 0),
             average_gain=_to_decimal(summary.get("average_gain"), "average_gain", allow_none=True) if summary.get("average_gain") is not None else None,
             average_loss=_to_decimal(summary.get("average_loss"), "average_loss", allow_none=True) if summary.get("average_loss") is not None else None,
             sequencia_maxima_perdas=int(summary.get("sequencia_maxima_perdas", 0) or 0),

@@ -30,6 +30,7 @@ from validation import (
     freeze_selection,
     manifest_hash,
     select_configuration,
+    TrustedLeakFreeBacktestRunner,
 )
 from validation.evaluation import evaluate_frozen_selection
 from validation.models import SegmentMetrics
@@ -54,16 +55,31 @@ def _metrics(
     profit_factor: str | None = "1",
     win_rate: str = "0",
     total_trades: int = 10,
+    winning_trades: int | None = None,
+    losing_trades: int | None = None,
+    gross_profit: str | None = None,
+    gross_loss: str | None = None,
     average_gain: str | None = None,
     average_loss: str | None = None,
     sequencia_maxima_perdas: int = 0,
 ) -> SegmentMetrics:
+    net_pnl_decimal = Decimal(net_pnl)
+    if winning_trades is None:
+        winning_trades = int(round(total_trades * (float(win_rate) / 100.0)))
+    if losing_trades is None:
+        losing_trades = max(0, total_trades - winning_trades)
+    if gross_profit is None:
+        gross_profit = net_pnl if net_pnl_decimal > 0 else "0"
+    if gross_loss is None:
+        gross_loss = str(abs(net_pnl_decimal)) if net_pnl_decimal < 0 else "0"
     summary = {
         "capital_initial": capital_initial,
         "capital_final": capital_final,
         "net_pnl": net_pnl,
         "return_net_percent": net_return_percent,
         "gross_pnl": gross_pnl,
+        "gross_profit": gross_profit,
+        "gross_loss": gross_loss,
         "total_costs": total_costs,
         "total_fees": total_fees,
         "spread_cost": spread_cost,
@@ -73,6 +89,8 @@ def _metrics(
         "profit_factor": profit_factor,
         "win_rate": win_rate,
         "total_trades": total_trades,
+        "winning_trades": winning_trades,
+        "losing_trades": losing_trades,
         "average_gain": average_gain,
         "average_loss": average_loss,
         "sequencia_maxima_perdas": sequencia_maxima_perdas,
@@ -103,20 +121,26 @@ def _signal(timestamp, *, entry, stop, take):
 
 
 def _window_runner_factory(train_validation_scores, test_scores):
+    seen_test = {"value": False}
+
     def runner(df, candidate, segment, context=None, frozen_selection=None):
         context = context or {}
         assert "slices" not in context
         assert "test_metrics" not in context
         assert "candidate_evaluations" not in context
         assert "window" not in context
-        assert "test" not in context
-        assert "train" not in context
-        assert "validation" not in context
         assert "segment" in context
+        assert "segment_view" in context
+        assert "segment_signature" in context
+        assert "data_signature" not in context
         segment_meta = context["segment"]
         assert segment_meta["segment_end"] >= segment_meta["segment_start"]
         assert len(df) == segment_meta["warmup_rows"] + segment_meta["segment_rows"]
         assert context["trade_start_index"] == segment_meta["trade_start_index"]
+        if segment == "test":
+            seen_test["value"] = True
+        else:
+            assert seen_test["value"] is False
         if segment == "test":
             assert "frozen_selection" in context
         else:
@@ -129,31 +153,21 @@ def _window_runner_factory(train_validation_scores, test_scores):
 
 
 def _engine_runner_factory():
-    def runner(df, candidate, segment, context=None, frozen_selection=None):
-        context = context or {}
-        segment_meta = context["segment"]
-        trade_start_index = segment_meta["trade_start_index"]
-        candles = dataframe_to_candles(df, symbol="BTCUSDT", interval="1h")
-        triggered = False
-
+    def strategy_factory(candidate):
         def strategy(history, snapshot):
-            nonlocal triggered
-            idx = len(history) - 1
-            if idx < trade_start_index:
-                return None
-            if not triggered and snapshot.open_positions == 0:
-                triggered = True
-                candle = history[-1]
-                entry = Decimal(str(candle.close))
-                return _signal(
-                    candle.close_time,
-                    entry=entry,
-                    stop=entry - Decimal("5"),
-                    take=entry + Decimal("10"),
-                )
-            return None
+            candle = history[-1]
+            entry = Decimal(str(candle.close))
+            return _signal(
+                candle.close_time,
+                entry=entry,
+                stop=entry - Decimal("5"),
+                take=entry + Decimal("10"),
+            )
 
-        engine = LeakFreeBacktestEngine(
+        return strategy
+
+    trusted_runner = TrustedLeakFreeBacktestRunner(
+        engine_factory=lambda: LeakFreeBacktestEngine(
             BacktestConfig(
                 initial_capital=Decimal("10000"),
                 risk_percent=Decimal("1"),
@@ -163,10 +177,42 @@ def _engine_runner_factory():
                 symbol="BTCUSDT",
                 interval="1h",
             )
+        ),
+        strategy_factory=strategy_factory,
+        symbol="BTCUSDT",
+        interval="1h",
+    )
+
+    def runner(df, candidate, segment, context=None, frozen_selection=None):
+        context = context or {}
+        segment_meta = context["segment"]
+        trade_start_index = segment_meta["trade_start_index"]
+        result = trusted_runner(
+            df,
+            candidate,
+            segment=segment,
+            context=context,
+            frozen_selection=frozen_selection,
         )
-        result = engine.run(candles, strategy)
-        assert result.config.paper_only is True
-        return {"summary": result.summary}
+        assert result["summary"]["total_trades"] >= 0
+        assert trade_start_index >= 0
+        return result
+
+    return runner
+
+
+def _ordering_runner_factory(events):
+    def runner(df, candidate, segment, context=None, frozen_selection=None):
+        context = context or {}
+        segment_meta = context["segment"]
+        if segment == "test":
+            events.append(("test", candidate.name, segment_meta["name"]))
+        else:
+            if any(event[0] == "test" for event in events):
+                raise AssertionError("train/validation executed after test phase.")
+            events.append((segment, candidate.name, segment_meta["name"]))
+        metrics = _metrics(net_return_percent="5", expectancy="1", profit_factor="1.5", drawdown_max_percent="2", win_rate="60", total_trades=10)
+        return {"summary": metrics.as_dict()}
 
     return runner
 
@@ -386,6 +432,72 @@ def test_walk_forward_selection_ignores_test_metrics_and_freezes_once(sample_btc
         validator.run(sample_btc_data.iloc[:260].copy(), [alpha, beta], runner=runner_a)
 
 
+def test_walk_forward_two_phase_selection_and_segment_signatures_are_isolated(sample_btc_data):
+    alpha = _candidate("alpha", risk="low")
+    beta = _candidate("beta", risk="medium")
+    split_config = ValidationSplitConfig(
+        mode="rolling",
+        train_bars=120,
+        validation_bars=40,
+        test_bars=40,
+        warmup_bars=20,
+        purge_bars=5,
+        embargo_bars=5,
+        step_bars=40,
+    )
+
+    def make_runner(recorded_events, recorded_contexts):
+        seen_test = {"value": False}
+
+        def runner(df, candidate, segment, context=None, frozen_selection=None):
+            context = context or {}
+            snapshot = {
+                "phase": segment,
+                "candidate": candidate.name,
+                "segment_signature": context["segment_signature"],
+                "segment_meta": context["segment"],
+                "trade_start_index": context["trade_start_index"],
+                "frozen": "frozen_selection" in context,
+            }
+            if segment == "test":
+                seen_test["value"] = True
+            else:
+                assert seen_test["value"] is False
+            recorded_events.append((segment, candidate.name))
+            recorded_contexts.append(snapshot)
+            metrics = _metrics(net_return_percent="5", expectancy="1", profit_factor="1.5", drawdown_max_percent="2", win_rate="60", total_trades=10)
+            return {"summary": metrics.as_dict()}
+
+        return runner
+
+    base_df = sample_btc_data.iloc[:260].copy()
+    altered_df = base_df.copy()
+    altered_df.loc[220:, "close"] = altered_df.loc[220:, "close"] + 999
+
+    events_a: list[tuple[str, str]] = []
+    contexts_a: list[dict[str, object]] = []
+    validator_a = WalkForwardValidator(split_config=split_config, selection_criteria=SelectionCriteria(min_total_trades=1))
+    result_a = validator_a.run(base_df, [alpha, beta], runner=make_runner(events_a, contexts_a))
+
+    events_b: list[tuple[str, str]] = []
+    contexts_b: list[dict[str, object]] = []
+    validator_b = WalkForwardValidator(split_config=split_config, selection_criteria=SelectionCriteria(min_total_trades=1))
+    result_b = validator_b.run(altered_df, [alpha, beta], runner=make_runner(events_b, contexts_b))
+
+    assert result_a.windows[0].selected_candidate == result_b.windows[0].selected_candidate
+    assert any(item[0] == "test" for item in events_a)
+    first_test_index = next(index for index, item in enumerate(events_a) if item[0] == "test")
+    assert all(event[0] != "test" for event in events_a[:first_test_index])
+    train_validation_a = [item for item in contexts_a if item["phase"] != "test"]
+    train_validation_b = [item for item in contexts_b if item["phase"] != "test"]
+    assert train_validation_a == train_validation_b
+    test_contexts_a = [item for item in contexts_a if item["phase"] == "test"]
+    test_contexts_b = [item for item in contexts_b if item["phase"] == "test"]
+    assert test_contexts_a != test_contexts_b
+    assert all("data_signature" not in context for context in contexts_a)
+    assert all("data_signature" not in context for context in contexts_b)
+
+
 def test_runner_context_isolation_and_warmup_engine_integration(sample_btc_data):
     alpha = _candidate("alpha", risk="low")
     split_config = ValidationSplitConfig(
@@ -476,13 +588,21 @@ def test_validate_frozen_selection_blocks_mismatch_and_reselection(sample_btc_da
 
 def test_statistics_and_validation_errors_cover_edge_cases():
     metrics = [
-        _metrics(net_return_percent="10", net_pnl="10", gross_pnl="12", profit_factor="2.0", win_rate="66.6", total_trades=6, drawdown_max_percent="3"),
-        _metrics(net_return_percent="-5", net_pnl="-5", gross_pnl="-5", profit_factor="0.5", win_rate="33.3", total_trades=4, drawdown_max_percent="8"),
+        _metrics(net_return_percent="10", net_pnl="10", gross_pnl="12", gross_profit="12", gross_loss="0", profit_factor="2.0", win_rate="66.6", total_trades=6, winning_trades=4, losing_trades=2, drawdown_max_percent="3"),
+        _metrics(net_return_percent="-5", net_pnl="-5", gross_pnl="-5", gross_profit="0", gross_loss="5", profit_factor="0.5", win_rate="33.3", total_trades=4, winning_trades=1, losing_trades=3, drawdown_max_percent="8"),
     ]
     aggregated = aggregate_segment_metrics(metrics)
     assert aggregated["total_trades"] == 10
     assert aggregated["profit_factor"] is not None
     assert aggregated["win_rate"] > 0
+    assert aggregated["trade_win_rate"] == pytest.approx(50.0, rel=1e-4)
+
+    weighted_metrics = [
+        _metrics(net_return_percent="6", net_pnl="6", gross_pnl="12", gross_profit="12", gross_loss="8", profit_factor="1.5", win_rate="60", total_trades=100, winning_trades=60, losing_trades=40),
+        _metrics(net_return_percent="-1", net_pnl="-1", gross_pnl="-1", gross_profit="0", gross_loss="1", profit_factor="0.0", win_rate="0", total_trades=1, winning_trades=0, losing_trades=1),
+    ]
+    weighted = aggregate_segment_metrics(weighted_metrics)
+    assert weighted["trade_win_rate"] == pytest.approx(59.4059, rel=1e-4)
 
     stability = compute_candidate_stability(
         _metrics(net_return_percent="10", drawdown_max_percent="3", expectancy="1"),

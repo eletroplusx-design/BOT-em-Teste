@@ -82,11 +82,11 @@ def compute_metrics(
     win_rate = (Decimal(wins_count) / Decimal(total_trades) * Decimal("100")) if total_trades else Decimal("0")
     average_gain = (sum(wins, Decimal("0")) / Decimal(wins_count)) if wins_count else None
     average_loss = (abs(sum(losses, Decimal("0")) / Decimal(losses_count))) if losses_count else None
+    gross_profit = sum(wins, Decimal("0"))
+    gross_loss = abs(sum(losses, Decimal("0")))
     profit_factor = None
     profit_factor_state = "undefined_no_losses"
     if wins_count and losses_count:
-        gross_profit = sum(wins, Decimal("0"))
-        gross_loss = abs(sum(losses, Decimal("0")))
         profit_factor = gross_profit / gross_loss if gross_loss > 0 else None
         profit_factor_state = "defined"
     elif wins_count == 0 and losses_count > 0:
@@ -120,6 +120,8 @@ def compute_metrics(
         "return_net_percent": float(round((net_pnl / initial_capital) * Decimal("100"), 2)) if initial_capital else 0.0,
         "gross_pnl": float(round(gross_pnl, 2)),
         "net_pnl": float(round(net_pnl, 2)),
+        "gross_profit": float(round(gross_profit, 2)),
+        "gross_loss": float(round(gross_loss, 2)),
         "total_fees": float(round(total_fees, 2)),
         "entry_fees": float(round(total_entry_fees, 2)),
         "exit_fees": float(round(total_exit_fees, 2)),
@@ -127,6 +129,8 @@ def compute_metrics(
         "slippage_cost": float(round(total_slippage_cost, 2)),
         "total_costs": float(round(total_costs, 2)),
         "total_trades": total_trades,
+        "winning_trades": wins_count,
+        "losing_trades": losses_count,
         "win_rate": float(round(win_rate, 2)),
         "average_gain": float(round(average_gain, 4)) if average_gain is not None else None,
         "average_loss": float(round(average_loss, 4)) if average_loss is not None else None,
