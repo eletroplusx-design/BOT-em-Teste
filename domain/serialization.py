@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, fields, is_dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 import json
 from enum import Enum
@@ -10,7 +10,7 @@ from typing import Any
 
 def serialize_value(value: Any) -> Any:
     if isinstance(value, datetime):
-        return value.astimezone().isoformat().replace("+00:00", "Z")
+        return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
     if isinstance(value, Decimal):
         return str(value)
     if isinstance(value, Enum):

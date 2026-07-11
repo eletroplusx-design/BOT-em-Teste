@@ -307,6 +307,10 @@ class RiskDecision(DomainModel):
     def __post_init__(self) -> None:
         allowed = parse_strict_bool(self.allowed, "allowed")
         exchange_info_ok = parse_strict_bool(self.exchange_info_ok, "exchange_info_ok")
+        if allowed and not exchange_info_ok:
+            raise DomainValidationError(
+                "RiskDecision cannot be allowed when exchange_info_ok is False."
+            )
         reason = self.reason.strip() if isinstance(self.reason, str) else str(self.reason).strip()
         blocked_by = self.blocked_by.strip().upper() if isinstance(self.blocked_by, str) and self.blocked_by.strip() else "N/A"
         capital = parse_decimal(self.capital, "capital", allow_zero=True)

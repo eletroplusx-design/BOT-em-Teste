@@ -1,7 +1,9 @@
+from dataclasses import FrozenInstanceError
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from dataclasses import FrozenInstanceError
+import os
 import inspect
+import time
 
 import pytest
 
@@ -22,6 +24,7 @@ from domain import (
     TradeResult,
     TradeResultStatus,
     TradingMode,
+    serialize_value,
 )
 
 
@@ -214,6 +217,22 @@ def test_risk_decision_accepta_bool_real():
     assert RiskDecision.from_dict(decision.to_dict()) == decision
 
 
+def test_risk_decision_nao_pode_aprovar_sem_exchange_info():
+    with pytest.raises(DomainValidationError):
+        RiskDecision.from_dict(
+            {
+                "allowed": True,
+                "reason": "blocked",
+                "blocked_by": "RISK",
+                "capital": "27",
+                "risk_percent": "0.5",
+                "exposure": "5",
+                "timestamp": "2026-07-10T12:00:00Z",
+                "exchange_info_ok": False,
+            }
+        )
+
+
 @pytest.mark.parametrize(
     "timestamp",
     [
@@ -274,6 +293,24 @@ def test_decimals_roundtrip_and_imutabilidade():
     assert payload["entry"] == "100.10"
     with pytest.raises(FrozenInstanceError):
         intent.entry = Decimal("101")
+
+
+def test_serializacao_datetime_canonica_em_utc():
+    original_tz = os.environ.get("TZ")
+    had_tzset = hasattr(time, "tzset")
+    try:
+        os.environ["TZ"] = "America/Sao_Paulo"
+        if had_tzset:
+            time.tzset()
+        dt_utc = datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc)
+        assert serialize_value(dt_utc) == "2026-01-01T00:00:00Z"
+    finally:
+        if original_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = original_tz
+        if had_tzset:
+            time.tzset()
 
 
 def test_trade_result_closed_at_validation():

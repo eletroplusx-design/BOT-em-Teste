@@ -38,6 +38,7 @@ from .models import (
     TradeIntent,
     TradeResult,
 )
+from .serialization import serialize_value
 from .validation import (
     DomainValidationError,
     ensure_price_coherence,
@@ -96,4 +97,5 @@ __all__ = [
     "legacy_fill_payload",
     "legacy_candle_payload",
     "legacy_market_snapshot_payload",
+    "serialize_value",
 ]
