@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 
 import pandas as pd
@@ -27,12 +28,13 @@ class WalkForwardValidator:
     seed: int | None = None
     _session_consumed: bool = field(default=False, init=False, repr=False)
 
-    def _window_manifest(self, window, candidates, data_signature: dict[str, Any]) -> dict[str, Any]:
+    def _window_manifest(self, window, candidates, data_signature: dict[str, Any], *, execution_contract: dict[str, Any]) -> dict[str, Any]:
         return build_manifest(
             symbol=self.symbol,
             interval=self.interval,
             strategy_version=self.strategy_version,
             costs=self.costs,
+            execution_contract=execution_contract,
             split_config=self.split_config,
             candidate_grid=candidates,
             windows=[window],
@@ -48,17 +50,73 @@ class WalkForwardValidator:
             raise ValidationFreezeError("validator session already consumed; reselection is blocked.")
         return self._select_window(candidate_evaluations)
 
-    def freeze_window(self, candidate: CandidateConfig, *, window_id: str, frozen_at: datetime, manifest_hash_value: str) -> FrozenSelection:
+    def freeze_window(self, candidate: CandidateConfig, *, window_id: str, frozen_at: datetime, manifest_hash_value: str, execution_contract: dict[str, Any]) -> FrozenSelection:
         return freeze_selection(
             candidate,
             strategy_version=self.strategy_version,
             costs=self.costs,
+            execution_contract=execution_contract,
             symbol=self.symbol,
             interval=self.interval,
             frozen_at=frozen_at,
             manifest_hash_value=manifest_hash_value,
             window_id=window_id,
         )
+
+    @staticmethod
+    def _normalize_contract_value(value: Any) -> Any:
+        if hasattr(value, "value"):
+            return value.value
+        return str(value) if isinstance(value, (int, float, Decimal)) else value
+
+    def _expected_execution_contract(self) -> dict[str, Any]:
+        costs = dict(self.costs or {})
+        entry_fee_rate = costs.get("entry_fee_rate", costs.get("commission_rate", Decimal("0")))
+        exit_fee_rate = costs.get("exit_fee_rate", costs.get("commission_rate", entry_fee_rate))
+        return {
+            "entry_fee_rate": self._normalize_contract_value(entry_fee_rate),
+            "exit_fee_rate": self._normalize_contract_value(exit_fee_rate),
+            "spread_bps": self._normalize_contract_value(costs.get("spread_bps", Decimal("0"))),
+            "slippage_bps": self._normalize_contract_value(costs.get("slippage_bps", Decimal("0"))),
+            "leverage": self._normalize_contract_value(costs.get("leverage", Decimal("1"))),
+            "intrabar_policy": self._normalize_contract_value(costs.get("intrabar_policy", "STOP_FIRST")),
+            "gap_policy": self._normalize_contract_value(costs.get("gap_policy", "OPEN_PRICE")),
+            "paper_only": True,
+            "symbol": self.symbol,
+            "interval": self.interval,
+            "strategy_version": self.strategy_version,
+        }
+
+    def _runner_execution_contract(self, runner) -> dict[str, Any] | None:
+        contract_fn = getattr(runner, "execution_contract", None)
+        if contract_fn is None:
+            return None
+        contract = contract_fn() if callable(contract_fn) else contract_fn
+        if not isinstance(contract, dict):
+            raise ValidationFreezeError("runner execution contract must be a mapping.")
+        return contract
+
+    def _validate_execution_contract(self, runner_contract: dict[str, Any] | None) -> dict[str, Any]:
+        if runner_contract is None:
+            return {}
+        expected = self._expected_execution_contract()
+        comparable_keys = (
+            "entry_fee_rate",
+            "exit_fee_rate",
+            "spread_bps",
+            "slippage_bps",
+            "leverage",
+            "intrabar_policy",
+            "gap_policy",
+            "paper_only",
+            "symbol",
+            "interval",
+            "strategy_version",
+        )
+        for key in comparable_keys:
+            if runner_contract.get(key) != expected.get(key):
+                raise ValidationFreezeError(f"runner execution contract mismatch for {key}.")
+        return expected
 
     def _segment_signature(self, segment_view: SegmentView) -> dict[str, Any]:
         return build_data_signature(segment_view.frame, symbol=self.symbol, interval=self.interval)
@@ -82,6 +140,7 @@ class WalkForwardValidator:
         candidate_grid: Sequence[CandidateConfig],
         *,
         runner,
+        execution_contract: dict[str, Any] | None = None,
     ) -> WalkForwardWindowResult:
         segment_views = build_window_segment_views(df, window, self.split_config.warmup_bars)
         candidate_evaluations: list[CandidateEvaluation] = []
@@ -114,7 +173,7 @@ class WalkForwardValidator:
 
         outcome = self._select_window(candidate_evaluations)
         test_signature = self._segment_signature(segment_views["test"])
-        manifest = self._window_manifest(window, candidate_grid, test_signature)
+        manifest = self._window_manifest(window, candidate_grid, test_signature, execution_contract=execution_contract or {})
         if not outcome.approved or outcome.candidate is None:
             return WalkForwardWindowResult(
                 bounds=window,
@@ -132,6 +191,7 @@ class WalkForwardValidator:
             window_id=f"{window.train_start}:{window.validation_start}:{window.test_start}",
             frozen_at=pd.to_datetime(df.iloc[window.test_start]["open_time"], utc=True).to_pydatetime(),
             manifest_hash_value=manifest["manifest_hash"],
+            execution_contract=execution_contract or {},
         )
         return WalkForwardWindowResult(
             bounds=window,
@@ -150,6 +210,7 @@ class WalkForwardValidator:
         window_result: WalkForwardWindowResult,
         *,
         runner,
+        execution_contract: dict[str, Any] | None = None,
     ) -> WalkForwardWindowResult:
         if not window_result.approved or window_result.selected_candidate is None or window_result.frozen_selection is None:
             return window_result
@@ -182,21 +243,24 @@ class WalkForwardValidator:
         *,
         runner,
     ) -> WalkForwardWindowResult:
-        selection_result = self._evaluate_window_selection(df, window, candidate_grid, runner=runner)
-        return self._evaluate_window_test(df, selection_result, runner=runner)
+        contract = self._validate_execution_contract(self._runner_execution_contract(runner))
+        selection_result = self._evaluate_window_selection(df, window, candidate_grid, runner=runner, execution_contract=contract)
+        return self._evaluate_window_test(df, selection_result, runner=runner, execution_contract=contract)
 
     def run(self, df: pd.DataFrame, candidate_grid: Sequence[CandidateConfig], *, runner) -> WalkForwardResult:
         if self._session_consumed:
             raise ValidationFreezeError("validator session already consumed; create a new instance to rerun.")
         windows = build_windows(df, self.split_config)
-        selection_results = [self._evaluate_window_selection(df, window, candidate_grid, runner=runner) for window in windows]
-        results = [self._evaluate_window_test(df, window_result, runner=runner) for window_result in selection_results]
+        contract = self._validate_execution_contract(self._runner_execution_contract(runner))
+        selection_results = [self._evaluate_window_selection(df, window, candidate_grid, runner=runner, execution_contract=contract) for window in windows]
+        results = [self._evaluate_window_test(df, window_result, runner=runner, execution_contract=contract) for window_result in selection_results]
         data_signature = build_data_signature(df, symbol=self.symbol, interval=self.interval)
         manifest = build_manifest(
             symbol=self.symbol,
             interval=self.interval,
             strategy_version=self.strategy_version,
             costs=self.costs,
+            execution_contract=contract,
             split_config=self.split_config,
             candidate_grid=candidate_grid,
             windows=windows,

@@ -28,6 +28,9 @@ def aggregate_segment_metrics(metrics: Iterable[SegmentMetrics]) -> dict[str, An
     if not itens:
         return {
             "total_trades": 0,
+            "total_bars": 0,
+            "exposure_bars": 0,
+            "exposure_time_percent": 0.0,
             "net_pnl": 0.0,
             "net_return_percent": 0.0,
             "drawdown_max_percent": 0.0,
@@ -42,6 +45,7 @@ def aggregate_segment_metrics(metrics: Iterable[SegmentMetrics]) -> dict[str, An
             "degradation_validation_test": 0.0,
             "winning_trades": 0,
             "losing_trades": 0,
+            "breakeven_trades": 0,
             "gross_profit": 0.0,
             "gross_loss": 0.0,
         }
@@ -55,19 +59,25 @@ def aggregate_segment_metrics(metrics: Iterable[SegmentMetrics]) -> dict[str, An
     slippage_cost = sum((item.slippage_cost for item in itens), Decimal("0"))
     capital_initial = itens[0].capital_initial
     capital_final = capital_initial + net_pnl
+    total_bars = sum(item.total_bars for item in itens)
+    exposure_bars = sum(item.exposure_bars for item in itens)
+    exposure_time_percent = (Decimal(exposure_bars) / Decimal(total_bars) * Decimal("100")) if total_bars > 0 else Decimal("0")
     winning_trades = 0
     losing_trades = 0
+    breakeven_trades = 0
     gross_profit = Decimal("0")
     gross_loss = Decimal("0")
     for item in itens:
         inferred_wins = item.winning_trades
         inferred_losses = item.losing_trades
-        if inferred_wins == 0 and item.total_trades > 0:
+        inferred_breakevens = item.breakeven_trades
+        if inferred_wins == 0 and item.total_trades > 0 and item.win_rate > 0:
             inferred_wins = int(round(float(item.win_rate) / 100.0 * item.total_trades))
-        if inferred_losses == 0 and item.total_trades >= inferred_wins:
-            inferred_losses = item.total_trades - inferred_wins
+        if inferred_breakevens == 0 and item.total_trades >= inferred_wins + inferred_losses:
+            inferred_breakevens = max(0, item.total_trades - inferred_wins - inferred_losses)
         winning_trades += inferred_wins
         losing_trades += inferred_losses
+        breakeven_trades += inferred_breakevens
         if item.gross_profit != Decimal("0") or item.gross_loss != Decimal("0"):
             gross_profit += item.gross_profit
             gross_loss += item.gross_loss
@@ -105,8 +115,12 @@ def aggregate_segment_metrics(metrics: Iterable[SegmentMetrics]) -> dict[str, An
         "win_rate": float(round(win_rate, 4)),
         "trade_win_rate": float(round(trade_win_rate, 4)),
         "dispersion": float(round(Decimal(str(pstdev([float(item.net_return_percent) for item in itens]))) if len(itens) > 1 else Decimal("0"), 6)),
+        "total_bars": total_bars,
+        "exposure_bars": exposure_bars,
+        "exposure_time_percent": float(round(exposure_time_percent, 4)),
         "winning_trades": winning_trades,
         "losing_trades": losing_trades,
+        "breakeven_trades": breakeven_trades,
         "gross_profit": float(round(gross_profit, 6)),
         "gross_loss": float(round(gross_loss, 6)),
     }

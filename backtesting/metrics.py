@@ -59,6 +59,9 @@ def compute_metrics(
             "expectancy": 0.0,
             "drawdown_max_percent": float(max_drawdown(equity_curve)),
             "sequencia_maxima_perdas": 0,
+            "winning_trades": 0,
+            "losing_trades": 0,
+            "breakeven_trades": 0,
             "exposure_time_percent": 0.0,
             "total_bars": total_bars,
             "exposure_bars": exposure_bars,
@@ -76,8 +79,10 @@ def compute_metrics(
     pnl_values = [trade.net_pnl for trade in trades]
     wins = [pnl for pnl in pnl_values if pnl > 0]
     losses = [pnl for pnl in pnl_values if pnl < 0]
+    breakevens = [pnl for pnl in pnl_values if pnl == 0]
     wins_count = len(wins)
     losses_count = len(losses)
+    breakeven_count = len(breakevens)
     total_trades = len(trades)
     win_rate = (Decimal(wins_count) / Decimal(total_trades) * Decimal("100")) if total_trades else Decimal("0")
     average_gain = (sum(wins, Decimal("0")) / Decimal(wins_count)) if wins_count else None
@@ -131,6 +136,7 @@ def compute_metrics(
         "total_trades": total_trades,
         "winning_trades": wins_count,
         "losing_trades": losses_count,
+        "breakeven_trades": breakeven_count,
         "win_rate": float(round(win_rate, 2)),
         "average_gain": float(round(average_gain, 4)) if average_gain is not None else None,
         "average_loss": float(round(average_loss, 4)) if average_loss is not None else None,

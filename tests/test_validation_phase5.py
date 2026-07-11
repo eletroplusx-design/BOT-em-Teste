@@ -57,6 +57,7 @@ def _metrics(
     total_trades: int = 10,
     winning_trades: int | None = None,
     losing_trades: int | None = None,
+    breakeven_trades: int | None = None,
     gross_profit: str | None = None,
     gross_loss: str | None = None,
     average_gain: str | None = None,
@@ -68,6 +69,8 @@ def _metrics(
         winning_trades = int(round(total_trades * (float(win_rate) / 100.0)))
     if losing_trades is None:
         losing_trades = max(0, total_trades - winning_trades)
+    if breakeven_trades is None:
+        breakeven_trades = max(0, total_trades - winning_trades - losing_trades)
     if gross_profit is None:
         gross_profit = net_pnl if net_pnl_decimal > 0 else "0"
     if gross_loss is None:
@@ -91,6 +94,7 @@ def _metrics(
         "total_trades": total_trades,
         "winning_trades": winning_trades,
         "losing_trades": losing_trades,
+        "breakeven_trades": breakeven_trades,
         "average_gain": average_gain,
         "average_loss": average_loss,
         "sequencia_maxima_perdas": sequencia_maxima_perdas,
@@ -171,11 +175,14 @@ def _engine_runner_factory():
             BacktestConfig(
                 initial_capital=Decimal("10000"),
                 risk_percent=Decimal("1"),
-                slippage_rate=Decimal("0"),
-                commission_rate=Decimal("0.0004"),
+                entry_fee_rate=Decimal("0"),
+                exit_fee_rate=Decimal("0"),
+                spread_bps=Decimal("0"),
+                slippage_bps=Decimal("0"),
                 leverage=Decimal("1"),
                 symbol="BTCUSDT",
                 interval="1h",
+                strategy_version="v4_walk_forward",
             )
         ),
         strategy_factory=strategy_factory,
@@ -316,6 +323,7 @@ def test_manifest_and_freeze_are_deterministic_and_utc(sample_btc_data):
         interval="1h",
         strategy_version="v4_walk_forward",
         costs={"fee": "0.1"},
+        execution_contract={"symbol": "BTCUSDT", "interval": "1h"},
         split_config=config,
         candidate_grid=[candidate],
         windows=windows[:1],
@@ -327,6 +335,7 @@ def test_manifest_and_freeze_are_deterministic_and_utc(sample_btc_data):
         interval="1h",
         strategy_version="v4_walk_forward",
         costs={"fee": "0.1"},
+        execution_contract={"symbol": "BTCUSDT", "interval": "1h"},
         split_config=config,
         candidate_grid=[candidate],
         windows=windows[:1],
@@ -338,6 +347,7 @@ def test_manifest_and_freeze_are_deterministic_and_utc(sample_btc_data):
         candidate,
         strategy_version="v4_walk_forward",
         costs={"fee": "0.1"},
+        execution_contract={"symbol": "BTCUSDT", "interval": "1h"},
         symbol="BTCUSDT",
         interval="1h",
         frozen_at=datetime(2026, 7, 10, 12, tzinfo=timezone.utc),
@@ -369,6 +379,72 @@ def test_manifest_hash_muda_com_ohlcv_e_ordem(sample_btc_data):
     signature_c = build_data_signature(reordered, symbol="BTCUSDT", interval="1h")
     assert signature_a["content_hash"] != signature_b["content_hash"]
     assert signature_a["content_hash"] != signature_c["content_hash"]
+
+
+def test_segment_metrics_roundtrip_and_net_return_aliases():
+    metrics = _metrics(
+        capital_initial="1000",
+        capital_final="1042",
+        net_pnl="42",
+        net_return_percent="4.2",
+        gross_pnl="55",
+        gross_profit="60",
+        gross_loss="15",
+        total_costs="13",
+        total_fees="8",
+        spread_cost="3",
+        slippage_cost="2",
+        drawdown_max_percent="1.5",
+        expectancy="0.42",
+        profit_factor="4.0",
+        win_rate="50",
+        total_trades=6,
+        winning_trades=3,
+        losing_trades=2,
+        breakeven_trades=1,
+        average_gain="20",
+        average_loss="7.5",
+        sequencia_maxima_perdas=2,
+    )
+    roundtrip = SegmentMetrics.from_summary(metrics.as_dict())
+    assert roundtrip == metrics
+
+
+def test_selection_rejects_summary_using_net_return_percent_alias():
+    alpha = _candidate("alpha", risk="low")
+    candidate_evaluations = (
+        CandidateEvaluation(
+            candidate=alpha,
+            train_metrics=_metrics(total_trades=10, net_return_percent="2.5", expectancy="1.0", profit_factor="1.2", drawdown_max_percent="3"),
+            validation_metrics=SegmentMetrics.from_summary(
+                {
+                    "capital_initial": 1000,
+                    "capital_final": 1030,
+                    "net_pnl": 30,
+                    "net_return_percent": 3.0,
+                    "gross_pnl": 30,
+                    "gross_profit": 30,
+                    "gross_loss": 0,
+                    "total_costs": 0,
+                    "total_fees": 0,
+                    "spread_cost": 0,
+                    "slippage_cost": 0,
+                    "drawdown_max_percent": 1,
+                    "expectancy": 0.2,
+                    "profit_factor": 0.8,
+                    "win_rate": 40,
+                    "total_trades": 5,
+                    "winning_trades": 2,
+                    "losing_trades": 2,
+                    "breakeven_trades": 1,
+                }
+            ),
+            stability_score=Decimal("0.1"),
+        ),
+    )
+    outcome = select_configuration(candidate_evaluations, SelectionCriteria(min_net_return=Decimal("4"), min_total_trades=1))
+    assert outcome.approved is False
+    assert outcome.candidate is None
 
 
 def test_walk_forward_selection_ignores_test_metrics_and_freezes_once(sample_btc_data):
@@ -498,6 +574,148 @@ def test_walk_forward_two_phase_selection_and_segment_signatures_are_isolated(sa
     assert all("data_signature" not in context for context in contexts_b)
 
 
+def test_trusted_runner_contract_mismatch_and_manifest_costs_are_effective(sample_btc_data):
+    alpha = _candidate("alpha", risk="low")
+    split_config = ValidationSplitConfig(
+        mode="rolling",
+        train_bars=120,
+        validation_bars=40,
+        test_bars=40,
+        warmup_bars=20,
+        purge_bars=5,
+        embargo_bars=5,
+        step_bars=40,
+    )
+
+    def strategy_factory(candidate):
+        def strategy(history, snapshot):
+            candle = history[-1]
+            entry = Decimal(str(candle.close))
+            return _signal(candle.close_time, entry=entry, stop=entry - Decimal("5"), take=entry + Decimal("10"))
+
+        return strategy
+
+    def make_runner(*, entry_fee_rate="0", exit_fee_rate="0", spread_bps="0", slippage_bps="0", leverage="1", symbol="BTCUSDT", interval="1h", strategy_version="v4_walk_forward"):
+        return TrustedLeakFreeBacktestRunner(
+            engine_factory=lambda: LeakFreeBacktestEngine(
+                BacktestConfig(
+                    initial_capital=Decimal("10000"),
+                    risk_percent=Decimal("1"),
+                    commission_rate=None,
+                    entry_fee_rate=Decimal(entry_fee_rate),
+                    exit_fee_rate=Decimal(exit_fee_rate),
+                    spread_bps=Decimal(spread_bps),
+                    slippage_bps=Decimal(slippage_bps),
+                    leverage=Decimal(leverage),
+                    symbol=symbol,
+                    interval=interval,
+                    strategy_version=strategy_version,
+                )
+            ),
+            strategy_factory=strategy_factory,
+            symbol=symbol,
+            interval=interval,
+        )
+
+    runner = make_runner(entry_fee_rate="0", exit_fee_rate="0", spread_bps="0", slippage_bps="0")
+    validator = WalkForwardValidator(
+        split_config=split_config,
+        selection_criteria=SelectionCriteria(min_total_trades=0, require_defined_profit_factor=False, min_profit_factor=Decimal("0")),
+        strategy_version="v4_walk_forward",
+        costs={"entry_fee_rate": "0", "exit_fee_rate": "0", "spread_bps": "0", "slippage_bps": "0", "leverage": "1"},
+        symbol="BTCUSDT",
+        interval="1h",
+    )
+    result = validator.run(sample_btc_data.iloc[:260].copy(), [alpha], runner=runner)
+    assert result.manifest["execution_contract"]["paper_only"] is True
+    assert result.manifest["execution_contract"]["symbol"] == "BTCUSDT"
+    assert result.manifest["execution_contract"]["interval"] == "1h"
+    assert result.manifest["execution_contract"]["entry_fee_rate"] == "0"
+
+    changed_cost_runner = make_runner(entry_fee_rate="0.0002", exit_fee_rate="0.0002", spread_bps="0", slippage_bps="0")
+    changed_validator = WalkForwardValidator(
+        split_config=split_config,
+        selection_criteria=SelectionCriteria(min_total_trades=0, require_defined_profit_factor=False, min_profit_factor=Decimal("0")),
+        strategy_version="v4_walk_forward",
+        costs={"entry_fee_rate": "0.0002", "exit_fee_rate": "0.0002", "spread_bps": "0", "slippage_bps": "0", "leverage": "1"},
+        symbol="BTCUSDT",
+        interval="1h",
+    )
+    changed_result = changed_validator.run(sample_btc_data.iloc[:260].copy(), [alpha], runner=changed_cost_runner)
+    assert result.manifest["manifest_hash"] != changed_result.manifest["manifest_hash"]
+
+    mismatch_validator = WalkForwardValidator(
+        split_config=split_config,
+        selection_criteria=SelectionCriteria(min_total_trades=0, require_defined_profit_factor=False, min_profit_factor=Decimal("0")),
+        strategy_version="v4_walk_forward",
+        costs={"entry_fee_rate": "0", "exit_fee_rate": "0", "spread_bps": "0", "slippage_bps": "0", "leverage": "1"},
+        symbol="ETHUSDT",
+        interval="1h",
+    )
+    with pytest.raises(ValidationFreezeError):
+        mismatch_validator.run(sample_btc_data.iloc[:260].copy(), [alpha], runner=runner)
+
+
+def test_trusted_runner_excludes_warmup_from_segment_metrics(sample_btc_data):
+    alpha = _candidate("alpha", risk="low")
+    split_config = ValidationSplitConfig(
+        mode="rolling",
+        train_bars=120,
+        validation_bars=40,
+        test_bars=40,
+        warmup_bars=20,
+        purge_bars=5,
+        embargo_bars=5,
+        step_bars=40,
+    )
+
+    def strategy_factory(candidate):
+        def strategy(history, snapshot):
+            candle = history[-1]
+            entry = Decimal(str(candle.close))
+            return _signal(candle.close_time, entry=entry, stop=entry - Decimal("5"), take=entry + Decimal("10"))
+
+        return strategy
+
+    runner = TrustedLeakFreeBacktestRunner(
+        engine_factory=lambda: LeakFreeBacktestEngine(
+            BacktestConfig(
+                initial_capital=Decimal("10000"),
+                risk_percent=Decimal("1"),
+                entry_fee_rate=Decimal("0"),
+                exit_fee_rate=Decimal("0"),
+                spread_bps=Decimal("0"),
+                slippage_bps=Decimal("0"),
+                leverage=Decimal("1"),
+                symbol="BTCUSDT",
+                interval="1h",
+                strategy_version="v4_walk_forward",
+            )
+        ),
+        strategy_factory=strategy_factory,
+        symbol="BTCUSDT",
+        interval="1h",
+    )
+    validator = WalkForwardValidator(
+        split_config=split_config,
+        selection_criteria=SelectionCriteria(min_total_trades=0, require_defined_profit_factor=False, min_profit_factor=Decimal("0")),
+        strategy_version="v4_walk_forward",
+        costs={"entry_fee_rate": "0", "exit_fee_rate": "0", "spread_bps": "0", "slippage_bps": "0", "leverage": "1"},
+        symbol="BTCUSDT",
+        interval="1h",
+    )
+    result = validator.run(sample_btc_data.iloc[:260].copy(), [alpha], runner=runner)
+    assert result.windows[0].test_metrics is not None
+    assert result.windows[0].test_metrics.total_bars == 40
+    assert result.windows[0].test_metrics.exposure_bars <= 40
+    assert result.windows[0].test_metrics.exposure_time_percent == pytest.approx(
+        (result.windows[0].test_metrics.exposure_bars / 40) * 100,
+        rel=1e-6,
+    )
+    assert result.windows[0].test_metrics.total_bars != 60
+    assert result.summary["total_trades"] == result.windows[0].test_metrics.total_trades
+
+
 def test_runner_context_isolation_and_warmup_engine_integration(sample_btc_data):
     alpha = _candidate("alpha", risk="low")
     split_config = ValidationSplitConfig(
@@ -603,6 +821,12 @@ def test_statistics_and_validation_errors_cover_edge_cases():
     ]
     weighted = aggregate_segment_metrics(weighted_metrics)
     assert weighted["trade_win_rate"] == pytest.approx(59.4059, rel=1e-4)
+
+    breakeven_metrics = [_metrics(net_return_percent="2", net_pnl="2", gross_pnl="2", gross_profit="2", gross_loss="0", profit_factor="1.0", win_rate="60", total_trades=5, winning_trades=3, losing_trades=0, breakeven_trades=2)]
+    breakeven_aggregate = aggregate_segment_metrics(breakeven_metrics)
+    assert breakeven_aggregate["winning_trades"] == 3
+    assert breakeven_aggregate["losing_trades"] == 0
+    assert breakeven_aggregate["breakeven_trades"] == 2
 
     stability = compute_candidate_stability(
         _metrics(net_return_percent="10", drawdown_max_percent="3", expectancy="1"),

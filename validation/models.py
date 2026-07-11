@@ -239,8 +239,12 @@ class SegmentMetrics:
     payoff: Decimal | None
     win_rate: Decimal
     total_trades: int
+    total_bars: int = 0
+    exposure_bars: int = 0
+    exposure_time_percent: Decimal = Decimal("0")
     winning_trades: int = 0
     losing_trades: int = 0
+    breakeven_trades: int = 0
     average_gain: Decimal | None = None
     average_loss: Decimal | None = None
     sequencia_maxima_perdas: int = 0
@@ -264,8 +268,12 @@ class SegmentMetrics:
             "payoff": self.payoff,
             "win_rate": self.win_rate,
             "total_trades": self.total_trades,
+            "total_bars": self.total_bars,
+            "exposure_bars": self.exposure_bars,
+            "exposure_time_percent": self.exposure_time_percent,
             "winning_trades": self.winning_trades,
             "losing_trades": self.losing_trades,
+            "breakeven_trades": self.breakeven_trades,
             "average_gain": self.average_gain,
             "average_loss": self.average_loss,
             "sequencia_maxima_perdas": self.sequencia_maxima_perdas,
@@ -279,7 +287,10 @@ class SegmentMetrics:
             capital_initial=_to_decimal(summary.get("capital_initial", 0), "capital_initial") or Decimal("0"),
             capital_final=_to_decimal(summary.get("capital_final", 0), "capital_final") or Decimal("0"),
             net_pnl=_to_decimal(summary.get("net_pnl", 0), "net_pnl") or Decimal("0"),
-            net_return_percent=_to_decimal(summary.get("return_net_percent", summary.get("lucro_total_percent", 0)), "net_return_percent") or Decimal("0"),
+            net_return_percent=_to_decimal(
+                summary.get("net_return_percent", summary.get("return_net_percent", summary.get("lucro_total_percent", 0))),
+                "net_return_percent",
+            ) or Decimal("0"),
             gross_pnl=_to_decimal(summary.get("gross_pnl", 0), "gross_pnl") or Decimal("0"),
             gross_profit=_to_decimal(summary.get("gross_profit", 0), "gross_profit") or Decimal("0"),
             gross_loss=_to_decimal(summary.get("gross_loss", 0), "gross_loss") or Decimal("0"),
@@ -293,8 +304,12 @@ class SegmentMetrics:
             payoff=_to_decimal(summary.get("payoff"), "payoff", allow_none=True) if summary.get("payoff") is not None else None,
             win_rate=_to_decimal(summary.get("win_rate", 0), "win_rate") or Decimal("0"),
             total_trades=int(summary.get("total_trades", 0) or 0),
+            total_bars=int(summary.get("total_bars", 0) or 0),
+            exposure_bars=int(summary.get("exposure_bars", 0) or 0),
+            exposure_time_percent=_to_decimal(summary.get("exposure_time_percent", 0), "exposure_time_percent") or Decimal("0"),
             winning_trades=int(summary.get("winning_trades", 0) or 0),
             losing_trades=int(summary.get("losing_trades", 0) or 0),
+            breakeven_trades=int(summary.get("breakeven_trades", 0) or 0),
             average_gain=_to_decimal(summary.get("average_gain"), "average_gain", allow_none=True) if summary.get("average_gain") is not None else None,
             average_loss=_to_decimal(summary.get("average_loss"), "average_loss", allow_none=True) if summary.get("average_loss") is not None else None,
             sequencia_maxima_perdas=int(summary.get("sequencia_maxima_perdas", 0) or 0),
@@ -324,6 +339,7 @@ class FrozenSelection:
     candidate: CandidateConfig
     strategy_version: str
     costs: tuple[tuple[str, Any], ...]
+    execution_contract: tuple[tuple[str, Any], ...]
     symbol: str
     interval: str
     frozen_at: datetime
@@ -337,6 +353,7 @@ class FrozenSelection:
         object.__setattr__(self, "symbol", str(self.symbol).strip())
         object.__setattr__(self, "interval", str(self.interval).strip())
         object.__setattr__(self, "costs", tuple(sorted((str(key), _freeze_value(value)) for key, value in self.costs)))
+        object.__setattr__(self, "execution_contract", tuple(sorted((str(key), _freeze_value(value)) for key, value in self.execution_contract)))
         if not self.manifest_hash:
             raise ValidationSelectionError("manifest_hash is required.")
         if not self.window_id:
@@ -347,6 +364,7 @@ class FrozenSelection:
             "candidate": self.candidate.as_dict(),
             "strategy_version": self.strategy_version,
             "costs": {key: value for key, value in self.costs},
+            "execution_contract": {key: value for key, value in self.execution_contract},
             "symbol": self.symbol,
             "interval": self.interval,
             "frozen_at": self.frozen_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
