@@ -4,11 +4,13 @@ from .decision import evaluate_promotion
 from .evidence import PromotionEvidence, PromotionWindowEvidence
 from .errors import PromotionDecisionError, PromotionEvidenceError, PromotionPolicyError, PromotionValidationError
 from .models import PromotionCriterionResult, PromotionDecision, PromotionStatus
-from .monitoring import MonitoredPaperLimits
+from .monitoring import MonitoredPaperLimits, PaperMonitoringDecision, PaperMonitoringSnapshot, evaluate_paper_monitoring
 from .policy import PromotionPolicy
 
 __all__ = [
     "MonitoredPaperLimits",
+    "PaperMonitoringDecision",
+    "PaperMonitoringSnapshot",
     "PromotionCriterionResult",
     "PromotionDecision",
     "PromotionDecisionError",
@@ -22,5 +24,6 @@ __all__ = [
     "adapt_walk_forward_result",
     "build_promotion_report",
     "evaluate_promotion",
+    "evaluate_paper_monitoring",
     "promotion_hash",
 ]

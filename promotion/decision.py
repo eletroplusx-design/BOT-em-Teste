@@ -6,11 +6,12 @@ from decimal import Decimal
 from typing import Any
 
 from .artifacts import promotion_hash
-from .evidence import PromotionEvidence, validate_promotion_evidence
+from .evidence import PromotionEvidence, build_promotion_evidence, validate_promotion_evidence
 from .errors import PromotionDecisionError
 from .models import PromotionCriterionResult, PromotionDecision, PromotionStatus
 from .monitoring import MonitoredPaperLimits
 from .policy import PromotionPolicy
+from validation.models import WalkForwardResult
 
 
 def _as_decimal(value: Any) -> Decimal:
@@ -70,8 +71,6 @@ def _classify_status(criteria: tuple[PromotionCriterionResult, ...]) -> Promotio
         return PromotionStatus.APPROVED_FOR_MONITORED_PAPER
     if any(name in {"min_oos_windows", "min_oos_trades"} for name in failed):
         return PromotionStatus.INSUFFICIENT_EVIDENCE
-    if any(name in {"max_drawdown"} for name in failed) or any(name.startswith("cost_") for name in failed):
-        return PromotionStatus.PAPER_SUSPENDED
     if any(name in {"runner_trusted", "paper_only", "engine_class", "manifest_complete", "manifest_hash", "window_count", "single_candidate"} for name in failed):
         return PromotionStatus.REJECTED
     return PromotionStatus.REJECTED
@@ -94,7 +93,16 @@ def _monitoring_limits(policy: PromotionPolicy) -> MonitoredPaperLimits:
     )
 
 
-def evaluate_promotion(evidence: PromotionEvidence, policy: PromotionPolicy | None = None, monitoring: MonitoredPaperLimits | None = None) -> PromotionDecision:
+def _coerce_evidence(source: PromotionEvidence | WalkForwardResult) -> PromotionEvidence:
+    if isinstance(source, PromotionEvidence):
+        return source
+    if isinstance(source, WalkForwardResult):
+        return build_promotion_evidence(source)
+    raise PromotionDecisionError("promotion evidence or walk forward result is required.")
+
+
+def evaluate_promotion(evidence: PromotionEvidence | WalkForwardResult, policy: PromotionPolicy | None = None, monitoring: MonitoredPaperLimits | None = None) -> PromotionDecision:
+    evidence = _coerce_evidence(evidence)
     policy = policy or PromotionPolicy()
     monitoring = monitoring or _monitoring_limits(policy)
     reasons: list[str] = []
@@ -124,7 +132,7 @@ def evaluate_promotion(evidence: PromotionEvidence, policy: PromotionPolicy | No
     recalculated = evidence.recalculated_metrics
     summary = evidence.summary
     window_metrics = [window.test_metrics for window in evidence.windows]
-    profitable_windows = sum(1 for metrics in window_metrics if _as_decimal(metrics.get("net_return_percent", 0)) > 0)
+    profitable_windows = sum(1 for metrics in window_metrics if _as_decimal(getattr(metrics, "net_return_percent", 0)) > 0)
     total_windows = len(window_metrics)
     total_trades = int(_as_decimal(recalculated.get("total_trades", 0)))
     net_return = _as_decimal(recalculated.get("net_return_percent", 0))
@@ -132,8 +140,19 @@ def evaluate_promotion(evidence: PromotionEvidence, policy: PromotionPolicy | No
     profit_factor = recalculated.get("profit_factor")
     drawdown = _as_decimal(recalculated.get("drawdown_max_percent", 0))
     degradation = _as_decimal(recalculated.get("degradation_validation_test", 0))
-    selected_candidate_names = {window.selected_candidate.get("name") for window in evidence.windows}
-    single_candidate = len(selected_candidate_names) == 1
+    selected_candidate_identity = {
+        (
+            window.selected_candidate.name,
+            tuple(window.selected_candidate.parameters),
+            window.frozen_selection.strategy_version,
+            window.frozen_selection.symbol,
+            window.frozen_selection.interval,
+            tuple(window.frozen_selection.costs),
+            tuple(window.frozen_selection.execution_contract),
+        )
+        for window in evidence.windows
+    }
+    single_candidate = len(selected_candidate_identity) == 1
 
     criteria.append(_criterion("runner_trusted", evidence.runner_trusted is True, True, evidence.runner_trusted, "runner_trusted must be true"))
     criteria.append(_criterion("paper_only", evidence.paper_only is True, True, evidence.paper_only, "paper_only must be true"))

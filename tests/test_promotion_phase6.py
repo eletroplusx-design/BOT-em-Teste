@@ -10,6 +10,7 @@ import pytest
 
 from promotion import (
     MonitoredPaperLimits,
+    PaperMonitoringSnapshot,
     PromotionEvidence,
     PromotionEvidenceError,
     PromotionPolicy,
@@ -17,9 +18,10 @@ from promotion import (
     adapt_walk_forward_result,
     build_promotion_report,
     evaluate_promotion,
+    evaluate_paper_monitoring,
     promotion_hash,
 )
-from promotion.errors import PromotionPolicyError
+from promotion.errors import PromotionDecisionError, PromotionPolicyError
 from validation.artifacts import build_data_signature, build_manifest, freeze_selection
 from validation.models import CandidateConfig, CandidateEvaluation, FrozenSelection, SegmentMetrics, ValidationSplitConfig, WindowBounds, WalkForwardResult, WalkForwardWindowResult
 from validation.splits import build_rolling_windows
@@ -264,6 +266,42 @@ def _promotion_result(
     return WalkForwardResult(windows=tuple(window_results), summary=summary, manifest=manifest)
 
 
+def _paper_snapshot(
+    decision,
+    *,
+    trading_mode: str = "PAPER",
+    data_fresh: bool = True,
+    session_drawdown_percent: str = "4",
+    current_loss_streak: int = 0,
+    open_positions: int = 0,
+    executed_trades: int = 4,
+    observed_costs: dict[str, object] | None = None,
+    internal_error: str | None = None,
+    attempted_live: bool = False,
+) -> PaperMonitoringSnapshot:
+    return PaperMonitoringSnapshot(
+        timestamp_utc=datetime(2026, 7, 11, 12, 0, tzinfo=timezone.utc),
+        decision_hash=decision.decision_hash,
+        evidence_hash=decision.evidence_hash,
+        strategy_version=decision.strategy_version,
+        configuration=decision.frozen_selection.as_dict(),
+        trading_mode=trading_mode,
+        data_fresh=data_fresh,
+        session_drawdown_percent=Decimal(session_drawdown_percent),
+        current_loss_streak=current_loss_streak,
+        open_positions=open_positions,
+        executed_trades=executed_trades,
+        observed_costs=observed_costs or {
+            "entry_fee_rate": "0.0004",
+            "exit_fee_rate": "0.0004",
+            "spread_bps": "5",
+            "slippage_bps": "5",
+        },
+        internal_error=internal_error,
+        attempted_live=attempted_live,
+    )
+
+
 def _mutate_result_windows(
     result: WalkForwardResult,
     *,
@@ -320,6 +358,25 @@ def test_evidence_vigente_aprova_apenas_paper_e_report_has_hash():
     report = build_promotion_report(decision)
     assert report["status"] == PromotionStatus.APPROVED_FOR_MONITORED_PAPER.value
     assert report["report_hash"]
+    evidence.recalculated_metrics["profit_factor"] = 999
+    assert evaluate_promotion(evidence).status == PromotionStatus.REJECTED
+    forged = PromotionEvidence(
+        manifest=dict(result.manifest),
+        manifest_hash=result.manifest["manifest_hash"],
+        summary=dict(result.summary),
+        windows=evidence.windows,
+        recalculated_metrics=dict(result.summary),
+        symbol="BTCUSDT",
+        interval="1h",
+        strategy_version="v4_walk_forward",
+        runner_trusted=True,
+        paper_only=True,
+        engine_class="LeakFreeBacktestEngine",
+        execution_contract=dict(result.manifest["execution_contract"]),
+        window_count_expected=len(result.manifest["windows"]),
+        window_count_received=len(result.windows),
+    )
+    assert evaluate_promotion(forged).status == PromotionStatus.REJECTED
 
 
 def test_runner_nao_confiavel_e_manifesto_adulterado_rejeitam():
@@ -431,7 +488,7 @@ def test_limites_e_risco_rejeicao_in_sufficient_or_suspended():
             ],
         )
     )
-    assert evaluate_promotion(drawdown).status == PromotionStatus.PAPER_SUSPENDED
+    assert evaluate_promotion(drawdown).status == PromotionStatus.REJECTED
 
 
 def test_pocas_janelas_lucrativas_degradacao_e_filtros_de_custos():
@@ -465,10 +522,10 @@ def test_pocas_janelas_lucrativas_degradacao_e_filtros_de_custos():
     assert evaluate_promotion(degraded).status == PromotionStatus.REJECTED
 
     missing_costs = adapt_walk_forward_result(_promotion_result(entry_fee_rate="0", exit_fee_rate="0", spread_bps="0", slippage_bps="0"))
-    assert evaluate_promotion(missing_costs).status == PromotionStatus.PAPER_SUSPENDED
+    assert evaluate_promotion(missing_costs).status == PromotionStatus.REJECTED
 
     negative_costs = adapt_walk_forward_result(_promotion_result(entry_fee_rate="-0.1", exit_fee_rate="-0.1"))
-    assert evaluate_promotion(negative_costs).status == PromotionStatus.PAPER_SUSPENDED
+    assert evaluate_promotion(negative_costs).status == PromotionStatus.REJECTED
 
 
 def test_nan_infinity_missing_window_and_only_best_window_are_rejected():
@@ -491,6 +548,33 @@ def test_nan_infinity_missing_window_and_only_best_window_are_rejected():
     assert evaluate_promotion(only_best_window).status == PromotionStatus.INSUFFICIENT_EVIDENCE
 
 
+def test_candidate_freeze_identity_and_duplicate_evaluations_block():
+    base = _promotion_result()
+    first_window = base.windows[0]
+    different_candidate = CandidateConfig.from_mapping("alpha", {"risk": "high"})
+    mutated_window = replace(
+        first_window,
+        selected_candidate=different_candidate,
+        frozen_selection=replace(first_window.frozen_selection, candidate=different_candidate),
+    )
+    with pytest.raises(PromotionEvidenceError):
+        adapt_walk_forward_result(replace(base, windows=(mutated_window,) + base.windows[1:]))
+
+    duplicate_eval = replace(
+        first_window,
+        candidate_evaluations=(
+            first_window.candidate_evaluations[0],
+            replace(first_window.candidate_evaluations[0]),
+        ),
+    )
+    with pytest.raises(PromotionEvidenceError):
+        adapt_walk_forward_result(replace(base, windows=(duplicate_eval,) + base.windows[1:]))
+
+    not_approved = replace(first_window, approved=False)
+    with pytest.raises(PromotionEvidenceError):
+        adapt_walk_forward_result(replace(base, windows=(not_approved,) + base.windows[1:]))
+
+
 def test_decisao_deterministica_polity_hash_timestamp_and_live_attempt_fail():
     evidence = adapt_walk_forward_result(_promotion_result())
     policy = PromotionPolicy()
@@ -506,6 +590,35 @@ def test_decisao_deterministica_polity_hash_timestamp_and_live_attempt_fail():
     assert frozen["timestamp_utc"].endswith("Z")
     with pytest.raises(PromotionPolicyError):
         MonitoredPaperLimits(live_trading_permanently_disabled=False)
+
+    snapshot = _paper_snapshot(decision_a)
+    approved_monitoring = evaluate_paper_monitoring(decision_a, snapshot)
+    assert approved_monitoring.status == PromotionStatus.APPROVED_FOR_MONITORED_PAPER
+    assert approved_monitoring.decision_hash == decision_a.decision_hash
+    assert evaluate_paper_monitoring(decision_a, _paper_snapshot(decision_a, session_drawdown_percent="20")).status == PromotionStatus.PAPER_SUSPENDED
+    assert evaluate_paper_monitoring(decision_a, _paper_snapshot(decision_a, current_loss_streak=5)).status == PromotionStatus.PAPER_SUSPENDED
+    assert evaluate_paper_monitoring(decision_a, _paper_snapshot(decision_a, open_positions=2)).status == PromotionStatus.PAPER_SUSPENDED
+    assert evaluate_paper_monitoring(decision_a, _paper_snapshot(decision_a, data_fresh=False)).status == PromotionStatus.PAPER_SUSPENDED
+    assert evaluate_paper_monitoring(decision_a, _paper_snapshot(decision_a, internal_error="boom")).status == PromotionStatus.PAPER_SUSPENDED
+    assert evaluate_paper_monitoring(decision_a, _paper_snapshot(decision_a, attempted_live=True)).status == PromotionStatus.PAPER_SUSPENDED
+    assert evaluate_paper_monitoring(decision_a, _paper_snapshot(decision_a, observed_costs={"entry_fee_rate": "0.1", "exit_fee_rate": "0.0004", "spread_bps": "5", "slippage_bps": "5"})).status == PromotionStatus.PAPER_SUSPENDED
+    with pytest.raises(PromotionDecisionError):
+        evaluate_paper_monitoring(decision_b.__class__(
+            status=PromotionStatus.REJECTED,
+            frozen_selection=decision_b.frozen_selection,
+            strategy_version=decision_b.strategy_version,
+            symbol=decision_b.symbol,
+            interval=decision_b.interval,
+            phase5_manifest=decision_b.phase5_manifest,
+            evidence_hash=decision_b.evidence_hash,
+            policy_hash=decision_b.policy_hash,
+            decision_hash=decision_b.decision_hash,
+            criteria_evaluated=decision_b.criteria_evaluated,
+            reasons=decision_b.reasons,
+            recalculated_metrics=decision_b.recalculated_metrics,
+            paper_limits=decision_b.paper_limits,
+            timestamp_utc=decision_b.timestamp_utc,
+        ), snapshot)
 
 
 def test_paper_monitoring_limits_and_source_safety():

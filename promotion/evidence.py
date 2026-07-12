@@ -38,22 +38,17 @@ def _normalize_str(value: Any) -> str:
 
 @dataclass(frozen=True, slots=True)
 class PromotionWindowEvidence:
-    bounds: dict[str, Any]
+    bounds: WindowBounds
     manifest_hash: str
-    selected_candidate: dict[str, Any]
-    frozen_selection: dict[str, Any]
-    validation_metrics: dict[str, Any]
-    test_metrics: dict[str, Any]
-    candidate_evaluations: tuple[dict[str, Any], ...]
+    selected_candidate: CandidateConfig
+    frozen_selection: FrozenSelection
+    validation_metrics: SegmentMetrics
+    test_metrics: SegmentMetrics
+    candidate_evaluations: tuple[CandidateEvaluation, ...]
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "bounds", dict(self.bounds))
         object.__setattr__(self, "manifest_hash", _normalize_str(self.manifest_hash))
-        object.__setattr__(self, "selected_candidate", dict(self.selected_candidate))
-        object.__setattr__(self, "frozen_selection", dict(self.frozen_selection))
-        object.__setattr__(self, "validation_metrics", dict(self.validation_metrics))
-        object.__setattr__(self, "test_metrics", dict(self.test_metrics))
-        object.__setattr__(self, "candidate_evaluations", tuple(dict(item) for item in self.candidate_evaluations))
+        object.__setattr__(self, "candidate_evaluations", tuple(self.candidate_evaluations))
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -83,6 +78,7 @@ class PromotionEvidence:
     execution_contract: dict[str, Any]
     window_count_expected: int
     window_count_received: int
+    builder_signature: str = field(default="", compare=False, init=False, repr=False)
     evidence_hash: str = field(default="", compare=False)
     created_at_utc: datetime = field(default_factory=lambda: datetime.now(timezone.utc), compare=False)
 
@@ -141,6 +137,8 @@ class PromotionEvidence:
 
 
 def _window_from_result(window: WalkForwardWindowResult) -> PromotionWindowEvidence:
+    if not window.approved:
+        raise PromotionEvidenceError("window must be approved.")
     if window.selected_candidate is None or window.frozen_selection is None or window.test_metrics is None:
         raise PromotionEvidenceError("window must include selected candidate, frozen selection and test metrics.")
     validation_metrics = next(
@@ -149,16 +147,20 @@ def _window_from_result(window: WalkForwardWindowResult) -> PromotionWindowEvide
     )
     if validation_metrics is None:
         raise PromotionEvidenceError("selected candidate validation metrics are missing.")
+    if window.selected_candidate != window.frozen_selection.candidate:
+        raise PromotionEvidenceError("selected candidate diverges from frozen selection candidate.")
     if window.frozen_selection.manifest_hash != window.manifest_hash:
         raise PromotionEvidenceError("frozen selection manifest hash diverges from window manifest.")
+    if sum(1 for evaluation in window.candidate_evaluations if evaluation.candidate == window.selected_candidate) != 1:
+        raise PromotionEvidenceError("selected candidate must have exactly one matching evaluation.")
     return PromotionWindowEvidence(
-        bounds=window.bounds.as_dict(),
+        bounds=window.bounds,
         manifest_hash=window.manifest_hash,
-        selected_candidate=window.selected_candidate.as_dict(),
-        frozen_selection=window.frozen_selection.as_dict(),
-        validation_metrics=validation_metrics.as_dict(),
-        test_metrics=window.test_metrics.as_dict(),
-        candidate_evaluations=tuple(evaluation.as_dict() for evaluation in window.candidate_evaluations),
+        selected_candidate=window.selected_candidate,
+        frozen_selection=window.frozen_selection,
+        validation_metrics=validation_metrics,
+        test_metrics=window.test_metrics,
+        candidate_evaluations=tuple(window.candidate_evaluations),
     )
 
 
@@ -207,7 +209,13 @@ def build_promotion_evidence(result: WalkForwardResult) -> PromotionEvidence:
     split_config = manifest.get("split_config")
     if split_config is None:
         raise PromotionEvidenceError("split config is required.")
+    candidate_grid_dicts = [candidate.as_dict() for candidate in candidate_grid]
     for window_result, window_manifest_data, window_signature in zip(result.windows, manifest["windows"], manifest["window_signatures"]["windows"]):
+        selected_candidate_dict = window_result.selected_candidate.as_dict()
+        if selected_candidate_dict not in candidate_grid_dicts:
+            raise PromotionEvidenceError("selected candidate must appear in the candidate grid.")
+        if window_result.frozen_selection.candidate.as_dict() != selected_candidate_dict:
+            raise PromotionEvidenceError("selected candidate diverges from frozen selection candidate.")
         rebuilt_window_manifest = build_manifest(
             symbol=symbol,
             interval=interval,
@@ -231,7 +239,7 @@ def build_promotion_evidence(result: WalkForwardResult) -> PromotionEvidence:
         raise PromotionEvidenceError("execution contract must include LeakFreeBacktestEngine.")
     if summary.get("manifest_hash") not in (None, manifest_hash_value):
         raise PromotionEvidenceError("summary manifest hash diverges.")
-    return PromotionEvidence(
+    evidence = PromotionEvidence(
         manifest=manifest,
         manifest_hash=manifest_hash_value,
         summary=summary,
@@ -247,12 +255,31 @@ def build_promotion_evidence(result: WalkForwardResult) -> PromotionEvidence:
         window_count_expected=expected_windows,
         window_count_received=received_windows,
     )
+    object.__setattr__(evidence, "builder_signature", promotion_hash(evidence.as_hash_payload()))
+    return evidence
 
 
 def validate_promotion_evidence(evidence: PromotionEvidence) -> None:
     if evidence is None:
         raise PromotionEvidenceError("promotion evidence is required.")
+    if not isinstance(evidence, PromotionEvidence):
+        raise PromotionEvidenceError("promotion evidence has invalid type.")
     if not evidence.runner_trusted:
         raise PromotionEvidenceError("runner must be trusted.")
     if not evidence.paper_only:
         raise PromotionEvidenceError("execution must remain paper-only.")
+    if not evidence.builder_signature:
+        raise PromotionEvidenceError("promotion evidence must originate from the trusted builder.")
+    if evidence.builder_signature != promotion_hash(evidence.as_hash_payload()):
+        raise PromotionEvidenceError("promotion evidence hash mismatch.")
+    for window in evidence.windows:
+        if not isinstance(window.bounds, WindowBounds):
+            raise PromotionEvidenceError("window bounds must be typed.")
+        if not isinstance(window.selected_candidate, CandidateConfig):
+            raise PromotionEvidenceError("window candidate must be typed.")
+        if not isinstance(window.frozen_selection, FrozenSelection):
+            raise PromotionEvidenceError("frozen selection must be typed.")
+        if not isinstance(window.validation_metrics, SegmentMetrics):
+            raise PromotionEvidenceError("validation metrics must be typed.")
+        if not isinstance(window.test_metrics, SegmentMetrics):
+            raise PromotionEvidenceError("test metrics must be typed.")

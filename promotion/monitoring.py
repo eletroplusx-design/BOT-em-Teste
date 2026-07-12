@@ -1,10 +1,14 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
-from .errors import PromotionPolicyError
+from domain.serialization import serialize_value
+from .artifacts import promotion_hash
+from .errors import PromotionDecisionError, PromotionPolicyError
+from .models import PromotionDecision, PromotionStatus
 
 
 def _strict_int(value: Any, field_name: str, *, allow_zero: bool = False) -> int:
@@ -91,3 +95,173 @@ class MonitoredPaperLimits:
             "kill_switch_required": self.kill_switch_required,
             "live_trading_permanently_disabled": self.live_trading_permanently_disabled,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class PaperMonitoringSnapshot:
+    timestamp_utc: datetime
+    decision_hash: str
+    evidence_hash: str
+    strategy_version: str
+    configuration: dict[str, Any]
+    trading_mode: str
+    data_fresh: bool
+    session_drawdown_percent: Decimal
+    current_loss_streak: int
+    open_positions: int
+    executed_trades: int
+    observed_costs: dict[str, Any]
+    internal_error: str | None = None
+    attempted_live: bool = False
+    snapshot_hash: str = field(default="", compare=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "timestamp_utc", self.timestamp_utc.astimezone(timezone.utc))
+        object.__setattr__(self, "session_drawdown_percent", _to_decimal(self.session_drawdown_percent, "session_drawdown_percent"))
+        object.__setattr__(self, "decision_hash", str(self.decision_hash).strip())
+        object.__setattr__(self, "evidence_hash", str(self.evidence_hash).strip())
+        object.__setattr__(self, "strategy_version", str(self.strategy_version).strip())
+        object.__setattr__(self, "trading_mode", str(self.trading_mode).strip().upper())
+        object.__setattr__(self, "configuration", dict(self.configuration))
+        object.__setattr__(self, "observed_costs", dict(self.observed_costs))
+        object.__setattr__(self, "current_loss_streak", _strict_int(self.current_loss_streak, "current_loss_streak", allow_zero=True))
+        object.__setattr__(self, "open_positions", _strict_int(self.open_positions, "open_positions", allow_zero=True))
+        object.__setattr__(self, "executed_trades", _strict_int(self.executed_trades, "executed_trades", allow_zero=True))
+        if not self.snapshot_hash:
+            object.__setattr__(self, "snapshot_hash", promotion_hash(self.as_hash_payload()))
+
+    def as_hash_payload(self) -> dict[str, Any]:
+        return {
+            "timestamp_utc": self.timestamp_utc.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "decision_hash": self.decision_hash,
+            "evidence_hash": self.evidence_hash,
+            "strategy_version": self.strategy_version,
+            "configuration": self.configuration,
+            "trading_mode": self.trading_mode,
+            "data_fresh": self.data_fresh,
+            "session_drawdown_percent": self.session_drawdown_percent,
+            "current_loss_streak": self.current_loss_streak,
+            "open_positions": self.open_positions,
+            "executed_trades": self.executed_trades,
+            "observed_costs": self.observed_costs,
+            "internal_error": self.internal_error,
+            "attempted_live": self.attempted_live,
+        }
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "timestamp_utc": self.timestamp_utc.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "decision_hash": self.decision_hash,
+            "evidence_hash": self.evidence_hash,
+            "strategy_version": self.strategy_version,
+            "configuration": serialize_value(self.configuration),
+            "trading_mode": self.trading_mode,
+            "data_fresh": self.data_fresh,
+            "session_drawdown_percent": self.session_drawdown_percent,
+            "current_loss_streak": self.current_loss_streak,
+            "open_positions": self.open_positions,
+            "executed_trades": self.executed_trades,
+            "observed_costs": serialize_value(self.observed_costs),
+            "internal_error": self.internal_error,
+            "attempted_live": self.attempted_live,
+            "snapshot_hash": self.snapshot_hash,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class PaperMonitoringDecision:
+    status: PromotionStatus
+    decision_hash: str
+    evidence_hash: str
+    snapshot_hash: str
+    paper_limits: dict[str, Any]
+    reasons: tuple[str, ...]
+    timestamp_utc: datetime
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "status", PromotionStatus(self.status))
+        object.__setattr__(self, "decision_hash", str(self.decision_hash).strip())
+        object.__setattr__(self, "evidence_hash", str(self.evidence_hash).strip())
+        object.__setattr__(self, "snapshot_hash", str(self.snapshot_hash).strip())
+        object.__setattr__(self, "paper_limits", dict(self.paper_limits))
+        object.__setattr__(self, "reasons", tuple(str(reason) for reason in self.reasons))
+        object.__setattr__(self, "timestamp_utc", self.timestamp_utc.astimezone(timezone.utc))
+        if not self.decision_hash or not self.evidence_hash or not self.snapshot_hash:
+            raise PromotionDecisionError("monitoring hashes are required.")
+        if self.status == PromotionStatus.APPROVED_FOR_MONITORED_PAPER:
+            if self.paper_limits.get("kill_switch_required") is not True:
+                raise PromotionDecisionError("monitoring approval requires kill_switch_required.")
+            if self.paper_limits.get("live_trading_permanently_disabled") is not True:
+                raise PromotionDecisionError("monitoring approval requires live trading permanently disabled.")
+
+
+def _monitoring_snapshot_hash(snapshot: PaperMonitoringSnapshot) -> str:
+    return promotion_hash(snapshot.as_hash_payload())
+
+
+def _suspend(reason: str, decision: PromotionDecision, snapshot: PaperMonitoringSnapshot, limits: MonitoredPaperLimits) -> PaperMonitoringDecision:
+    return PaperMonitoringDecision(
+        status=PromotionStatus.PAPER_SUSPENDED,
+        decision_hash=decision.decision_hash,
+        evidence_hash=decision.evidence_hash,
+        snapshot_hash=_monitoring_snapshot_hash(snapshot),
+        paper_limits=limits.as_dict(),
+        reasons=(reason,),
+        timestamp_utc=datetime.now(timezone.utc),
+    )
+
+
+def evaluate_paper_monitoring(
+    decision: PromotionDecision,
+    snapshot: PaperMonitoringSnapshot,
+    limits: MonitoredPaperLimits | None = None,
+) -> PaperMonitoringDecision:
+    limits = limits or MonitoredPaperLimits()
+    if not isinstance(decision, PromotionDecision):
+        raise PromotionDecisionError("promotion decision is required.")
+    if decision.status is not PromotionStatus.APPROVED_FOR_MONITORED_PAPER:
+        raise PromotionDecisionError("only approved monitored paper decisions can be monitored.")
+    if not isinstance(snapshot, PaperMonitoringSnapshot):
+        raise PromotionDecisionError("paper monitoring snapshot is required.")
+    if snapshot.snapshot_hash != _monitoring_snapshot_hash(snapshot):
+        return _suspend("snapshot hash mismatch", decision, snapshot, limits)
+    if snapshot.decision_hash != decision.decision_hash or snapshot.evidence_hash != decision.evidence_hash:
+        return _suspend("hash divergence", decision, snapshot, limits)
+    expected_configuration = decision.frozen_selection.as_dict()
+    if serialize_value(snapshot.configuration) != serialize_value(expected_configuration):
+        return _suspend("configuration divergence", decision, snapshot, limits)
+    if snapshot.strategy_version != decision.strategy_version or snapshot.trading_mode != "PAPER":
+        return _suspend("strategy or mode divergence", decision, snapshot, limits)
+    if snapshot.internal_error:
+        return _suspend("internal error", decision, snapshot, limits)
+    if snapshot.attempted_live:
+        return _suspend("live trading attempt", decision, snapshot, limits)
+    if not snapshot.data_fresh:
+        return _suspend("stale or invalid data", decision, snapshot, limits)
+    if snapshot.session_drawdown_percent > limits.session_drawdown_max_percent:
+        return _suspend("session drawdown exceeded", decision, snapshot, limits)
+    if snapshot.current_loss_streak > limits.max_loss_streak:
+        return _suspend("loss streak exceeded", decision, snapshot, limits)
+    if snapshot.open_positions > limits.max_positions:
+        return _suspend("open positions exceeded", decision, snapshot, limits)
+    if snapshot.executed_trades < limits.min_trades or snapshot.executed_trades > limits.max_trades:
+        return _suspend("trade count outside limits", decision, snapshot, limits)
+    expected_costs = decision.phase5_manifest.get("execution_contract", {})
+    for key, observed in snapshot.observed_costs.items():
+        expected = expected_costs.get(key)
+        if expected is None:
+            continue
+        try:
+            if Decimal(str(observed)) > Decimal(str(expected)):
+                return _suspend(f"observed cost too high: {key}", decision, snapshot, limits)
+        except Exception:
+            return _suspend(f"invalid observed cost: {key}", decision, snapshot, limits)
+    return PaperMonitoringDecision(
+        status=PromotionStatus.APPROVED_FOR_MONITORED_PAPER,
+        decision_hash=decision.decision_hash,
+        evidence_hash=decision.evidence_hash,
+        snapshot_hash=snapshot.snapshot_hash,
+        paper_limits=limits.as_dict(),
+        reasons=(),
+        timestamp_utc=datetime.now(timezone.utc),
+    )

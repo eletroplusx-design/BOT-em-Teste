@@ -91,6 +91,8 @@ class PromotionDecision:
     timestamp_utc: datetime
 
     def __post_init__(self) -> None:
+        if not isinstance(self.frozen_selection, FrozenSelection):
+            raise PromotionDecisionError("frozen_selection must be a FrozenSelection instance.")
         object.__setattr__(self, "status", PromotionStatus(self.status))
         object.__setattr__(self, "strategy_version", str(self.strategy_version).strip())
         object.__setattr__(self, "symbol", str(self.symbol).strip().upper())
@@ -110,15 +112,23 @@ class PromotionDecision:
             raise PromotionDecisionError("policy_hash is required.")
         if not self.decision_hash:
             raise PromotionDecisionError("decision_hash is required.")
+        if self.status == PromotionStatus.APPROVED_FOR_MONITORED_PAPER:
+            if not self.criteria_evaluated:
+                raise PromotionDecisionError("approved decisions require evaluated criteria.")
+            if any(not criterion.passed for criterion in self.criteria_evaluated):
+                raise PromotionDecisionError("approved decisions cannot include failed criteria.")
+            required_flags = {
+                "kill_switch_required": True,
+                "live_trading_permanently_disabled": True,
+            }
+            for key, expected in required_flags.items():
+                if self.paper_limits.get(key) is not expected:
+                    raise PromotionDecisionError(f"{key} must be {expected}.")
 
     def as_dict(self) -> dict[str, Any]:
-        if hasattr(self.frozen_selection, "as_dict"):
-            frozen_selection = self.frozen_selection.as_dict()
-        else:
-            frozen_selection = serialize_value(self.frozen_selection)
         return {
             "status": self.status.value,
-            "frozen_selection": frozen_selection,
+            "frozen_selection": self.frozen_selection.as_dict(),
             "strategy_version": self.strategy_version,
             "symbol": self.symbol,
             "interval": self.interval,
