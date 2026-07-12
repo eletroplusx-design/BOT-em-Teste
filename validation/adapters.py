@@ -105,6 +105,7 @@ class TrustedLeakFreeBacktestRunner:
         if not isinstance(config, BacktestConfig):
             raise ValidationEvaluationError("engine config must be BacktestConfig.")
         contract = {
+            "engine_class": engine.__class__.__name__,
             "entry_fee_rate": self._normalize_value(config.entry_fee_rate),
             "exit_fee_rate": self._normalize_value(config.exit_fee_rate),
             "spread_bps": self._normalize_value(config.spread_bps),
