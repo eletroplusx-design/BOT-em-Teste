@@ -10,6 +10,7 @@ from domain.serialization import serialize_value
 from domain.validation import DomainValidationError
 from validation.models import FrozenSelection, SegmentMetrics, WalkForwardResult, WalkForwardWindowResult
 
+from .artifacts import promotion_hash
 from .errors import PromotionDecisionError, PromotionPolicyError, PromotionValidationError
 
 
@@ -89,6 +90,7 @@ class PromotionDecision:
     recalculated_metrics: dict[str, Any]
     paper_limits: dict[str, Any]
     timestamp_utc: datetime
+    paper_limits_hash: str = field(default="", compare=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.frozen_selection, FrozenSelection):
@@ -105,6 +107,7 @@ class PromotionDecision:
         object.__setattr__(self, "reasons", tuple(str(reason) for reason in self.reasons))
         object.__setattr__(self, "recalculated_metrics", dict(self.recalculated_metrics))
         object.__setattr__(self, "paper_limits", dict(self.paper_limits))
+        object.__setattr__(self, "paper_limits_hash", str(self.paper_limits_hash).strip() or promotion_hash(self.paper_limits))
         object.__setattr__(self, "timestamp_utc", _require_timezone_aware(self.timestamp_utc, "timestamp_utc"))
         if not self.evidence_hash:
             raise PromotionDecisionError("evidence_hash is required.")
@@ -112,6 +115,8 @@ class PromotionDecision:
             raise PromotionDecisionError("policy_hash is required.")
         if not self.decision_hash:
             raise PromotionDecisionError("decision_hash is required.")
+        if self.paper_limits_hash != promotion_hash(self.paper_limits):
+            raise PromotionDecisionError("paper_limits hash mismatch.")
         if self.status == PromotionStatus.APPROVED_FOR_MONITORED_PAPER:
             if not self.criteria_evaluated:
                 raise PromotionDecisionError("approved decisions require evaluated criteria.")
@@ -140,5 +145,6 @@ class PromotionDecision:
             "reasons": list(self.reasons),
             "recalculated_metrics": serialize_value(self.recalculated_metrics),
             "paper_limits": serialize_value(self.paper_limits),
+            "paper_limits_hash": self.paper_limits_hash,
             "timestamp_utc": self.timestamp_utc.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
         }

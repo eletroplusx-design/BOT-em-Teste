@@ -271,6 +271,10 @@ def _paper_snapshot(
     *,
     trading_mode: str = "PAPER",
     data_fresh: bool = True,
+    session_state: str = "RUNNING",
+    session_started_utc: datetime | None = None,
+    paper_capital_used: str = "1000",
+    risk_per_trade_percent: str = "0.5",
     session_drawdown_percent: str = "4",
     current_loss_streak: int = 0,
     open_positions: int = 0,
@@ -287,16 +291,20 @@ def _paper_snapshot(
         configuration=decision.frozen_selection.as_dict(),
         trading_mode=trading_mode,
         data_fresh=data_fresh,
+        session_state=session_state,
+        session_started_utc=session_started_utc or datetime(2026, 7, 11, 9, 0, tzinfo=timezone.utc),
+        paper_capital_used=Decimal(paper_capital_used),
+        risk_per_trade_percent=Decimal(risk_per_trade_percent),
         session_drawdown_percent=Decimal(session_drawdown_percent),
         current_loss_streak=current_loss_streak,
         open_positions=open_positions,
         executed_trades=executed_trades,
-        observed_costs=observed_costs or {
+        observed_costs={
             "entry_fee_rate": "0.0004",
             "exit_fee_rate": "0.0004",
             "spread_bps": "5",
             "slippage_bps": "5",
-        },
+        } if observed_costs is None else observed_costs,
         internal_error=internal_error,
         attempted_live=attempted_live,
     )
@@ -595,13 +603,47 @@ def test_decisao_deterministica_polity_hash_timestamp_and_live_attempt_fail():
     approved_monitoring = evaluate_paper_monitoring(decision_a, snapshot)
     assert approved_monitoring.status == PromotionStatus.APPROVED_FOR_MONITORED_PAPER
     assert approved_monitoring.decision_hash == decision_a.decision_hash
+    assert evaluate_paper_monitoring(decision_a, _paper_snapshot(decision_a, executed_trades=0, session_state="RUNNING")).status == PromotionStatus.APPROVED_FOR_MONITORED_PAPER
+    assert evaluate_paper_monitoring(decision_a, _paper_snapshot(decision_a, session_state="COMPLETED", executed_trades=30)).status == PromotionStatus.APPROVED_FOR_MONITORED_PAPER
+    assert evaluate_paper_monitoring(decision_a, _paper_snapshot(decision_a, session_state="COMPLETED", executed_trades=2)).status == PromotionStatus.PAPER_SUSPENDED
     assert evaluate_paper_monitoring(decision_a, _paper_snapshot(decision_a, session_drawdown_percent="20")).status == PromotionStatus.PAPER_SUSPENDED
     assert evaluate_paper_monitoring(decision_a, _paper_snapshot(decision_a, current_loss_streak=5)).status == PromotionStatus.PAPER_SUSPENDED
     assert evaluate_paper_monitoring(decision_a, _paper_snapshot(decision_a, open_positions=2)).status == PromotionStatus.PAPER_SUSPENDED
     assert evaluate_paper_monitoring(decision_a, _paper_snapshot(decision_a, data_fresh=False)).status == PromotionStatus.PAPER_SUSPENDED
     assert evaluate_paper_monitoring(decision_a, _paper_snapshot(decision_a, internal_error="boom")).status == PromotionStatus.PAPER_SUSPENDED
     assert evaluate_paper_monitoring(decision_a, _paper_snapshot(decision_a, attempted_live=True)).status == PromotionStatus.PAPER_SUSPENDED
+    assert evaluate_paper_monitoring(decision_a, _paper_snapshot(decision_a, observed_costs={"entry_fee_rate": "0.0004", "exit_fee_rate": "0.0004", "spread_bps": "5", "slippage_bps": "5"})).status == PromotionStatus.APPROVED_FOR_MONITORED_PAPER
     assert evaluate_paper_monitoring(decision_a, _paper_snapshot(decision_a, observed_costs={"entry_fee_rate": "0.1", "exit_fee_rate": "0.0004", "spread_bps": "5", "slippage_bps": "5"})).status == PromotionStatus.PAPER_SUSPENDED
+    assert evaluate_paper_monitoring(decision_a, _paper_snapshot(decision_a, observed_costs={"entry_fee_rate": "-0.1", "exit_fee_rate": "0.0004", "spread_bps": "5", "slippage_bps": "5"})).status == PromotionStatus.PAPER_SUSPENDED
+    assert evaluate_paper_monitoring(decision_a, _paper_snapshot(decision_a, observed_costs={"entry_fee_rate": "NaN", "exit_fee_rate": "0.0004", "spread_bps": "5", "slippage_bps": "5"})).status == PromotionStatus.PAPER_SUSPENDED
+    assert evaluate_paper_monitoring(decision_a, _paper_snapshot(decision_a, observed_costs={"entry_fee_rate": "Infinity", "exit_fee_rate": "0.0004", "spread_bps": "5", "slippage_bps": "5"})).status == PromotionStatus.PAPER_SUSPENDED
+    assert evaluate_paper_monitoring(decision_a, _paper_snapshot(decision_a, observed_costs={})).status == PromotionStatus.PAPER_SUSPENDED
+    assert evaluate_paper_monitoring(decision_a, _paper_snapshot(decision_a, observed_costs={"entry_fee_rate": "0.0004", "exit_fee_rate": "0.0004", "spread_bps": "5", "slippage_bps": "5", "extra": "1"})).status == PromotionStatus.PAPER_SUSPENDED
+    assert evaluate_paper_monitoring(decision_a, _paper_snapshot(decision_a, paper_capital_used="20000")).status == PromotionStatus.PAPER_SUSPENDED
+    assert evaluate_paper_monitoring(decision_a, _paper_snapshot(decision_a, risk_per_trade_percent="2")).status == PromotionStatus.PAPER_SUSPENDED
+    with pytest.raises(PromotionPolicyError):
+        _paper_snapshot(decision_a, session_started_utc=datetime(2026, 7, 11, 13, 0, tzinfo=timezone.utc))
+    assert evaluate_paper_monitoring(decision_a, _paper_snapshot(decision_a, session_started_utc=datetime(2026, 7, 11, 10, 0, tzinfo=timezone.utc), data_fresh=True, executed_trades=4)).status == PromotionStatus.APPROVED_FOR_MONITORED_PAPER
+    assert evaluate_paper_monitoring(decision_a, _paper_snapshot(decision_a, session_started_utc=datetime(2026, 7, 11, 0, 0, tzinfo=timezone.utc), data_fresh=True, executed_trades=4)).status == PromotionStatus.PAPER_SUSPENDED
+    with pytest.raises(PromotionPolicyError):
+        PaperMonitoringSnapshot(
+            timestamp_utc=datetime(2026, 7, 11, 12, 0),
+            decision_hash=decision_a.decision_hash,
+            evidence_hash=decision_a.evidence_hash,
+            strategy_version=decision_a.strategy_version,
+            configuration=decision_a.frozen_selection.as_dict(),
+            trading_mode="PAPER",
+            data_fresh=True,
+            session_drawdown_percent=Decimal("4"),
+            current_loss_streak=0,
+            open_positions=0,
+            executed_trades=0,
+            observed_costs={"entry_fee_rate": "0.0004", "exit_fee_rate": "0.0004", "spread_bps": "5", "slippage_bps": "5"},
+        )
+    assert evaluate_paper_monitoring(decision_a, _paper_snapshot(decision_a, session_state="RUNNING", executed_trades=0)).status == PromotionStatus.APPROVED_FOR_MONITORED_PAPER
+    assert evaluate_paper_monitoring(decision_a, _paper_snapshot(decision_a, session_state="COMPLETED", executed_trades=2)).status == PromotionStatus.PAPER_SUSPENDED
+    assert evaluate_paper_monitoring(decision_a, _paper_snapshot(decision_a, executed_trades=200)).status == PromotionStatus.PAPER_SUSPENDED
+    assert evaluate_paper_monitoring(decision_a, _paper_snapshot(decision_a, session_started_utc=datetime(2026, 7, 11, 10, 0, tzinfo=timezone.utc), data_fresh=True, executed_trades=4)).status == PromotionStatus.APPROVED_FOR_MONITORED_PAPER
     with pytest.raises(PromotionDecisionError):
         evaluate_paper_monitoring(decision_b.__class__(
             status=PromotionStatus.REJECTED,
@@ -619,6 +661,16 @@ def test_decisao_deterministica_polity_hash_timestamp_and_live_attempt_fail():
             paper_limits=decision_b.paper_limits,
             timestamp_utc=decision_b.timestamp_utc,
         ), snapshot)
+    with pytest.raises(PromotionDecisionError):
+        evaluate_paper_monitoring(decision_a, snapshot, MonitoredPaperLimits(paper_capital_max=Decimal("20000")))
+    mutated_snapshot = _paper_snapshot(decision_a)
+    mutated_snapshot.configuration["strategy_version"] = "tampered"
+    with pytest.raises(PromotionDecisionError):
+        evaluate_paper_monitoring(decision_a, mutated_snapshot)
+    mutated_decision = evaluate_promotion(evidence)
+    mutated_decision.paper_limits["max_positions"] = 99
+    with pytest.raises(PromotionDecisionError):
+        evaluate_paper_monitoring(mutated_decision, snapshot)
 
 
 def test_paper_monitoring_limits_and_source_safety():

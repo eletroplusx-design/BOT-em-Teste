@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any
+from typing import Any, Mapping
 
 from domain.serialization import serialize_value
 from .artifacts import promotion_hash
@@ -37,6 +37,14 @@ def _to_decimal(value: Any, field_name: str, *, allow_zero: bool = True) -> Deci
     elif result <= 0:
         raise PromotionPolicyError(f"{field_name} must be greater than zero.")
     return result
+
+
+def _require_timezone_aware(dt: datetime, field_name: str) -> datetime:
+    if not isinstance(dt, datetime):
+        raise PromotionPolicyError(f"{field_name} must be a datetime.")
+    if dt.tzinfo is None or dt.utcoffset() is None:
+        raise PromotionPolicyError(f"{field_name} must be timezone-aware.")
+    return dt.astimezone(timezone.utc)
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,13 +119,26 @@ class PaperMonitoringSnapshot:
     open_positions: int
     executed_trades: int
     observed_costs: dict[str, Any]
+    session_state: str = "RUNNING"
+    session_started_utc: datetime | None = None
+    paper_capital_used: Decimal = Decimal("0")
+    risk_per_trade_percent: Decimal = Decimal("0")
     internal_error: str | None = None
     attempted_live: bool = False
     snapshot_hash: str = field(default="", compare=False)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "timestamp_utc", self.timestamp_utc.astimezone(timezone.utc))
+        object.__setattr__(self, "timestamp_utc", _require_timezone_aware(self.timestamp_utc, "timestamp_utc"))
+        started = self.session_started_utc or self.timestamp_utc
+        object.__setattr__(self, "session_started_utc", _require_timezone_aware(started, "session_started_utc"))
+        if self.session_started_utc > self.timestamp_utc:
+            raise PromotionPolicyError("session_started_utc cannot be after timestamp_utc.")
+        object.__setattr__(self, "session_state", str(self.session_state).strip().upper())
+        if self.session_state not in {"RUNNING", "COMPLETED"}:
+            raise PromotionPolicyError("session_state is invalid.")
         object.__setattr__(self, "session_drawdown_percent", _to_decimal(self.session_drawdown_percent, "session_drawdown_percent"))
+        object.__setattr__(self, "paper_capital_used", _to_decimal(self.paper_capital_used, "paper_capital_used"))
+        object.__setattr__(self, "risk_per_trade_percent", _to_decimal(self.risk_per_trade_percent, "risk_per_trade_percent"))
         object.__setattr__(self, "decision_hash", str(self.decision_hash).strip())
         object.__setattr__(self, "evidence_hash", str(self.evidence_hash).strip())
         object.__setattr__(self, "strategy_version", str(self.strategy_version).strip())
@@ -138,7 +159,11 @@ class PaperMonitoringSnapshot:
             "strategy_version": self.strategy_version,
             "configuration": self.configuration,
             "trading_mode": self.trading_mode,
+            "session_state": self.session_state,
+            "session_started_utc": self.session_started_utc.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
             "data_fresh": self.data_fresh,
+            "paper_capital_used": self.paper_capital_used,
+            "risk_per_trade_percent": self.risk_per_trade_percent,
             "session_drawdown_percent": self.session_drawdown_percent,
             "current_loss_streak": self.current_loss_streak,
             "open_positions": self.open_positions,
@@ -156,7 +181,11 @@ class PaperMonitoringSnapshot:
             "strategy_version": self.strategy_version,
             "configuration": serialize_value(self.configuration),
             "trading_mode": self.trading_mode,
+            "session_state": self.session_state,
+            "session_started_utc": self.session_started_utc.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
             "data_fresh": self.data_fresh,
+            "paper_capital_used": self.paper_capital_used,
+            "risk_per_trade_percent": self.risk_per_trade_percent,
             "session_drawdown_percent": self.session_drawdown_percent,
             "current_loss_streak": self.current_loss_streak,
             "open_positions": self.open_positions,
@@ -211,51 +240,107 @@ def _suspend(reason: str, decision: PromotionDecision, snapshot: PaperMonitoring
     )
 
 
+def _coerce_limits(decision: PromotionDecision, limits: MonitoredPaperLimits | None) -> MonitoredPaperLimits:
+    decision_limits = MonitoredPaperLimits(**decision.paper_limits)
+    if limits is None:
+        return decision_limits
+    if limits.as_dict() != decision_limits.as_dict():
+        raise PromotionDecisionError("provided limits must match the frozen decision limits exactly.")
+    return decision_limits
+
+
+def _validate_observed_costs(decision: PromotionDecision, snapshot: PaperMonitoringSnapshot) -> str | None:
+    required_keys = {"entry_fee_rate", "exit_fee_rate", "spread_bps", "slippage_bps"}
+    observed_keys = set(snapshot.observed_costs)
+    if observed_keys != required_keys:
+        missing = sorted(required_keys - observed_keys)
+        unknown = sorted(observed_keys - required_keys)
+        if missing:
+            return f"missing observed cost keys: {', '.join(missing)}"
+        if unknown:
+            return f"unknown observed cost keys: {', '.join(unknown)}"
+    contract = decision.phase5_manifest.get("execution_contract", {})
+    for key in required_keys:
+        expected = contract.get(key)
+        if expected is None:
+            return f"frozen cost contract missing key: {key}"
+        observed = snapshot.observed_costs.get(key)
+        try:
+            observed_decimal = Decimal(str(observed))
+            expected_decimal = Decimal(str(expected))
+        except Exception as exc:
+            return f"invalid observed cost value for {key}"
+        if not observed_decimal.is_finite() or not expected_decimal.is_finite():
+            return f"cost values must be finite: {key}"
+        if observed_decimal < 0 or expected_decimal < 0:
+            return f"cost values cannot be negative: {key}"
+        if observed_decimal > expected_decimal:
+            return f"observed cost above frozen contract: {key}"
+    return None
+
+
+def _validate_session_limits(snapshot: PaperMonitoringSnapshot, limits: MonitoredPaperLimits) -> str | None:
+    if snapshot.paper_capital_used > limits.paper_capital_max:
+        return "paper capital limit exceeded."
+    if snapshot.risk_per_trade_percent > limits.risk_per_trade_max_percent:
+        return "risk per trade limit exceeded."
+    if snapshot.session_drawdown_percent > limits.session_drawdown_max_percent:
+        return "session drawdown exceeded."
+    if snapshot.current_loss_streak > limits.max_loss_streak:
+        return "loss streak exceeded."
+    if snapshot.open_positions > limits.max_positions:
+        return "open positions exceeded."
+    if snapshot.executed_trades > limits.max_trades:
+        return "trade count above maximum."
+    duration_hours = (snapshot.timestamp_utc - snapshot.session_started_utc).total_seconds() / 3600.0
+    if duration_hours < 0:
+        raise PromotionDecisionError("session duration cannot be negative.")
+    if duration_hours > limits.max_duration_hours:
+        return "session duration exceeded."
+    if not snapshot.data_fresh and limits.expired_data_policy in {"BLOCK", "SUSPEND", "BLOCK_AND_SUSPEND"}:
+        return "data are stale or expired."
+    if snapshot.session_state == "COMPLETED" and snapshot.executed_trades < limits.min_trades:
+        return "completed sessions must satisfy min_trades."
+    if snapshot.session_state == "RUNNING":
+        return None
+    if snapshot.session_state != "COMPLETED":
+        raise PromotionDecisionError("unknown session state.")
+    return None
+
+
 def evaluate_paper_monitoring(
     decision: PromotionDecision,
     snapshot: PaperMonitoringSnapshot,
     limits: MonitoredPaperLimits | None = None,
 ) -> PaperMonitoringDecision:
-    limits = limits or MonitoredPaperLimits()
     if not isinstance(decision, PromotionDecision):
         raise PromotionDecisionError("promotion decision is required.")
     if decision.status is not PromotionStatus.APPROVED_FOR_MONITORED_PAPER:
         raise PromotionDecisionError("only approved monitored paper decisions can be monitored.")
     if not isinstance(snapshot, PaperMonitoringSnapshot):
         raise PromotionDecisionError("paper monitoring snapshot is required.")
+    if decision.paper_limits_hash != promotion_hash(decision.paper_limits):
+        raise PromotionDecisionError("decision paper limits hash mismatch.")
+    limits = _coerce_limits(decision, limits)
     if snapshot.snapshot_hash != _monitoring_snapshot_hash(snapshot):
-        return _suspend("snapshot hash mismatch", decision, snapshot, limits)
+        raise PromotionDecisionError("snapshot hash mismatch.")
     if snapshot.decision_hash != decision.decision_hash or snapshot.evidence_hash != decision.evidence_hash:
-        return _suspend("hash divergence", decision, snapshot, limits)
+        raise PromotionDecisionError("hash divergence.")
     expected_configuration = decision.frozen_selection.as_dict()
     if serialize_value(snapshot.configuration) != serialize_value(expected_configuration):
-        return _suspend("configuration divergence", decision, snapshot, limits)
+        raise PromotionDecisionError("configuration divergence.")
     if snapshot.strategy_version != decision.strategy_version or snapshot.trading_mode != "PAPER":
-        return _suspend("strategy or mode divergence", decision, snapshot, limits)
+        raise PromotionDecisionError("strategy or mode divergence.")
     if snapshot.internal_error:
         return _suspend("internal error", decision, snapshot, limits)
     if snapshot.attempted_live:
         return _suspend("live trading attempt", decision, snapshot, limits)
-    if not snapshot.data_fresh:
-        return _suspend("stale or invalid data", decision, snapshot, limits)
-    if snapshot.session_drawdown_percent > limits.session_drawdown_max_percent:
-        return _suspend("session drawdown exceeded", decision, snapshot, limits)
-    if snapshot.current_loss_streak > limits.max_loss_streak:
-        return _suspend("loss streak exceeded", decision, snapshot, limits)
-    if snapshot.open_positions > limits.max_positions:
-        return _suspend("open positions exceeded", decision, snapshot, limits)
-    if snapshot.executed_trades < limits.min_trades or snapshot.executed_trades > limits.max_trades:
-        return _suspend("trade count outside limits", decision, snapshot, limits)
-    expected_costs = decision.phase5_manifest.get("execution_contract", {})
-    for key, observed in snapshot.observed_costs.items():
-        expected = expected_costs.get(key)
-        if expected is None:
-            continue
-        try:
-            if Decimal(str(observed)) > Decimal(str(expected)):
-                return _suspend(f"observed cost too high: {key}", decision, snapshot, limits)
-        except Exception:
-            return _suspend(f"invalid observed cost: {key}", decision, snapshot, limits)
+    reason = _validate_observed_costs(decision, snapshot)
+    if reason is not None:
+        return _suspend(reason, decision, snapshot, limits)
+    reason = _validate_session_limits(snapshot, limits)
+    if reason is not None:
+        return _suspend(reason, decision, snapshot, limits)
     return PaperMonitoringDecision(
         status=PromotionStatus.APPROVED_FOR_MONITORED_PAPER,
         decision_hash=decision.decision_hash,
