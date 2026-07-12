@@ -4,12 +4,19 @@ from .decision import evaluate_promotion
 from .evidence import PromotionEvidence, PromotionWindowEvidence
 from .errors import PromotionDecisionError, PromotionEvidenceError, PromotionPolicyError, PromotionValidationError
 from .models import PromotionCriterionResult, PromotionDecision, PromotionStatus
-from .monitoring import MonitoredPaperLimits, PaperMonitoringDecision, PaperMonitoringSnapshot, evaluate_paper_monitoring
+from .monitoring import (
+    MonitoredPaperLimits,
+    PaperMonitoringDecision,
+    PaperMonitoringSessionContract,
+    PaperMonitoringSnapshot,
+    evaluate_paper_monitoring,
+)
 from .policy import PromotionPolicy
 
 __all__ = [
     "MonitoredPaperLimits",
     "PaperMonitoringDecision",
+    "PaperMonitoringSessionContract",
     "PaperMonitoringSnapshot",
     "PromotionCriterionResult",
     "PromotionDecision",

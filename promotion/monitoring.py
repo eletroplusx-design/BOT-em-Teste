@@ -47,6 +47,13 @@ def _require_timezone_aware(dt: datetime, field_name: str) -> datetime:
     return dt.astimezone(timezone.utc)
 
 
+def _require_session_id(value: Any, field_name: str = "session_id") -> str:
+    session_id = str(value).strip()
+    if not session_id:
+        raise PromotionPolicyError(f"{field_name} must be a non-empty string.")
+    return session_id
+
+
 @dataclass(frozen=True, slots=True)
 class MonitoredPaperLimits:
     paper_capital_max: Decimal = Decimal("10000")
@@ -113,6 +120,8 @@ class PaperMonitoringSnapshot:
     strategy_version: str
     configuration: dict[str, Any]
     trading_mode: str
+    session_id: str
+    session_started_utc: datetime
     data_fresh: bool
     session_drawdown_percent: Decimal
     current_loss_streak: int
@@ -120,7 +129,6 @@ class PaperMonitoringSnapshot:
     executed_trades: int
     observed_costs: dict[str, Any]
     session_state: str = "RUNNING"
-    session_started_utc: datetime | None = None
     paper_capital_used: Decimal = Decimal("0")
     risk_per_trade_percent: Decimal = Decimal("0")
     internal_error: str | None = None
@@ -129,8 +137,8 @@ class PaperMonitoringSnapshot:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "timestamp_utc", _require_timezone_aware(self.timestamp_utc, "timestamp_utc"))
-        started = self.session_started_utc or self.timestamp_utc
-        object.__setattr__(self, "session_started_utc", _require_timezone_aware(started, "session_started_utc"))
+        object.__setattr__(self, "session_id", _require_session_id(self.session_id))
+        object.__setattr__(self, "session_started_utc", _require_timezone_aware(self.session_started_utc, "session_started_utc"))
         if self.session_started_utc > self.timestamp_utc:
             raise PromotionPolicyError("session_started_utc cannot be after timestamp_utc.")
         object.__setattr__(self, "session_state", str(self.session_state).strip().upper())
@@ -148,8 +156,7 @@ class PaperMonitoringSnapshot:
         object.__setattr__(self, "current_loss_streak", _strict_int(self.current_loss_streak, "current_loss_streak", allow_zero=True))
         object.__setattr__(self, "open_positions", _strict_int(self.open_positions, "open_positions", allow_zero=True))
         object.__setattr__(self, "executed_trades", _strict_int(self.executed_trades, "executed_trades", allow_zero=True))
-        if not self.snapshot_hash:
-            object.__setattr__(self, "snapshot_hash", promotion_hash(self.as_hash_payload()))
+        object.__setattr__(self, "snapshot_hash", promotion_hash(self.as_hash_payload()))
 
     def as_hash_payload(self) -> dict[str, Any]:
         return {
@@ -159,6 +166,7 @@ class PaperMonitoringSnapshot:
             "strategy_version": self.strategy_version,
             "configuration": self.configuration,
             "trading_mode": self.trading_mode,
+            "session_id": self.session_id,
             "session_state": self.session_state,
             "session_started_utc": self.session_started_utc.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
             "data_fresh": self.data_fresh,
@@ -181,6 +189,7 @@ class PaperMonitoringSnapshot:
             "strategy_version": self.strategy_version,
             "configuration": serialize_value(self.configuration),
             "trading_mode": self.trading_mode,
+            "session_id": self.session_id,
             "session_state": self.session_state,
             "session_started_utc": self.session_started_utc.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
             "data_fresh": self.data_fresh,
@@ -195,6 +204,25 @@ class PaperMonitoringSnapshot:
             "attempted_live": self.attempted_live,
             "snapshot_hash": self.snapshot_hash,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class PaperMonitoringSessionContract:
+    session_id: str
+    session_started_utc: datetime
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "session_id", _require_session_id(self.session_id))
+        object.__setattr__(self, "session_started_utc", _require_timezone_aware(self.session_started_utc, "session_started_utc"))
+
+    def as_hash_payload(self) -> dict[str, Any]:
+        return {
+            "session_id": self.session_id,
+            "session_started_utc": self.session_started_utc.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+        }
+
+    def as_dict(self) -> dict[str, Any]:
+        return dict(self.as_hash_payload(), contract_hash=promotion_hash(self.as_hash_payload()))
 
 
 @dataclass(frozen=True, slots=True)
@@ -247,6 +275,19 @@ def _coerce_limits(decision: PromotionDecision, limits: MonitoredPaperLimits | N
     if limits.as_dict() != decision_limits.as_dict():
         raise PromotionDecisionError("provided limits must match the frozen decision limits exactly.")
     return decision_limits
+
+
+def _coerce_session_contract(
+    snapshot: PaperMonitoringSnapshot,
+    session_contract: PaperMonitoringSessionContract | None,
+) -> PaperMonitoringSessionContract:
+    if session_contract is None:
+        raise PromotionDecisionError("paper monitoring session contract is required.")
+    if not isinstance(session_contract, PaperMonitoringSessionContract):
+        raise PromotionDecisionError("paper monitoring session contract is required.")
+    if session_contract.session_id != snapshot.session_id or session_contract.session_started_utc != snapshot.session_started_utc:
+        raise PromotionDecisionError("session contract divergence.")
+    return session_contract
 
 
 def _validate_observed_costs(decision: PromotionDecision, snapshot: PaperMonitoringSnapshot) -> str | None:
@@ -312,6 +353,7 @@ def evaluate_paper_monitoring(
     decision: PromotionDecision,
     snapshot: PaperMonitoringSnapshot,
     limits: MonitoredPaperLimits | None = None,
+    session_contract: PaperMonitoringSessionContract | None = None,
 ) -> PaperMonitoringDecision:
     if not isinstance(decision, PromotionDecision):
         raise PromotionDecisionError("promotion decision is required.")
@@ -322,6 +364,7 @@ def evaluate_paper_monitoring(
     if decision.paper_limits_hash != promotion_hash(decision.paper_limits):
         raise PromotionDecisionError("decision paper limits hash mismatch.")
     limits = _coerce_limits(decision, limits)
+    session_contract = _coerce_session_contract(snapshot, session_contract)
     if snapshot.snapshot_hash != _monitoring_snapshot_hash(snapshot):
         raise PromotionDecisionError("snapshot hash mismatch.")
     if snapshot.decision_hash != decision.decision_hash or snapshot.evidence_hash != decision.evidence_hash:
