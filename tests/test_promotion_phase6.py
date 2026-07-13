@@ -620,6 +620,25 @@ def test_decisao_deterministica_polity_hash_timestamp_and_live_attempt_fail():
     approved_monitoring = evaluate_paper_monitoring(decision_a, snapshot, session_contract=session_contract)
     assert approved_monitoring.status == PromotionStatus.APPROVED_FOR_MONITORED_PAPER
     assert approved_monitoring.decision_hash == decision_a.decision_hash
+    assert evaluate_paper_monitoring(decision_a, _paper_snapshot(decision_a, session_id="paper-session-1"), session_contract=session_contract).status == PromotionStatus.APPROVED_FOR_MONITORED_PAPER
+    with pytest.raises(PromotionPolicyError):
+        _paper_snapshot(decision_a, data_fresh="false")  # type: ignore[arg-type]
+    with pytest.raises(PromotionPolicyError):
+        _paper_snapshot(decision_a, data_fresh=0)  # type: ignore[arg-type]
+    with pytest.raises(PromotionPolicyError):
+        _paper_snapshot(decision_a, data_fresh=1)  # type: ignore[arg-type]
+    with pytest.raises(PromotionPolicyError):
+        _paper_snapshot(decision_a, attempted_live="false")  # type: ignore[arg-type]
+    with pytest.raises(PromotionPolicyError):
+        _paper_snapshot(decision_a, session_id=None)  # type: ignore[arg-type]
+    with pytest.raises(PromotionPolicyError):
+        _paper_snapshot(decision_a, session_id=1)  # type: ignore[arg-type]
+    with pytest.raises(PromotionPolicyError):
+        _paper_snapshot(decision_a, session_id=True)  # type: ignore[arg-type]
+    with pytest.raises(PromotionPolicyError):
+        _paper_snapshot(decision_a, session_id="")
+    with pytest.raises(PromotionPolicyError):
+        _paper_snapshot(decision_a, session_id="   ")
     assert evaluate_paper_monitoring(decision_a, _paper_snapshot(decision_a, executed_trades=0, session_state="RUNNING"), session_contract=session_contract).status == PromotionStatus.APPROVED_FOR_MONITORED_PAPER
     assert evaluate_paper_monitoring(decision_a, _paper_snapshot(decision_a, session_state="COMPLETED", executed_trades=30), session_contract=session_contract).status == PromotionStatus.APPROVED_FOR_MONITORED_PAPER
     assert evaluate_paper_monitoring(decision_a, _paper_snapshot(decision_a, session_state="COMPLETED", executed_trades=2), session_contract=session_contract).status == PromotionStatus.PAPER_SUSPENDED

@@ -48,10 +48,18 @@ def _require_timezone_aware(dt: datetime, field_name: str) -> datetime:
 
 
 def _require_session_id(value: Any, field_name: str = "session_id") -> str:
-    session_id = str(value).strip()
+    if type(value) is not str:
+        raise PromotionPolicyError(f"{field_name} must be a string.")
+    session_id = value.strip()
     if not session_id:
         raise PromotionPolicyError(f"{field_name} must be a non-empty string.")
     return session_id
+
+
+def _require_bool_strict(value: Any, field_name: str) -> bool:
+    if type(value) is not bool:
+        raise PromotionPolicyError(f"{field_name} must be a boolean.")
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,6 +152,7 @@ class PaperMonitoringSnapshot:
         object.__setattr__(self, "session_state", str(self.session_state).strip().upper())
         if self.session_state not in {"RUNNING", "COMPLETED"}:
             raise PromotionPolicyError("session_state is invalid.")
+        object.__setattr__(self, "data_fresh", _require_bool_strict(self.data_fresh, "data_fresh"))
         object.__setattr__(self, "session_drawdown_percent", _to_decimal(self.session_drawdown_percent, "session_drawdown_percent"))
         object.__setattr__(self, "paper_capital_used", _to_decimal(self.paper_capital_used, "paper_capital_used"))
         object.__setattr__(self, "risk_per_trade_percent", _to_decimal(self.risk_per_trade_percent, "risk_per_trade_percent"))
@@ -156,6 +165,7 @@ class PaperMonitoringSnapshot:
         object.__setattr__(self, "current_loss_streak", _strict_int(self.current_loss_streak, "current_loss_streak", allow_zero=True))
         object.__setattr__(self, "open_positions", _strict_int(self.open_positions, "open_positions", allow_zero=True))
         object.__setattr__(self, "executed_trades", _strict_int(self.executed_trades, "executed_trades", allow_zero=True))
+        object.__setattr__(self, "attempted_live", _require_bool_strict(self.attempted_live, "attempted_live"))
         object.__setattr__(self, "snapshot_hash", promotion_hash(self.as_hash_payload()))
 
     def as_hash_payload(self) -> dict[str, Any]:
