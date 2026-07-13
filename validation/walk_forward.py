@@ -88,6 +88,7 @@ class WalkForwardValidator:
         entry_fee_rate = costs.get("entry_fee_rate", costs.get("commission_rate", Decimal("0")))
         exit_fee_rate = costs.get("exit_fee_rate", costs.get("commission_rate", entry_fee_rate))
         return {
+            "engine_class": "LeakFreeBacktestEngine",
             "entry_fee_rate": self._normalize_contract_value(entry_fee_rate),
             "exit_fee_rate": self._normalize_contract_value(exit_fee_rate),
             "spread_bps": self._normalize_contract_value(costs.get("spread_bps", Decimal("0"))),
@@ -117,6 +118,7 @@ class WalkForwardValidator:
             return {}
         expected = self._expected_execution_contract()
         comparable_keys = (
+            "engine_class",
             "entry_fee_rate",
             "exit_fee_rate",
             "spread_bps",
