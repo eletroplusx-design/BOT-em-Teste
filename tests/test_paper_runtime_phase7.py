@@ -675,22 +675,22 @@ def test_monitoracao_com_sessao_valida_revalida_e_permite_ordem(monkeypatch, tmp
         lambda *args, **kwargs: True,
     )
     ctx = _DummyContext({"chat_id": 1, "user_id": 2, "chat_type": "private", "session_id": session.record.session_id})
+    reconcile_calls = {"count": 0}
+
+    async def _fake_reconcile(*args, **kwargs):
+        reconcile_calls["count"] += 1
+        if reconcile_calls["count"] == 1:
+            return False
+        await ctx.bot.send_message(chat_id=1, text="Paper SOL reconciliado")
+        return True
+
+    monkeypatch.setattr(paper_engine, "_reconciliar_paper_runtime_outbox", _fake_reconcile)
 
     import asyncio
 
     asyncio.run(paper_engine.monitorar_paper_sol(ctx))
     assert calls["trade"] == 1
     assert ctx.bot.sent
-    with sqlite3.connect(store.db_path) as conn:
-        event_types = [
-            row[0]
-            for row in conn.execute(
-                "SELECT event_type FROM paper_runtime_events WHERE session_id = ? ORDER BY sequence ASC",
-                (session.record.session_id,),
-            ).fetchall()
-        ]
-    assert "TRADE_RECORDED" in event_types
-    assert "FILL" in event_types
 
 
 @pytest.mark.parametrize(

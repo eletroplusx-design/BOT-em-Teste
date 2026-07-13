@@ -1,14 +1,41 @@
+import hashlib
+import json
 import logging
 import sqlite3
 from datetime import datetime, timezone
+from typing import Any
 
 
 DB_NAME = "trades.db"
 STRATEGY_VERSION_DEFAULT = "v2_risk_safe"
 
 
+class PaperTradeOutboxError(Exception):
+    pass
+
+
+class PaperTradeFinalizationError(Exception):
+    pass
+
+
 def _agora_iso():
     return datetime.now(timezone.utc).isoformat()
+
+
+def _canonizar_payload(payload: dict[str, Any]) -> str:
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _sha256_payload(payload: dict[str, Any]) -> str:
+    return hashlib.sha256(_canonizar_payload(payload).encode("utf-8")).hexdigest()
+
+
+def _iso_utc_hash(value):
+    if isinstance(value, datetime):
+        if value.tzinfo is None or value.utcoffset() is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc).isoformat()
+    return value
 
 
 def _normalizar(valor, padrao="N/A"):
@@ -166,6 +193,30 @@ def inicializar_banco(db_name=DB_NAME):
                 )
                 """
             )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS paper_trade_outbox (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_id TEXT NOT NULL UNIQUE,
+                    session_id TEXT NOT NULL,
+                    trade_id INTEGER NOT NULL,
+                    operation_type TEXT NOT NULL,
+                    candle_close_time TEXT NOT NULL,
+                    idempotency_key TEXT NOT NULL,
+                    request_hash TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'PENDING',
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    created_at_utc TEXT NOT NULL,
+                    updated_at_utc TEXT NOT NULL,
+                    runtime_delivered_at_utc TEXT,
+                    snapshot_applied_at_utc TEXT,
+                    telegram_sent_at_utc TEXT,
+                    last_error_class TEXT,
+                    last_error_code TEXT
+                )
+                """
+            )
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_tipo_simbolo_status ON trades(tipo, simbolo, status)")
             cursor.execute(
                 "CREATE INDEX IF NOT EXISTS idx_trades_tipo_simbolo_status_fechado_em ON trades(tipo, simbolo, status, fechado_em)"
@@ -175,6 +226,12 @@ def inicializar_banco(db_name=DB_NAME):
             )
             cursor.execute(
                 "CREATE INDEX IF NOT EXISTS idx_trades_session_id_tipo_status ON trades(session_id, tipo, status)"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_paper_trade_outbox_session_status_created ON paper_trade_outbox(session_id, status, created_at_utc)"
+            )
+            cursor.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_paper_trade_outbox_idempotency_key ON paper_trade_outbox(idempotency_key)"
             )
             conn.commit()
         return True
@@ -239,6 +296,239 @@ def log_decisao(**kwargs):
         return True
     except Exception as exc:
         logging.warning(f"Falha ao registrar decision_log: {exc}")
+        return False
+
+
+def _normalizar_outbox_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    return json.loads(_canonizar_payload(payload))
+
+
+def _inserir_paper_trade_outbox(
+    cursor,
+    *,
+    event_id,
+    session_id,
+    trade_id,
+    operation_type,
+    candle_close_time,
+    idempotency_key,
+    request_hash,
+    payload_json,
+    status="PENDING",
+    attempts=0,
+    runtime_delivered_at_utc=None,
+    snapshot_applied_at_utc=None,
+    telegram_sent_at_utc=None,
+    last_error_class=None,
+    last_error_code=None,
+):
+    cursor.execute(
+        """
+        INSERT INTO paper_trade_outbox (
+            event_id, session_id, trade_id, operation_type, candle_close_time, idempotency_key,
+            request_hash, payload_json, status, attempts, created_at_utc, updated_at_utc,
+            runtime_delivered_at_utc, snapshot_applied_at_utc, telegram_sent_at_utc,
+            last_error_class, last_error_code
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            event_id,
+            session_id,
+            trade_id,
+            operation_type,
+            candle_close_time,
+            idempotency_key,
+            request_hash,
+            payload_json,
+            status,
+            attempts,
+            _agora_iso(),
+            _agora_iso(),
+            runtime_delivered_at_utc,
+            snapshot_applied_at_utc,
+            telegram_sent_at_utc,
+            last_error_class,
+            last_error_code,
+        ),
+    )
+
+
+def _atualizar_paper_trade_outbox(cursor, event_id, **updates):
+    if not updates:
+        return
+    campos = ", ".join(f"{campo} = ?" for campo in updates)
+    valores = list(updates.values())
+    valores.extend([_agora_iso(), event_id])
+    cursor.execute(
+        f"UPDATE paper_trade_outbox SET {campos}, updated_at_utc = ? WHERE event_id = ?",
+        valores,
+    )
+
+
+def registrar_paper_trade_outbox(
+    *,
+    event_id,
+    session_id,
+    trade_id,
+    operation_type,
+    candle_close_time,
+    idempotency_key,
+    payload,
+    status="PENDING",
+    attempts=0,
+    runtime_delivered_at_utc=None,
+    snapshot_applied_at_utc=None,
+    telegram_sent_at_utc=None,
+    last_error_class=None,
+    last_error_code=None,
+    db_name=DB_NAME,
+):
+    try:
+        inicializar_banco(db_name)
+        payload_json = _canonizar_payload(_normalizar_outbox_payload(payload))
+        request_hash = _sha256_payload(
+            {
+                "event_id": event_id,
+                "session_id": session_id,
+                "trade_id": trade_id,
+                "operation_type": operation_type,
+                "candle_close_time": candle_close_time,
+                "idempotency_key": idempotency_key,
+                "payload": json.loads(payload_json),
+            }
+        )
+        with sqlite3.connect(db_name) as conn:
+            cursor = conn.cursor()
+            row = cursor.execute(
+                "SELECT event_id, request_hash FROM paper_trade_outbox WHERE idempotency_key = ?",
+                (idempotency_key,),
+            ).fetchone()
+            if row is not None:
+                if row[1] != request_hash:
+                    raise PaperTradeOutboxError("idempotency key reuse with different payload")
+                return row[0]
+            _inserir_paper_trade_outbox(
+                cursor,
+                event_id=event_id,
+                session_id=session_id,
+                trade_id=trade_id,
+                operation_type=operation_type,
+                candle_close_time=candle_close_time,
+                idempotency_key=idempotency_key,
+                request_hash=request_hash,
+                payload_json=payload_json,
+                status=status,
+                attempts=attempts,
+                runtime_delivered_at_utc=runtime_delivered_at_utc,
+                snapshot_applied_at_utc=snapshot_applied_at_utc,
+                telegram_sent_at_utc=telegram_sent_at_utc,
+                last_error_class=last_error_class,
+                last_error_code=last_error_code,
+            )
+            conn.commit()
+            return event_id
+    except PaperTradeOutboxError:
+        raise
+    except Exception as exc:
+        logging.warning(f"Falha ao registrar outbox paper trade: {exc}")
+        return None
+
+
+def obter_outbox_paper_pendentes(session_id=None, db_name=DB_NAME):
+    try:
+        inicializar_banco(db_name)
+        with sqlite3.connect(db_name) as conn:
+            cursor = conn.cursor()
+            query = """
+                SELECT id, event_id, session_id, trade_id, operation_type, candle_close_time, idempotency_key,
+                       request_hash, payload_json, status, attempts, runtime_delivered_at_utc,
+                       snapshot_applied_at_utc, telegram_sent_at_utc, last_error_class, last_error_code,
+                       created_at_utc, updated_at_utc
+                FROM paper_trade_outbox
+                WHERE telegram_sent_at_utc IS NULL
+            """
+            parametros = []
+            if session_id is not None:
+                query += " AND session_id = ?"
+                parametros.append(session_id)
+            query += " ORDER BY created_at_utc ASC, id ASC"
+            rows = cursor.execute(query, parametros).fetchall()
+        return [
+            {
+                "id": row[0],
+                "event_id": row[1],
+                "session_id": row[2],
+                "trade_id": row[3],
+                "operation_type": row[4],
+                "candle_close_time": row[5],
+                "idempotency_key": row[6],
+                "request_hash": row[7],
+                "payload_json": row[8],
+                "status": row[9],
+                "attempts": row[10],
+                "runtime_delivered_at_utc": row[11],
+                "snapshot_applied_at_utc": row[12],
+                "telegram_sent_at_utc": row[13],
+                "last_error_class": row[14],
+                "last_error_code": row[15],
+                "created_at_utc": row[16],
+                "updated_at_utc": row[17],
+            }
+            for row in rows
+        ]
+    except Exception as exc:
+        logging.warning(f"Falha ao buscar outbox paper trade: {exc}")
+        return []
+
+
+def atualizar_outbox_paper_trade(
+    event_id,
+    *,
+    status=None,
+    runtime_delivered_at_utc=None,
+    snapshot_applied_at_utc=None,
+    telegram_sent_at_utc=None,
+    attempts_increment=0,
+    last_error_class=None,
+    last_error_code=None,
+    db_name=DB_NAME,
+):
+    try:
+        inicializar_banco(db_name)
+        updates = {}
+        if status is not None:
+            updates["status"] = status
+        if runtime_delivered_at_utc is not None:
+            updates["runtime_delivered_at_utc"] = runtime_delivered_at_utc
+        if snapshot_applied_at_utc is not None:
+            updates["snapshot_applied_at_utc"] = snapshot_applied_at_utc
+        if telegram_sent_at_utc is not None:
+            updates["telegram_sent_at_utc"] = telegram_sent_at_utc
+        if last_error_class is not None:
+            updates["last_error_class"] = last_error_class
+        if last_error_code is not None:
+            updates["last_error_code"] = last_error_code
+        if attempts_increment:
+            with sqlite3.connect(db_name) as conn:
+                cursor = conn.cursor()
+                row = cursor.execute(
+                    "SELECT attempts FROM paper_trade_outbox WHERE event_id = ?",
+                    (event_id,),
+                ).fetchone()
+                if row is None:
+                    return False
+                updates["attempts"] = int(row[0] or 0) + int(attempts_increment)
+                _atualizar_paper_trade_outbox(cursor, event_id, **updates)
+                conn.commit()
+                return True
+        with sqlite3.connect(db_name) as conn:
+            cursor = conn.cursor()
+            _atualizar_paper_trade_outbox(cursor, event_id, **updates)
+            conn.commit()
+        return True
+    except Exception as exc:
+        logging.warning(f"Falha ao atualizar outbox paper trade: {exc}")
         return False
 
 
@@ -362,7 +652,9 @@ def obter_trades_paper_abertos(symbol="SOLUSDT", session_id=None):
         with sqlite3.connect(DB_NAME) as conn:
             cursor = conn.cursor()
             query = """
-                SELECT id, timestamp, simbolo, session_id, direcao, entrada, stop_loss, take_profit, quantidade, valor_arriscado, aberto_em
+                SELECT id, timestamp, simbolo, session_id, direcao, entrada, stop_loss, take_profit, quantidade, valor_arriscado,
+                       preco_base, fill_price, entry_fee, exit_fee, spread_cost, slippage_cost, pnl_bruto, custos_totais, pnl_liquido,
+                       aberto_em
                 FROM trades
                 WHERE tipo = 'paper' AND simbolo = ? AND status = 'open'
             """
@@ -386,7 +678,16 @@ def obter_trades_paper_abertos(symbol="SOLUSDT", session_id=None):
                     "take_profit": float(linha[7]) if linha[7] is not None else None,
                     "quantidade": float(linha[8] or 0.0),
                     "valor_arriscado": float(linha[9] or 0.0),
-                    "aberto_em": linha[10],
+                    "preco_base": float(linha[10]) if linha[10] is not None else None,
+                    "fill_price": float(linha[11]) if linha[11] is not None else None,
+                    "entry_fee": float(linha[12]) if linha[12] is not None else None,
+                    "exit_fee": float(linha[13]) if linha[13] is not None else None,
+                    "spread_cost": float(linha[14]) if linha[14] is not None else None,
+                    "slippage_cost": float(linha[15]) if linha[15] is not None else None,
+                    "pnl_bruto": float(linha[16]) if linha[16] is not None else None,
+                    "custos_totais": float(linha[17]) if linha[17] is not None else None,
+                    "pnl_liquido": float(linha[18]) if linha[18] is not None else None,
+                    "aberto_em": linha[19],
                 }
             )
         return trades
@@ -407,11 +708,14 @@ def registrar_trade_paper(
     filtros_aplicados=True,
     session_id=None,
     idempotency_key=None,
+    candle_close_time=None,
+    signal_identity=None,
     preco_base=None,
     fill_price=None,
     entry_fee=None,
     spread_cost=None,
     slippage_cost=None,
+    outbox_event_factory=None,
     db_name=None,
 ):
     try:
@@ -454,14 +758,35 @@ def registrar_trade_paper(
                     slippage_cost = slippage_cost if slippage_cost is not None else 0.0
             request_hash = None
             if idempotency_key is not None:
-                request_hash = f"{symbol}|{direcao}|{entrada}|{stop_loss}|{take_profit}|{quantidade}|{valor_arriscado}|{rr_planejado}|{1 if filtros_aplicados else 0}|{session_id}"
+                request_hash = _sha256_payload(
+                    {
+                        "kind": "paper_trade_open",
+                        "symbol": symbol,
+                        "direcao": direcao,
+                        "entrada": entrada,
+                        "stop_loss": stop_loss,
+                        "take_profit": take_profit,
+                        "quantidade": quantidade,
+                        "valor_arriscado": valor_arriscado,
+                        "rr_planejado": rr_planejado,
+                        "filtros_aplicados": bool(filtros_aplicados),
+                        "session_id": session_id,
+                        "candle_close_time": _iso_utc_hash(candle_close_time),
+                        "signal_identity": signal_identity,
+                        "preco_base": preco_base if preco_base is not None else entrada,
+                        "fill_price": fill_price if fill_price is not None else entrada,
+                        "entry_fee": entry_fee,
+                        "spread_cost": spread_cost,
+                        "slippage_cost": slippage_cost,
+                    }
+                )
                 row = cursor.execute(
                     "SELECT id, idempotency_hash FROM trades WHERE idempotency_key = ?",
                     (idempotency_key,),
                 ).fetchone()
                 if row is not None:
                     if row[1] != request_hash:
-                        raise ValueError("idempotency key reuse with different payload")
+                        raise PaperTradeOutboxError("idempotency key reuse with different payload")
                     return row[0]
             cursor.execute(
                 """
@@ -498,14 +823,57 @@ def registrar_trade_paper(
                     "idempotency_hash": request_hash,
                 },
             )
+            trade_id = cursor.lastrowid
+            if outbox_event_factory is not None:
+                outbox_event = outbox_event_factory(trade_id, timestamp)
+                if outbox_event is None:
+                    raise PaperTradeOutboxError("outbox event factory returned no payload")
+                _inserir_paper_trade_outbox(
+                    cursor,
+                    event_id=outbox_event["event_id"],
+                    session_id=outbox_event["session_id"],
+                    trade_id=outbox_event["trade_id"],
+                    operation_type=outbox_event["operation_type"],
+                    candle_close_time=outbox_event["candle_close_time"],
+                    idempotency_key=outbox_event["idempotency_key"],
+                    request_hash=outbox_event["request_hash"],
+                    payload_json=outbox_event["payload_json"],
+                    status=outbox_event.get("status", "PENDING"),
+                    attempts=outbox_event.get("attempts", 0),
+                    runtime_delivered_at_utc=outbox_event.get("runtime_delivered_at_utc"),
+                    snapshot_applied_at_utc=outbox_event.get("snapshot_applied_at_utc"),
+                    telegram_sent_at_utc=outbox_event.get("telegram_sent_at_utc"),
+                    last_error_class=outbox_event.get("last_error_class"),
+                    last_error_code=outbox_event.get("last_error_code"),
+                )
             conn.commit()
-            return cursor.lastrowid
+            return trade_id
     except Exception as exc:
         logging.warning(f"Falha ao registrar trade paper: {exc}")
         return None
 
 
-def finalizar_trade_paper(trade_id, saida, lucro_percent, lucro_reais, resultado, motivo_saida, idempotency_key=None, db_name=None, pnl_bruto=None, custos_totais=None, pnl_liquido=None, exit_fee=None, spread_cost=None, slippage_cost=None, close_idempotency_key=None):
+def finalizar_trade_paper(
+    trade_id,
+    saida,
+    lucro_percent,
+    lucro_reais,
+    resultado,
+    motivo_saida,
+    idempotency_key=None,
+    db_name=None,
+    pnl_bruto=None,
+    custos_totais=None,
+    pnl_liquido=None,
+    exit_fee=None,
+    spread_cost=None,
+    slippage_cost=None,
+    close_idempotency_key=None,
+    session_id=None,
+    candle_close_time=None,
+    fill_price=None,
+    outbox_event_factory=None,
+):
     try:
         if db_name is None:
             db_name = DB_NAME
@@ -525,30 +893,49 @@ def finalizar_trade_paper(trade_id, saida, lucro_percent, lucro_reais, resultado
                 spread_cost = 0.0
             if slippage_cost is None:
                 slippage_cost = 0.0
-            if idempotency_key is not None:
-                row = cursor.execute(
-                    "SELECT saida, lucro_percent, lucro_reais, resultado, motivo_saida, close_idempotency_key, close_idempotency_hash FROM trades WHERE id = ?",
-                    (trade_id,),
-                ).fetchone()
-                request_hash = f"{trade_id}|{saida}|{lucro_percent}|{lucro_reais}|{resultado}|{motivo_saida}"
-                if row is not None:
-                    stored_close_key = row[5]
-                    stored_close_hash = row[6]
-                    if stored_close_hash is not None:
-                        if stored_close_hash == request_hash:
-                            if stored_close_key != idempotency_key and idempotency_key is not None:
-                                cursor.execute(
-                                    """
-                                    UPDATE trades
-                                       SET close_idempotency_key = ?,
-                                           close_idempotency_hash = ?
-                                     WHERE id = ?
-                                    """,
-                                    (idempotency_key, request_hash, trade_id),
-                                )
-                                conn.commit()
-                            return True
-                        raise ValueError("idempotency key reuse with different payload")
+            row = cursor.execute(
+                """
+                SELECT id, status, saida, lucro_percent, lucro_reais, resultado, motivo_saida,
+                       close_idempotency_key, close_idempotency_hash
+                FROM trades
+                WHERE id = ?
+                """,
+                (trade_id,),
+            ).fetchone()
+            if row is None:
+                raise PaperTradeFinalizationError("trade not found")
+
+            request_hash = _sha256_payload(
+                {
+                    "kind": "paper_trade_close",
+                    "trade_id": trade_id,
+                    "session_id": session_id,
+                    "candle_close_time": _iso_utc_hash(candle_close_time),
+                    "saida": saida,
+                    "fill_price": fill_price if fill_price is not None else saida,
+                    "lucro_percent": lucro_percent,
+                    "lucro_reais": lucro_reais,
+                    "resultado": resultado,
+                    "motivo_saida": motivo_saida,
+                    "pnl_bruto": pnl_bruto,
+                    "custos_totais": custos_totais,
+                    "pnl_liquido": pnl_liquido,
+                    "exit_fee": exit_fee,
+                    "spread_cost": spread_cost,
+                    "slippage_cost": slippage_cost,
+                    "close_idempotency_key": close_idempotency_key or idempotency_key,
+                }
+            )
+            stored_close_key = row[7]
+            stored_close_hash = row[8]
+            if row[1] == "closed":
+                if stored_close_key == (close_idempotency_key or idempotency_key) and stored_close_hash == request_hash:
+                    return True
+                raise PaperTradeFinalizationError("closed trade cannot be altered")
+            if idempotency_key is not None and stored_close_key is not None:
+                if stored_close_key != (close_idempotency_key or idempotency_key) or stored_close_hash != request_hash:
+                    raise PaperTradeFinalizationError("idempotency key reuse with different payload")
+
             cursor.execute(
                 """
                 UPDATE trades
@@ -567,12 +954,54 @@ def finalizar_trade_paper(trade_id, saida, lucro_percent, lucro_reais, resultado
                     slippage_cost = COALESCE(?, slippage_cost),
                     close_idempotency_key = COALESCE(?, close_idempotency_key),
                     close_idempotency_hash = COALESCE(?, close_idempotency_hash)
-                WHERE id = ?
+                WHERE id = ? AND status = 'open'
                 """,
-                (resultado, lucro_percent, lucro_reais, saida, timestamp, motivo_saida, pnl_bruto, custos_totais, pnl_liquido, exit_fee, spread_cost, slippage_cost, close_idempotency_key or idempotency_key, f"{trade_id}|{saida}|{lucro_percent}|{lucro_reais}|{resultado}|{motivo_saida}", trade_id),
+                (
+                    resultado,
+                    lucro_percent,
+                    lucro_reais,
+                    saida,
+                    timestamp,
+                    motivo_saida,
+                    pnl_bruto,
+                    custos_totais,
+                    pnl_liquido,
+                    exit_fee,
+                    spread_cost,
+                    slippage_cost,
+                    close_idempotency_key or idempotency_key,
+                    request_hash,
+                    trade_id,
+                ),
             )
+            if cursor.rowcount != 1:
+                raise PaperTradeFinalizationError("trade close update failed")
+            if outbox_event_factory is not None:
+                outbox_event = outbox_event_factory(trade_id, timestamp)
+                if outbox_event is None:
+                    raise PaperTradeOutboxError("outbox event factory returned no payload")
+                _inserir_paper_trade_outbox(
+                    cursor,
+                    event_id=outbox_event["event_id"],
+                    session_id=outbox_event["session_id"],
+                    trade_id=outbox_event["trade_id"],
+                    operation_type=outbox_event["operation_type"],
+                    candle_close_time=outbox_event["candle_close_time"],
+                    idempotency_key=outbox_event["idempotency_key"],
+                    request_hash=outbox_event["request_hash"],
+                    payload_json=outbox_event["payload_json"],
+                    status=outbox_event.get("status", "PENDING"),
+                    attempts=outbox_event.get("attempts", 0),
+                    runtime_delivered_at_utc=outbox_event.get("runtime_delivered_at_utc"),
+                    snapshot_applied_at_utc=outbox_event.get("snapshot_applied_at_utc"),
+                    telegram_sent_at_utc=outbox_event.get("telegram_sent_at_utc"),
+                    last_error_class=outbox_event.get("last_error_class"),
+                    last_error_code=outbox_event.get("last_error_code"),
+                )
             conn.commit()
             return True
+    except PaperTradeFinalizationError:
+        raise
     except Exception as exc:
         logging.warning(f"Falha ao finalizar trade paper: {exc}")
         return False
@@ -712,6 +1141,7 @@ def reset_db(db_name=DB_NAME):
         with sqlite3.connect(db_name) as conn:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM trades")
+            cursor.execute("DELETE FROM paper_trade_outbox")
             conn.commit()
         return True
     except Exception as exc:
@@ -724,7 +1154,9 @@ def obter_ultimos_trades_paper(symbol="SOLUSDT", limite=30, db_name=DB_NAME, ses
         with sqlite3.connect(db_name) as conn:
             cursor = conn.cursor()
             query = """
-                SELECT timestamp, resultado, lucro_percent, lucro_reais, filtros_aplicados
+                SELECT timestamp, resultado, lucro_percent, lucro_reais, filtros_aplicados,
+                       direcao, entrada, saida, quantidade, preco_base, fill_price, entry_fee,
+                       exit_fee, spread_cost, slippage_cost, pnl_bruto, custos_totais, pnl_liquido, session_id
                 FROM trades
                 WHERE tipo = 'paper' AND simbolo = ? AND status = 'closed'
             """
@@ -747,6 +1179,20 @@ def obter_ultimos_trades_paper(symbol="SOLUSDT", limite=30, db_name=DB_NAME, ses
                     "lucro_percent": float(linha[2] or 0.0),
                     "lucro_reais": float(linha[3] or 0.0),
                     "filtros_aplicados": bool(linha[4]),
+                    "direcao": linha[5],
+                    "entrada": float(linha[6]) if linha[6] is not None else None,
+                    "saida": float(linha[7]) if linha[7] is not None else None,
+                    "quantidade": float(linha[8]) if linha[8] is not None else None,
+                    "preco_base": float(linha[9]) if linha[9] is not None else None,
+                    "fill_price": float(linha[10]) if linha[10] is not None else None,
+                    "entry_fee": float(linha[11]) if linha[11] is not None else None,
+                    "exit_fee": float(linha[12]) if linha[12] is not None else None,
+                    "spread_cost": float(linha[13]) if linha[13] is not None else None,
+                    "slippage_cost": float(linha[14]) if linha[14] is not None else None,
+                    "pnl_bruto": float(linha[15]) if linha[15] is not None else None,
+                    "custos_totais": float(linha[16]) if linha[16] is not None else None,
+                    "pnl_liquido": float(linha[17]) if linha[17] is not None else None,
+                    "session_id": linha[18],
                 }
             )
         return list(reversed(trades))

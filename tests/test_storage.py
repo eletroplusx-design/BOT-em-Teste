@@ -1,5 +1,7 @@
 import sqlite3
 
+import pytest
+
 import storage
 
 
@@ -135,12 +137,28 @@ def test_trade_paper_workflow(monkeypatch, temp_db_path):
     count_abertos = storage.contar_trades_abertos_paper("SOLUSDT")
     assert count_abertos == 1
 
-    close_ok = storage.finalizar_trade_paper(trade_id, 110, 10.0, 15.0, "GANHO", "TAKE_PROFIT")
+    close_ok = storage.finalizar_trade_paper(
+        trade_id,
+        110,
+        10.0,
+        15.0,
+        "GANHO",
+        "TAKE_PROFIT",
+        idempotency_key="idem-close",
+    )
     assert close_ok is True
     assert storage.contar_trades_abertos_paper("SOLUSDT") == 0
-    assert storage.finalizar_trade_paper(trade_id, 110, 10.0, 15.0, "GANHO", "TAKE_PROFIT", idempotency_key="idem-close") is True
-    assert storage.finalizar_trade_paper(trade_id, 110, 10.0, 15.0, "GANHO", "TAKE_PROFIT", idempotency_key="idem-close") is True
-    assert storage.finalizar_trade_paper(trade_id, 111, 11.0, 16.0, "GANHO", "TAKE_PROFIT", idempotency_key="idem-close") is False
+    assert storage.finalizar_trade_paper(
+        trade_id,
+        110,
+        10.0,
+        15.0,
+        "GANHO",
+        "TAKE_PROFIT",
+        idempotency_key="idem-close",
+    ) is True
+    with pytest.raises(storage.PaperTradeFinalizationError):
+        storage.finalizar_trade_paper(trade_id, 111, 11.0, 16.0, "GANHO", "TAKE_PROFIT", idempotency_key="idem-close")
 
     stats = storage.obter_paper_stats("SOLUSDT")
     assert stats is not None

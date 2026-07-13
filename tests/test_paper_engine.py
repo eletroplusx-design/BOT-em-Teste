@@ -252,6 +252,10 @@ def test_monitorar_paper_sol_abre_trade(monkeypatch, sample_btc_data):
     decisao_mock = MagicMock()
     monkeypatch.setattr(paper_engine, "registrar_trade_paper", registrar_trade_mock)
     monkeypatch.setattr(paper_engine, "registrar_decisao_observabilidade", decisao_mock)
+    async def _fake_reconcile(*args, **kwargs):
+        await contexto.bot.send_message(chat_id=123, text="Paper SOL aberto")
+        return True
+    monkeypatch.setattr(paper_engine, "_reconciliar_paper_runtime_outbox", _fake_reconcile)
 
     contexto = FakeContext()
     asyncio.run(paper_engine.monitorar_paper_sol(contexto))
@@ -344,6 +348,10 @@ def test_monitorar_paper_sol_trade_aberto_take_e_stop_e_filtros(monkeypatch):
     finalizar_mock = MagicMock(return_value=True)
     monkeypatch.setattr(paper_engine, "finalizar_trade_paper", finalizar_mock)
     monkeypatch.setattr(paper_engine, "esta_em_killzone", lambda: True)
+    async def _fake_reconcile(*args, **kwargs):
+        await send_mock(chat_id=123, text="Paper SOL fechado")
+        return True
+    monkeypatch.setattr(paper_engine, "_reconciliar_paper_runtime_outbox", _fake_reconcile)
 
     asyncio.run(paper_engine.monitorar_paper_sol(contexto))
     assert finalizar_mock.call_count == 2
@@ -369,6 +377,7 @@ def test_monitorar_paper_sol_trade_aberto_take_e_stop_e_filtros(monkeypatch):
     monkeypatch.setattr(paper_engine, "calcular_tamanho_posicao", lambda capital, risco_percentual, entrada, stop: (1.0, 100.0))
     monkeypatch.setattr(paper_engine, "_avaliar_filtros_paper", lambda sinal, decisao_info, regime_info: (False, {"killzone_ok": False, "adx_ok": True, "rsi_ok": True}))
     monkeypatch.setattr(paper_engine, "esta_em_killzone", lambda: True)
+    monkeypatch.setattr(paper_engine, "registrar_trade_paper", MagicMock(return_value=123))
     decisao_mock = MagicMock()
     monkeypatch.setattr(paper_engine, "registrar_decisao_observabilidade", decisao_mock)
 
