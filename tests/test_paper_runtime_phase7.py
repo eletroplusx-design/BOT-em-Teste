@@ -234,6 +234,19 @@ def test_reinicio_preserva_inicio_e_limites(tmp_path):
     assert reloaded.decision.decision_hash == session.decision.decision_hash
 
 
+def test_get_monitored_session_valida_auditoria_integral(tmp_path):
+    store = _store(tmp_path)
+    session = _session(store, session_id="audit-get")
+    with sqlite3.connect(store.db_path) as conn:
+        conn.execute(
+            "UPDATE paper_runtime_sessions SET contract_hash = ? WHERE session_id = ?",
+            ("tampered", session.record.session_id),
+        )
+        conn.commit()
+    with pytest.raises(PaperRuntimeSessionError):
+        get_monitored_session(session_id=session.record.session_id, store=store)
+
+
 def test_banco_ausente_nao_recria_recuperacao(tmp_path):
     db_path = tmp_path / "missing.db"
     store = PaperRuntimeStore(db_path)
@@ -459,6 +472,56 @@ def test_ordem_nao_ocorre_antes_da_validacao(monkeypatch, tmp_path):
     asyncio.run(paper_engine.monitorar_paper_sol(ctx))
 
 
+def test_fechamento_nao_ocorre_antes_da_validacao(monkeypatch, tmp_path):
+    store = _store(tmp_path)
+    session = _session(store, session_id="close-gate-order")
+    monkeypatch.setattr(paper_engine, "can_execute_sensitive_telegram_action", lambda *args, **kwargs: True)
+    monkeypatch.setattr(paper_engine, "get_monitored_session", lambda session_id=None, decision_hash=None: session if session_id == session.record.session_id else None)
+    monkeypatch.setattr(paper_engine, "backtester", SimpleNamespace(baixar_dados_historicos=lambda symbol=None: _paper_df()))
+    monkeypatch.setattr(
+        paper_engine,
+        "obter_trades_paper_abertos",
+        lambda symbol=None, session_id=None: [
+            {
+                "id": 10,
+                "timestamp": "2026-01-01T00:00:00+00:00",
+                "symbol": "SOLUSDT",
+                "direcao": "COMPRA",
+                "entrada": 100.0,
+                "stop_loss": 95.0,
+                "take_profit": 110.0,
+                "quantidade": 1.0,
+                "valor_arriscado": 100.0,
+                "aberto_em": "2026-01-01T00:00:00+00:00",
+                "session_id": session.record.session_id,
+                "tipo": "paper",
+                "status": "open",
+            }
+        ],
+    )
+    monkeypatch.setattr(paper_engine, "classificar_regime", lambda df: {"regime": "BULL", "adx": 30, "volatilidade": "ALTA"})
+    monkeypatch.setattr(paper_engine, "esta_em_killzone", lambda: True)
+    monkeypatch.setattr(
+        paper_engine,
+        "_obter_sinal_paper_sol",
+        lambda: {"direcao": "COMPRA", "entrada": 100, "stop_loss": 95, "take_profit": 110, "rr": 2, "motivo": "ok"},
+    )
+    monkeypatch.setattr(paper_engine, "tomar_decisao", lambda *args, **kwargs: {"volume_status": "ALTO", "motivo": "ok", "rsi": 50})
+    monkeypatch.setattr(paper_engine, "calcular_tamanho_posicao", lambda capital, risco, entrada, stop: (1, 10))
+    monkeypatch.setattr(paper_engine, "registrar_trade_paper", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("nao deveria registrar trade")))
+    monkeypatch.setattr(paper_engine, "finalizar_trade_paper", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("nao deveria finalizar trade")))
+    monkeypatch.setattr(
+        paper_engine,
+        "build_snapshot_from_observed_state",
+        lambda **kwargs: _snapshot(session, attempted_live=True),
+    )
+    ctx = _DummyContext({"chat_id": 1, "user_id": 2, "chat_type": "private", "session_id": session.record.session_id})
+
+    import asyncio
+
+    asyncio.run(paper_engine.monitorar_paper_sol(ctx))
+
+
 def test_falha_de_persistencia_impede_ordem(monkeypatch, tmp_path):
     store = _store(tmp_path)
     session = _session(store, session_id="persist-fail")
@@ -618,6 +681,16 @@ def test_monitoracao_com_sessao_valida_revalida_e_permite_ordem(monkeypatch, tmp
     asyncio.run(paper_engine.monitorar_paper_sol(ctx))
     assert calls["trade"] == 1
     assert ctx.bot.sent
+    with sqlite3.connect(store.db_path) as conn:
+        event_types = [
+            row[0]
+            for row in conn.execute(
+                "SELECT event_type FROM paper_runtime_events WHERE session_id = ? ORDER BY sequence ASC",
+                (session.record.session_id,),
+            ).fetchall()
+        ]
+    assert "TRADE_RECORDED" in event_types
+    assert "FILL" in event_types
 
 
 @pytest.mark.parametrize(

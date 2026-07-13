@@ -22,7 +22,7 @@ from promotion.errors import PromotionDecisionError
 from validation.models import CandidateConfig, FrozenSelection
 
 from .errors import PaperRuntimeMonitorError, PaperRuntimeSessionError
-from .models import PaperRuntimeContract, PaperRuntimeSessionRecord, PaperRuntimeState
+from .models import PaperRuntimeContract, PaperRuntimeEventType, PaperRuntimeSessionRecord, PaperRuntimeState
 from .store import PaperRuntimeStore, get_default_store
 
 
@@ -110,6 +110,17 @@ def _validate_recovered_session(record: PaperRuntimeSessionRecord, decision: Pro
         raise PaperRuntimeSessionError("paper-only runtime contract mismatch.")
     if record.session_id != contract.session_id or record.session_started_utc != contract.session_started_utc:
         raise PaperRuntimeSessionError("session identity mismatch.")
+
+
+def _session_from_record(
+    record: PaperRuntimeSessionRecord,
+    runtime_store: PaperRuntimeStore,
+) -> "PaperRuntimeSession":
+    decision = _decision_from_record(record)
+    contract = _contract_from_record(record, decision)
+    _validate_recovered_session(record, decision, contract)
+    runtime_store.assert_audit_chain(record.session_id)
+    return PaperRuntimeSession(record, contract, runtime_store, decision=decision)
 
 
 def _raise_stored_bool_error(message: str) -> bool:
@@ -216,11 +227,7 @@ class PaperRuntimeSession:
         record = runtime_store.load_session(session_id)
         if record is None:
             raise PaperRuntimeSessionError("runtime session not found.")
-        decision = _decision_from_record(record)
-        contract = _contract_from_record(record, decision)
-        _validate_recovered_session(record, decision, contract)
-        runtime_store.assert_audit_chain(session_id)
-        return cls(record, contract, runtime_store, decision=decision)
+        return _session_from_record(record, runtime_store)
 
     def reload(self) -> PaperRuntimeSessionRecord:
         self._record = self._store.load_session(self._record.session_id)
@@ -280,6 +287,7 @@ class PaperRuntimeSession:
             expected_version=self._record.version,
             next_state=PaperRuntimeState.SUSPENDED,
             reason=reason,
+            idempotency_key=idempotency_key,
         )
         return self._record
 
@@ -289,6 +297,7 @@ class PaperRuntimeSession:
             expected_version=self._record.version,
             next_state=PaperRuntimeState.COMPLETED,
             reason=reason,
+            idempotency_key=idempotency_key,
         )
         return self._record
 
@@ -298,8 +307,30 @@ class PaperRuntimeSession:
             expected_version=self._record.version,
             next_state=PaperRuntimeState.FAILED,
             reason=reason,
+            idempotency_key=idempotency_key,
         )
         return self._record
+
+    def record_trade_event(
+        self,
+        *,
+        payload: Mapping[str, Any],
+        result: str,
+        event_type: PaperRuntimeEventType = PaperRuntimeEventType.TRADE_RECORDED,
+        idempotency_key: str | None = None,
+    ) -> Any:
+        decision_obj = self._decision
+        if decision_obj is None:
+            raise PaperRuntimeSessionError("a promotion decision is required to record trade events.")
+        return self._store.append_event(
+            self._record.session_id,
+            event_type,
+            payload=payload,
+            decision_hash=decision_obj.decision_hash,
+            evidence_hash=decision_obj.evidence_hash,
+            result=result,
+            idempotency_key=idempotency_key,
+        )
 
 
 def load_active_runtime_session(decision_hash: str | None = None, *, session_id: str | None = None, store: PaperRuntimeStore | None = None) -> PaperRuntimeSession | None:
@@ -307,6 +338,4 @@ def load_active_runtime_session(decision_hash: str | None = None, *, session_id:
     record = runtime_store.load_active_session(decision_hash, session_id=session_id)
     if record is None:
         return None
-    decision = _decision_from_record(record)
-    contract = _contract_from_record(record, decision)
-    return PaperRuntimeSession(record, contract, runtime_store, decision=decision)
+    return _session_from_record(record, runtime_store)

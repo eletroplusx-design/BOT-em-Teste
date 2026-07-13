@@ -83,6 +83,7 @@ class PaperRuntimeEventType(str, Enum):
     SESSION_FAILED = "SESSION_FAILED"
     ORDER_BLOCKED = "ORDER_BLOCKED"
     TRADE_RECORDED = "TRADE_RECORDED"
+    FILL = "FILL"
 
 
 @dataclass(frozen=True, slots=True)

@@ -47,6 +47,7 @@ except Exception:  # pragma: no cover - fallback defensivo
 try:
     from paper_runtime import (
         PaperRuntimeSessionError,
+        PaperRuntimeEventType,
         build_snapshot_from_observed_state,
         evaluate_monitored_session,
         get_monitored_session,
@@ -121,6 +122,101 @@ def fmt_num(val, formato=".2f"):
         return f"{val:{formato}}"
     except (TypeError, ValueError):
         return "N/A"
+
+
+def _paper_runtime_close_timestamp(df):
+    if df is None or getattr(df, "empty", True):
+        return datetime.now(timezone.utc)
+    for coluna in ("close_time", "timestamp", "open_time"):
+        if coluna not in getattr(df, "columns", ()):
+            continue
+        valor = df[coluna].iloc[-1]
+        if hasattr(valor, "to_pydatetime"):
+            valor = valor.to_pydatetime()
+        if isinstance(valor, datetime):
+            if valor.tzinfo is None:
+                return valor.replace(tzinfo=timezone.utc)
+            return valor.astimezone(timezone.utc)
+        try:
+            texto = str(valor)
+            if texto.endswith("Z"):
+                texto = texto.replace("Z", "+00:00")
+            parsed = datetime.fromisoformat(texto)
+            if parsed.tzinfo is None:
+                return parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc)
+        except Exception:
+            continue
+    return datetime.now(timezone.utc)
+
+
+def _paper_runtime_idempotency_key(session_id: str | None, close_time: datetime, operation: str, identity: str) -> str:
+    session_part = session_id or "global"
+    return f"paper-runtime:{session_part}:{close_time.astimezone(timezone.utc).isoformat()}:{operation}:{identity}"
+
+
+def _paper_costs_from_contract(runtime_session) -> dict[str, Decimal]:
+    contract = getattr(runtime_session, "contract", None)
+    execution_contract = getattr(contract, "execution_contract", {}) if contract is not None else {}
+    return {
+        "entry_fee_rate": Decimal(str(execution_contract.get("entry_fee_rate", "0.0004"))),
+        "exit_fee_rate": Decimal(str(execution_contract.get("exit_fee_rate", "0.0004"))),
+        "spread_bps": Decimal(str(execution_contract.get("spread_bps", "5"))),
+        "slippage_bps": Decimal(str(execution_contract.get("slippage_bps", "5"))),
+    }
+
+
+def _paper_trade_costs(direcao: str, entrada: float, saida: float, quantidade: float, costs: dict[str, Decimal]) -> dict[str, Decimal]:
+    entrada_dec = Decimal(str(entrada))
+    saida_dec = Decimal(str(saida))
+    quantidade_dec = Decimal(str(quantidade))
+    spread_rate = costs["spread_bps"] / Decimal("10000")
+    slippage_rate = costs["slippage_bps"] / Decimal("10000")
+    entry_spread = entrada_dec * spread_rate
+    entry_slippage = entrada_dec * slippage_rate
+    exit_spread = saida_dec * spread_rate
+    exit_slippage = saida_dec * slippage_rate
+    if direcao == "COMPRA":
+        entry_fill = entrada_dec + entry_spread + entry_slippage
+        exit_fill = saida_dec - exit_spread - exit_slippage
+        pnl_bruto = quantidade_dec * (saida_dec - entrada_dec)
+    else:
+        entry_fill = entrada_dec - entry_spread - entry_slippage
+        exit_fill = saida_dec + exit_spread + exit_slippage
+        pnl_bruto = quantidade_dec * (entrada_dec - saida_dec)
+    entry_fee = abs(quantidade_dec * entry_fill * costs["entry_fee_rate"])
+    exit_fee = abs(quantidade_dec * exit_fill * costs["exit_fee_rate"])
+    spread_cost = abs(quantidade_dec * (entry_spread + exit_spread))
+    slippage_cost = abs(quantidade_dec * (entry_slippage + exit_slippage))
+    custos_totais = entry_fee + exit_fee + spread_cost + slippage_cost
+    pnl_liquido = pnl_bruto - custos_totais
+    return {
+        "preco_base": entrada_dec,
+        "fill_price": entry_fill,
+        "exit_fill_price": exit_fill,
+        "entry_fee": entry_fee,
+        "exit_fee": exit_fee,
+        "spread_cost": spread_cost,
+        "slippage_cost": slippage_cost,
+        "pnl_bruto": pnl_bruto,
+        "custos_totais": custos_totais,
+        "pnl_liquido": pnl_liquido,
+    }
+
+
+def _registrar_trade_runtime_event(runtime_session, *, payload, result: str, idempotency_key: str, event_type=PaperRuntimeEventType.TRADE_RECORDED) -> None:
+    if runtime_session is None:
+        return
+    try:
+        runtime_session.record_trade_event(
+            payload=payload,
+            result=result,
+            event_type=event_type,
+            idempotency_key=idempotency_key,
+        )
+        runtime_session.reload()
+    except Exception as exc:
+        logging.warning(f"Falha ao registrar evento TRADE_RECORDED: {exc.__class__.__name__}")
 
 
 def atualizar_cache_preco(symbol, preco, fonte_dados, modo):
@@ -332,7 +428,12 @@ def _coletar_runtime_observed_state(*, session, decision, df, trades_abertos, pr
     else:
         paper_capital_used = Decimal("0")
         risk_per_trade_percent = Decimal("0")
-    costs = decision.phase5_manifest.get("execution_contract", {}) if isinstance(decision.phase5_manifest, dict) else {}
+    costs = {}
+    try:
+        costs = dict(session.contract.execution_contract or {})
+    except Exception:
+        if isinstance(decision.phase5_manifest, dict):
+            costs = dict(decision.phase5_manifest.get("execution_contract", {}) or {})
     observed_costs = {
         "entry_fee_rate": costs.get("entry_fee_rate", "0.0004"),
         "exit_fee_rate": costs.get("exit_fee_rate", "0.0004"),
@@ -356,9 +457,16 @@ def _coletar_runtime_observed_state(*, session, decision, df, trades_abertos, pr
     }
 
 
-async def _processar_trades_paper_abertos(context, chat_id, trades, candle, regime_info, fonte_dados):
+async def _processar_trades_paper_abertos(context, chat_id, trades, candle, regime_info, fonte_dados, *, runtime_session=None, close_time=None):
     if not trades:
         return False
+    costs = _paper_costs_from_contract(runtime_session) if runtime_session is not None else {
+        "entry_fee_rate": Decimal("0.0004"),
+        "exit_fee_rate": Decimal("0.0004"),
+        "spread_bps": Decimal("5"),
+        "slippage_bps": Decimal("5"),
+    }
+    trade_moved = False
     for trade in trades:
         direcao = trade["direcao"]
         stop_loss = trade["stop_loss"]
@@ -371,12 +479,13 @@ async def _processar_trades_paper_abertos(context, chat_id, trades, candle, regi
             take_atingido = float(candle["high"]) >= take_profit
             if stop_atingido or take_atingido:
                 saida = stop_loss if stop_atingido else take_profit
-                lucro_reais = quantidade * (saida - entrada)
-                lucro_percent = (lucro_reais / CAPITAL_PAPER) * 100
+                trade_costs = _paper_trade_costs(direcao, entrada, saida, quantidade, costs)
+                lucro_reais = float(trade_costs["pnl_liquido"])
+                lucro_percent = (Decimal(str(lucro_reais)) / Decimal(str(CAPITAL_PAPER))) * Decimal("100")
                 resultado_trade = _construir_trade_result_paper(
                     trade,
                     saida,
-                    lucro_percent,
+                    float(lucro_percent),
                     lucro_reais,
                     fonte_dados,
                     "STOP" if stop_atingido else "TAKE_PROFIT",
@@ -388,6 +497,55 @@ async def _processar_trades_paper_abertos(context, chat_id, trades, candle, regi
                     float(resultado_trade.pnl_reais),
                     resultado_trade.resultado,
                     resultado_trade.reason,
+                    idempotency_key=f"paper-close:{runtime_session.record.session_id if runtime_session else 'global'}:{close_time.isoformat() if close_time else datetime.now(timezone.utc).isoformat()}:{trade['id']}",
+                    pnl_bruto=float(trade_costs["pnl_bruto"]),
+                    custos_totais=float(trade_costs["custos_totais"]),
+                    pnl_liquido=float(trade_costs["pnl_liquido"]),
+                    exit_fee=float(trade_costs["exit_fee"]),
+                    spread_cost=float(trade_costs["spread_cost"]),
+                    slippage_cost=float(trade_costs["slippage_cost"]),
+                    close_idempotency_key=f"paper-close:{runtime_session.record.session_id if runtime_session else 'global'}:{close_time.isoformat() if close_time else datetime.now(timezone.utc).isoformat()}:{trade['id']}",
+                )
+                _registrar_trade_runtime_event(
+                    runtime_session,
+                    payload={
+                        "action": "CLOSE",
+                        "trade_id": trade["id"],
+                        "session_id": runtime_session.record.session_id if runtime_session else None,
+                        "direcao": direcao,
+                        "motivo": "STOP" if stop_atingido else "TAKE_PROFIT",
+                        "saida": saida,
+                        "entry_base": entrada,
+                        "pnl_bruto": float(trade_costs["pnl_bruto"]),
+                        "custos_totais": float(trade_costs["custos_totais"]),
+                        "pnl_liquido": float(trade_costs["pnl_liquido"]),
+                    },
+                    result="CLOSED",
+                    idempotency_key=_paper_runtime_idempotency_key(
+                        runtime_session.record.session_id if runtime_session else None,
+                        close_time or datetime.now(timezone.utc),
+                        "close",
+                        f"{trade['id']}:{saida}",
+                    ),
+                )
+                _registrar_trade_runtime_event(
+                    runtime_session,
+                    payload={
+                        "action": "FILL",
+                        "side": "EXIT",
+                        "trade_id": trade["id"],
+                        "session_id": runtime_session.record.session_id if runtime_session else None,
+                        "direcao": direcao,
+                        "fill_price": saida,
+                    },
+                    result="FILLED",
+                    event_type=PaperRuntimeEventType.FILL,
+                    idempotency_key=_paper_runtime_idempotency_key(
+                        runtime_session.record.session_id if runtime_session else None,
+                        close_time or datetime.now(timezone.utc),
+                        "fill-exit",
+                        f"{trade['id']}:{saida}",
+                    ),
                 )
                 registrar_decisao_observabilidade(
                     symbol=PAPER_SYMBOL,
@@ -407,17 +565,19 @@ async def _processar_trades_paper_abertos(context, chat_id, trades, candle, regi
                     chat_id=chat_id,
                     text=f"Paper SOL fechado por {'STOP' if stop_atingido else 'TAKE PROFIT'}. Resultado: {fmt_num(lucro_percent, '+.2f')}%",
                 )
+                trade_moved = True
         else:
             stop_atingido = float(candle["high"]) >= stop_loss
             take_atingido = float(candle["low"]) <= take_profit
             if stop_atingido or take_atingido:
                 saida = stop_loss if stop_atingido else take_profit
-                lucro_reais = quantidade * (entrada - saida)
-                lucro_percent = (lucro_reais / CAPITAL_PAPER) * 100
+                trade_costs = _paper_trade_costs(direcao, entrada, saida, quantidade, costs)
+                lucro_reais = float(trade_costs["pnl_liquido"])
+                lucro_percent = (Decimal(str(lucro_reais)) / Decimal(str(CAPITAL_PAPER))) * Decimal("100")
                 resultado_trade = _construir_trade_result_paper(
                     trade,
                     saida,
-                    lucro_percent,
+                    float(lucro_percent),
                     lucro_reais,
                     fonte_dados,
                     "STOP" if stop_atingido else "TAKE_PROFIT",
@@ -429,6 +589,55 @@ async def _processar_trades_paper_abertos(context, chat_id, trades, candle, regi
                     float(resultado_trade.pnl_reais),
                     resultado_trade.resultado,
                     resultado_trade.reason,
+                    idempotency_key=f"paper-close:{runtime_session.record.session_id if runtime_session else 'global'}:{close_time.isoformat() if close_time else datetime.now(timezone.utc).isoformat()}:{trade['id']}",
+                    pnl_bruto=float(trade_costs["pnl_bruto"]),
+                    custos_totais=float(trade_costs["custos_totais"]),
+                    pnl_liquido=float(trade_costs["pnl_liquido"]),
+                    exit_fee=float(trade_costs["exit_fee"]),
+                    spread_cost=float(trade_costs["spread_cost"]),
+                    slippage_cost=float(trade_costs["slippage_cost"]),
+                    close_idempotency_key=f"paper-close:{runtime_session.record.session_id if runtime_session else 'global'}:{close_time.isoformat() if close_time else datetime.now(timezone.utc).isoformat()}:{trade['id']}",
+                )
+                _registrar_trade_runtime_event(
+                    runtime_session,
+                    payload={
+                        "action": "CLOSE",
+                        "trade_id": trade["id"],
+                        "session_id": runtime_session.record.session_id if runtime_session else None,
+                        "direcao": direcao,
+                        "motivo": "STOP" if stop_atingido else "TAKE_PROFIT",
+                        "saida": saida,
+                        "entry_base": entrada,
+                        "pnl_bruto": float(trade_costs["pnl_bruto"]),
+                        "custos_totais": float(trade_costs["custos_totais"]),
+                        "pnl_liquido": float(trade_costs["pnl_liquido"]),
+                    },
+                    result="CLOSED",
+                    idempotency_key=_paper_runtime_idempotency_key(
+                        runtime_session.record.session_id if runtime_session else None,
+                        close_time or datetime.now(timezone.utc),
+                        "close",
+                        f"{trade['id']}:{saida}",
+                    ),
+                )
+                _registrar_trade_runtime_event(
+                    runtime_session,
+                    payload={
+                        "action": "FILL",
+                        "side": "EXIT",
+                        "trade_id": trade["id"],
+                        "session_id": runtime_session.record.session_id if runtime_session else None,
+                        "direcao": direcao,
+                        "fill_price": saida,
+                    },
+                    result="FILLED",
+                    event_type=PaperRuntimeEventType.FILL,
+                    idempotency_key=_paper_runtime_idempotency_key(
+                        runtime_session.record.session_id if runtime_session else None,
+                        close_time or datetime.now(timezone.utc),
+                        "fill-exit",
+                        f"{trade['id']}:{saida}",
+                    ),
                 )
                 registrar_decisao_observabilidade(
                     symbol=PAPER_SYMBOL,
@@ -448,7 +657,8 @@ async def _processar_trades_paper_abertos(context, chat_id, trades, candle, regi
                     chat_id=chat_id,
                     text=f"Paper SOL fechado por {'STOP' if stop_atingido else 'TAKE PROFIT'}. Resultado: {fmt_num(lucro_percent, '+.2f')}%",
                 )
-    return True
+                trade_moved = True
+    return trade_moved
 
 
 async def monitorar_paper_sol(context):
@@ -522,12 +732,11 @@ async def monitorar_paper_sol(context):
         preco_atual = float(df["close"].iloc[-1])
         atualizar_cache_preco(PAPER_SYMBOL, preco_atual, fonte_dados, "PAPER_SOL")
         candle = df.iloc[-1]
+        candle_close_time = _paper_runtime_close_timestamp(df)
         regime_info = classificar_regime(df)
         aberto = obter_trades_paper_abertos(PAPER_SYMBOL, session_id=session_scope_id)
 
-        if await _processar_trades_paper_abertos(context, chat_id, aberto, candle, regime_info, fonte_dados):
-            return
-
+        runtime_costs = None
         if _runtime_monitoring_enabled():
             runtime_decision = runtime_session.decision
             if runtime_decision is None:
@@ -540,7 +749,8 @@ async def monitorar_paper_sol(context):
                     erro="runtime decision ausente",
                 )
                 return
-            runtime_observed = _coletar_runtime_observed_state(
+            runtime_costs = _paper_costs_from_contract(runtime_session)
+            runtime_observed_pre = _coletar_runtime_observed_state(
                 session=runtime_session,
                 decision=runtime_decision,
                 df=df,
@@ -549,17 +759,23 @@ async def monitorar_paper_sol(context):
                 regime_info=regime_info,
             )
             try:
-                runtime_snapshot = build_snapshot_from_observed_state(
+                runtime_snapshot_pre = build_snapshot_from_observed_state(
                     session=runtime_session.record,
                     decision=runtime_decision,
-                    observed=runtime_observed,
-                    timestamp_utc=datetime.now(timezone.utc),
+                    observed=runtime_observed_pre,
+                    timestamp_utc=candle_close_time,
                 )
-                runtime_result = runtime_session.evaluate_snapshot(
-                    runtime_snapshot,
+                runtime_result_pre = runtime_session.evaluate_snapshot(
+                    runtime_snapshot_pre,
                     decision=runtime_decision,
+                    idempotency_key=_paper_runtime_idempotency_key(
+                        runtime_session.record.session_id,
+                        candle_close_time,
+                        "monitor-pre",
+                        f"{PAPER_SYMBOL}:{preco_atual}",
+                    ),
                 )
-                if not runtime_result.approved:
+                if not runtime_result_pre.approved:
                     registrar_decisao_observabilidade(
                         symbol=PAPER_SYMBOL,
                         modo="PAPER_SOL",
@@ -589,6 +805,44 @@ async def monitorar_paper_sol(context):
                 _remover_jobs_runtime_monitorado(context, runtime_session.record.session_id)
                 logging.warning("Falha ao revalidar sessao paper monitorada.")
                 return
+
+        if await _processar_trades_paper_abertos(
+            context,
+            chat_id,
+            aberto,
+            candle,
+            regime_info,
+            fonte_dados,
+            runtime_session=runtime_session if _runtime_monitoring_enabled() else None,
+            close_time=candle_close_time,
+        ):
+            if _runtime_monitoring_enabled() and runtime_session is not None and runtime_costs is not None:
+                aberto_pos = obter_trades_paper_abertos(PAPER_SYMBOL, session_id=session_scope_id)
+                runtime_observed_post = _coletar_runtime_observed_state(
+                    session=runtime_session,
+                    decision=runtime_session.decision,
+                    df=df,
+                    trades_abertos=aberto_pos,
+                    preco_atual=preco_atual,
+                    regime_info=regime_info,
+                )
+                runtime_snapshot_post = build_snapshot_from_observed_state(
+                    session=runtime_session.record,
+                    decision=runtime_session.decision,
+                    observed=runtime_observed_post,
+                    timestamp_utc=candle_close_time,
+                )
+                runtime_session.evaluate_snapshot(
+                    runtime_snapshot_post,
+                    decision=runtime_session.decision,
+                    idempotency_key=_paper_runtime_idempotency_key(
+                        runtime_session.record.session_id,
+                        candle_close_time,
+                        "monitor-post-close",
+                        f"{PAPER_SYMBOL}:{preco_atual}:{len(aberto_pos)}",
+                    ),
+                )
+            return
 
         sinal = _obter_sinal_paper_sol()
         if not sinal or sinal.get("direcao") not in ("COMPRA", "VENDA"):
@@ -689,6 +943,22 @@ async def monitorar_paper_sol(context):
             return
 
         trade_intent = _construir_trade_intent_paper(sinal, quantidade, valor_arriscado, fonte_dados)
+        trade_costs_entry = _paper_trade_costs(
+            sinal["direcao"],
+            entrada,
+            entrada,
+            float(trade_intent.quantity),
+            runtime_costs or (
+                _paper_costs_from_contract(runtime_session)
+                if runtime_session is not None
+                else {
+                    "entry_fee_rate": Decimal("0.0004"),
+                    "exit_fee_rate": Decimal("0.0004"),
+                    "spread_bps": Decimal("5"),
+                    "slippage_bps": Decimal("5"),
+                }
+            ),
+        )
         trade_id = registrar_trade_paper(
             trade_intent.symbol,
             trade_intent.direction.value,
@@ -701,6 +971,11 @@ async def monitorar_paper_sol(context):
             filtros_aplicados=filtros_aplicados,
             session_id=session_scope_id,
             idempotency_key=f"paper-open:{session_scope_id or 'global'}:{sinal['direcao']}:{entrada}:{stop_loss}:{take_profit}",
+            preco_base=entrada,
+            fill_price=float(trade_costs_entry["fill_price"]),
+            entry_fee=float(trade_costs_entry["entry_fee"]),
+            spread_cost=float(trade_costs_entry["spread_cost"]),
+            slippage_cost=float(trade_costs_entry["slippage_cost"]),
         )
         if trade_id is None:
             registrar_decisao_observabilidade(
@@ -746,6 +1021,71 @@ async def monitorar_paper_sol(context):
                     f"Trade ID: {trade_id}"
                 ),
             )
+            if runtime_session is not None:
+                _registrar_trade_runtime_event(
+                    runtime_session,
+                    payload={
+                        "action": "OPEN",
+                        "trade_id": trade_id,
+                        "session_id": runtime_session.record.session_id,
+                        "direcao": sinal["direcao"],
+                        "entrada_base": entrada,
+                        "fill_price": float(trade_costs_entry["fill_price"]),
+                        "entry_fee": float(trade_costs_entry["entry_fee"]),
+                        "spread_cost": float(trade_costs_entry["spread_cost"]),
+                        "slippage_cost": float(trade_costs_entry["slippage_cost"]),
+                    },
+                    result="OPENED",
+                    idempotency_key=_paper_runtime_idempotency_key(
+                        runtime_session.record.session_id,
+                        candle_close_time,
+                        "open",
+                        f"{trade_id}:{sinal['direcao']}:{entrada}:{stop_loss}:{take_profit}",
+                    ),
+                )
+                _registrar_trade_runtime_event(
+                    runtime_session,
+                    payload={
+                        "action": "FILL",
+                        "side": "ENTRY",
+                        "trade_id": trade_id,
+                        "session_id": runtime_session.record.session_id,
+                        "direcao": sinal["direcao"],
+                        "fill_price": float(trade_costs_entry["fill_price"]),
+                    },
+                    result="FILLED",
+                    event_type=PaperRuntimeEventType.FILL,
+                    idempotency_key=_paper_runtime_idempotency_key(
+                        runtime_session.record.session_id,
+                        candle_close_time,
+                        "fill-entry",
+                        f"{trade_id}:{sinal['direcao']}:{entrada}:{stop_loss}:{take_profit}",
+                    ),
+                )
+                runtime_observed_post = _coletar_runtime_observed_state(
+                    session=runtime_session,
+                    decision=runtime_session.decision,
+                    df=df,
+                    trades_abertos=obter_trades_paper_abertos(PAPER_SYMBOL, session_id=session_scope_id),
+                    preco_atual=preco_atual,
+                    regime_info=regime_info,
+                )
+                runtime_snapshot_post = build_snapshot_from_observed_state(
+                    session=runtime_session.record,
+                    decision=runtime_session.decision,
+                    observed=runtime_observed_post,
+                    timestamp_utc=candle_close_time,
+                )
+                runtime_session.evaluate_snapshot(
+                    runtime_snapshot_post,
+                    decision=runtime_session.decision,
+                    idempotency_key=_paper_runtime_idempotency_key(
+                        runtime_session.record.session_id,
+                        candle_close_time,
+                        "monitor-post-open",
+                        f"{trade_id}:{preco_atual}",
+                    ),
+                )
         else:
             bloqueado_por = "FILTRO"
             if not detalhes_filtros.get("killzone_ok"):

@@ -138,6 +138,9 @@ def test_trade_paper_workflow(monkeypatch, temp_db_path):
     close_ok = storage.finalizar_trade_paper(trade_id, 110, 10.0, 15.0, "GANHO", "TAKE_PROFIT")
     assert close_ok is True
     assert storage.contar_trades_abertos_paper("SOLUSDT") == 0
+    assert storage.finalizar_trade_paper(trade_id, 110, 10.0, 15.0, "GANHO", "TAKE_PROFIT", idempotency_key="idem-close") is True
+    assert storage.finalizar_trade_paper(trade_id, 110, 10.0, 15.0, "GANHO", "TAKE_PROFIT", idempotency_key="idem-close") is True
+    assert storage.finalizar_trade_paper(trade_id, 111, 11.0, 16.0, "GANHO", "TAKE_PROFIT", idempotency_key="idem-close") is False
 
     stats = storage.obter_paper_stats("SOLUSDT")
     assert stats is not None
@@ -147,6 +150,17 @@ def test_trade_paper_workflow(monkeypatch, temp_db_path):
     trade_list = storage.buscar_trades_paper(limite=10, symbol="SOLUSDT")
     assert len(trade_list) == 1
     assert trade_list[0]["status"] == "closed"
+    with sqlite3.connect(temp_db_path) as conn:
+        row = conn.execute(
+            "SELECT preco_base, fill_price, entry_fee, close_idempotency_key, close_idempotency_hash, pnl_liquido FROM trades WHERE id = ?",
+            (trade_id,),
+        ).fetchone()
+    assert row[0] == 100.0
+    assert row[1] is not None
+    assert row[2] is not None
+    assert row[3] == "idem-close"
+    assert row[4] is not None
+    assert row[5] is not None
 
 
 def test_contar_fechados_hoje_e_paper_stats_sem_filtrado(monkeypatch, temp_db_path):

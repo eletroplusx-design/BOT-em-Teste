@@ -19,6 +19,39 @@ def _normalizar(valor, padrao="N/A"):
     return valor
 
 
+def _trade_cost_helpers(direcao, entrada, quantidade, trade_costs):
+    entrada_val = float(entrada)
+    quantidade_val = float(quantidade)
+    spread_rate = float(trade_costs["spread_bps"]) / 10000.0
+    slippage_rate = float(trade_costs["slippage_bps"]) / 10000.0
+    entry_spread = entrada_val * spread_rate
+    entry_slippage = entrada_val * slippage_rate
+    if direcao == "COMPRA":
+        fill_price = entrada_val + entry_spread + entry_slippage
+    else:
+        fill_price = entrada_val - entry_spread - entry_slippage
+    entry_fee = abs(quantidade_val * fill_price * float(trade_costs["entry_fee_rate"]))
+    spread_cost = abs(quantidade_val * entry_spread)
+    slippage_cost = abs(quantidade_val * entry_slippage)
+    return fill_price, entry_fee, spread_cost, slippage_cost
+
+
+def _calcular_fill_price_paper(direcao, entrada, quantidade, trade_costs):
+    return _trade_cost_helpers(direcao, entrada, quantidade, trade_costs)[0]
+
+
+def _calcular_entry_fee_paper(direcao, entrada, quantidade, trade_costs):
+    return _trade_cost_helpers(direcao, entrada, quantidade, trade_costs)[1]
+
+
+def _calcular_spread_cost_paper(direcao, entrada, quantidade, trade_costs):
+    return _trade_cost_helpers(direcao, entrada, quantidade, trade_costs)[2]
+
+
+def _calcular_slippage_cost_paper(direcao, entrada, quantidade, trade_costs):
+    return _trade_cost_helpers(direcao, entrada, quantidade, trade_costs)[3]
+
+
 def criar_tabelas(db_name=DB_NAME):
     try:
         with sqlite3.connect(db_name) as conn:
@@ -92,6 +125,15 @@ def inicializar_banco(db_name=DB_NAME):
                 "take_profit": "REAL",
                 "quantidade": "REAL",
                 "valor_arriscado": "REAL",
+                "preco_base": "REAL",
+                "fill_price": "REAL",
+                "entry_fee": "REAL",
+                "exit_fee": "REAL",
+                "spread_cost": "REAL",
+                "slippage_cost": "REAL",
+                "pnl_bruto": "REAL",
+                "custos_totais": "REAL",
+                "pnl_liquido": "REAL",
                 "aberto_em": "TEXT",
                 "fechado_em": "TEXT",
                 "saida": "REAL",
@@ -101,6 +143,8 @@ def inicializar_banco(db_name=DB_NAME):
                 "session_id": "TEXT",
                 "idempotency_key": "TEXT",
                 "idempotency_hash": "TEXT",
+                "close_idempotency_key": "TEXT",
+                "close_idempotency_hash": "TEXT",
             }
             for coluna, tipo in alteracoes.items():
                 if coluna not in colunas:
@@ -363,6 +407,11 @@ def registrar_trade_paper(
     filtros_aplicados=True,
     session_id=None,
     idempotency_key=None,
+    preco_base=None,
+    fill_price=None,
+    entry_fee=None,
+    spread_cost=None,
+    slippage_cost=None,
     db_name=None,
 ):
     try:
@@ -372,6 +421,37 @@ def registrar_trade_paper(
         with sqlite3.connect(db_name) as conn:
             cursor = conn.cursor()
             timestamp = datetime.now(timezone.utc).isoformat()
+            costs = {
+                "entry_fee_rate": 0.0004,
+                "exit_fee_rate": 0.0004,
+                "spread_bps": 5.0,
+                "slippage_bps": 5.0,
+            }
+            if fill_price is None or entry_fee is None or spread_cost is None or slippage_cost is None:
+                try:
+                    from decimal import Decimal
+
+                    trade_costs = {
+                        "entry_fee_rate": Decimal(str(costs["entry_fee_rate"])),
+                        "exit_fee_rate": Decimal(str(costs["exit_fee_rate"])),
+                        "spread_bps": Decimal(str(costs["spread_bps"])),
+                        "slippage_bps": Decimal(str(costs["slippage_bps"])),
+                    }
+                    calculado = {
+                        "fill_price": float(_calcular_fill_price_paper(direcao, entrada, quantidade, trade_costs)),
+                        "entry_fee": float(_calcular_entry_fee_paper(direcao, entrada, quantidade, trade_costs)),
+                        "spread_cost": float(_calcular_spread_cost_paper(direcao, entrada, quantidade, trade_costs)),
+                        "slippage_cost": float(_calcular_slippage_cost_paper(direcao, entrada, quantidade, trade_costs)),
+                    }
+                    fill_price = calculado["fill_price"] if fill_price is None else fill_price
+                    entry_fee = calculado["entry_fee"] if entry_fee is None else entry_fee
+                    spread_cost = calculado["spread_cost"] if spread_cost is None else spread_cost
+                    slippage_cost = calculado["slippage_cost"] if slippage_cost is None else slippage_cost
+                except Exception:
+                    fill_price = fill_price if fill_price is not None else entrada
+                    entry_fee = entry_fee if entry_fee is not None else 0.0
+                    spread_cost = spread_cost if spread_cost is not None else 0.0
+                    slippage_cost = slippage_cost if slippage_cost is not None else 0.0
             request_hash = None
             if idempotency_key is not None:
                 request_hash = f"{symbol}|{direcao}|{entrada}|{stop_loss}|{take_profit}|{quantidade}|{valor_arriscado}|{rr_planejado}|{1 if filtros_aplicados else 0}|{session_id}"
@@ -388,10 +468,12 @@ def registrar_trade_paper(
                 INSERT INTO trades (
                     timestamp, tipo, simbolo, session_id, status, direcao, resultado, score,
                     lucro_percent, rr_planejado, entrada, stop_loss, take_profit,
-                    quantidade, valor_arriscado, aberto_em, filtros_aplicados, idempotency_key, idempotency_hash
+                    quantidade, valor_arriscado, preco_base, fill_price, entry_fee, spread_cost, slippage_cost,
+                    aberto_em, filtros_aplicados, idempotency_key, idempotency_hash
                 )
                 VALUES (:timestamp, 'paper', :symbol, :session_id, 'open', :direcao, 'PENDENTE', 0, 0.0,
                         :rr_planejado, :entrada, :stop_loss, :take_profit, :quantidade, :valor_arriscado,
+                        :preco_base, :fill_price, :entry_fee, :spread_cost, :slippage_cost,
                         :aberto_em, :filtros_aplicados, :idempotency_key, :idempotency_hash)
                 """,
                 {
@@ -405,6 +487,11 @@ def registrar_trade_paper(
                     "take_profit": take_profit,
                     "quantidade": quantidade,
                     "valor_arriscado": valor_arriscado,
+                    "preco_base": preco_base if preco_base is not None else entrada,
+                    "fill_price": fill_price if fill_price is not None else entrada,
+                    "entry_fee": entry_fee,
+                    "spread_cost": spread_cost,
+                    "slippage_cost": slippage_cost,
                     "aberto_em": timestamp,
                     "filtros_aplicados": 1 if filtros_aplicados else 0,
                     "idempotency_key": idempotency_key,
@@ -418,7 +505,7 @@ def registrar_trade_paper(
         return None
 
 
-def finalizar_trade_paper(trade_id, saida, lucro_percent, lucro_reais, resultado, motivo_saida, idempotency_key=None, db_name=None):
+def finalizar_trade_paper(trade_id, saida, lucro_percent, lucro_reais, resultado, motivo_saida, idempotency_key=None, db_name=None, pnl_bruto=None, custos_totais=None, pnl_liquido=None, exit_fee=None, spread_cost=None, slippage_cost=None, close_idempotency_key=None):
     try:
         if db_name is None:
             db_name = DB_NAME
@@ -426,13 +513,42 @@ def finalizar_trade_paper(trade_id, saida, lucro_percent, lucro_reais, resultado
         with sqlite3.connect(db_name) as conn:
             cursor = conn.cursor()
             timestamp = datetime.now(timezone.utc).isoformat()
+            if pnl_bruto is None:
+                pnl_bruto = lucro_reais
+            if custos_totais is None:
+                custos_totais = 0.0
+            if pnl_liquido is None:
+                pnl_liquido = lucro_reais
+            if exit_fee is None:
+                exit_fee = 0.0
+            if spread_cost is None:
+                spread_cost = 0.0
+            if slippage_cost is None:
+                slippage_cost = 0.0
             if idempotency_key is not None:
                 row = cursor.execute(
-                    "SELECT saida, lucro_percent, lucro_reais, resultado, motivo_saida FROM trades WHERE id = ?",
+                    "SELECT saida, lucro_percent, lucro_reais, resultado, motivo_saida, close_idempotency_key, close_idempotency_hash FROM trades WHERE id = ?",
                     (trade_id,),
                 ).fetchone()
+                request_hash = f"{trade_id}|{saida}|{lucro_percent}|{lucro_reais}|{resultado}|{motivo_saida}"
                 if row is not None:
-                    return True
+                    stored_close_key = row[5]
+                    stored_close_hash = row[6]
+                    if stored_close_hash is not None:
+                        if stored_close_hash == request_hash:
+                            if stored_close_key != idempotency_key and idempotency_key is not None:
+                                cursor.execute(
+                                    """
+                                    UPDATE trades
+                                       SET close_idempotency_key = ?,
+                                           close_idempotency_hash = ?
+                                     WHERE id = ?
+                                    """,
+                                    (idempotency_key, request_hash, trade_id),
+                                )
+                                conn.commit()
+                            return True
+                        raise ValueError("idempotency key reuse with different payload")
             cursor.execute(
                 """
                 UPDATE trades
@@ -442,10 +558,18 @@ def finalizar_trade_paper(trade_id, saida, lucro_percent, lucro_reais, resultado
                     lucro_reais = ?,
                     saida = ?,
                     fechado_em = ?,
-                    motivo_saida = ?
+                    motivo_saida = ?,
+                    pnl_bruto = COALESCE(?, pnl_bruto),
+                    custos_totais = COALESCE(?, custos_totais),
+                    pnl_liquido = COALESCE(?, pnl_liquido),
+                    exit_fee = COALESCE(?, exit_fee),
+                    spread_cost = COALESCE(?, spread_cost),
+                    slippage_cost = COALESCE(?, slippage_cost),
+                    close_idempotency_key = COALESCE(?, close_idempotency_key),
+                    close_idempotency_hash = COALESCE(?, close_idempotency_hash)
                 WHERE id = ?
                 """,
-                (resultado, lucro_percent, lucro_reais, saida, timestamp, motivo_saida, trade_id),
+                (resultado, lucro_percent, lucro_reais, saida, timestamp, motivo_saida, pnl_bruto, custos_totais, pnl_liquido, exit_fee, spread_cost, slippage_cost, close_idempotency_key or idempotency_key, f"{trade_id}|{saida}|{lucro_percent}|{lucro_reais}|{resultado}|{motivo_saida}", trade_id),
             )
             conn.commit()
             return True
