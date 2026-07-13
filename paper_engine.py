@@ -271,7 +271,7 @@ def _paper_runtime_outbox_payload(
     candle_close_time: datetime,
     idempotency_key: str,
     runtime_events: list[dict],
-    snapshot_observed: dict,
+    snapshot_context: dict,
     telegram_text: str,
     telegram_chat_id: int | None,
 ) -> dict:
@@ -283,7 +283,7 @@ def _paper_runtime_outbox_payload(
         "idempotency_key": idempotency_key,
         "snapshot_idempotency_key": f"{idempotency_key}:snapshot",
         "runtime_events": runtime_events,
-        "snapshot_observed": snapshot_observed,
+        "snapshot_context": snapshot_context,
         "telegram": {
             "chat_id": telegram_chat_id,
             "text": telegram_text,
@@ -328,17 +328,31 @@ async def _reconciliar_paper_runtime_outbox(context, runtime_session, *, session
                         event_type=event_type,
                         idempotency_key=event.get("idempotency_key"),
                     )
-                atualizar_outbox_paper_trade(
+                if not atualizar_outbox_paper_trade(
                     outbox["event_id"],
                     status="DELIVERED",
                     runtime_delivered_at_utc=datetime.now(timezone.utc).isoformat(),
-                )
+                ):
+                    raise PaperRuntimeSessionError("paper outbox delivery update failed.")
 
-            if outbox["snapshot_applied_at_utc"] is None and payload.get("snapshot_observed"):
+            snapshot_context = payload.get("snapshot_context") or {}
+            if outbox["snapshot_applied_at_utc"] is None and snapshot_context is not None:
+                if not isinstance(snapshot_context, dict):
+                    raise PaperRuntimeSessionError("paper outbox snapshot context is invalid.")
+                current_trades = obter_trades_paper_abertos(PAPER_SYMBOL, session_id=session_scope_id)
+                snapshot_observed = _coletar_runtime_observed_state(
+                    session=runtime_session,
+                    decision=runtime_session.decision,
+                    df=None,
+                    trades_abertos=current_trades,
+                    preco_atual=snapshot_context.get("preco_atual"),
+                    regime_info=snapshot_context.get("regime_info") or {},
+                    data_fresh_hint=snapshot_context.get("data_fresh"),
+                )
                 snapshot = build_snapshot_from_observed_state(
                     session=runtime_session.record,
                     decision=runtime_session.decision,
-                    observed=payload["snapshot_observed"],
+                    observed=snapshot_observed,
                     timestamp_utc=datetime.fromisoformat(payload["candle_close_time"].replace("Z", "+00:00")),
                 )
                 runtime_session.evaluate_snapshot(
@@ -346,11 +360,12 @@ async def _reconciliar_paper_runtime_outbox(context, runtime_session, *, session
                     decision=runtime_session.decision,
                     idempotency_key=payload.get("snapshot_idempotency_key") or f"{payload['idempotency_key']}:snapshot",
                 )
-                atualizar_outbox_paper_trade(
+                if not atualizar_outbox_paper_trade(
                     outbox["event_id"],
                     snapshot_applied_at_utc=datetime.now(timezone.utc).isoformat(),
                     status="DELIVERED",
-                )
+                ):
+                    raise PaperRuntimeSessionError("paper outbox snapshot update failed.")
 
             if outbox["telegram_sent_at_utc"] is None:
                 telegram = payload.get("telegram", {})
@@ -358,11 +373,12 @@ async def _reconciliar_paper_runtime_outbox(context, runtime_session, *, session
                     chat_id=telegram.get("chat_id") or chat_id,
                     text=telegram.get("text") or "Operacao paper reconciliada.",
                 )
-                atualizar_outbox_paper_trade(
+                if not atualizar_outbox_paper_trade(
                     outbox["event_id"],
                     status="NOTIFIED",
                     telegram_sent_at_utc=datetime.now(timezone.utc).isoformat(),
-                )
+                ):
+                    raise PaperRuntimeSessionError("paper outbox notification update failed.")
         except Exception as exc:
             atualizar_outbox_paper_trade(
                 outbox["event_id"],
@@ -525,12 +541,11 @@ def _remover_jobs_runtime_monitorado(context, session_id: str | None) -> None:
             job.schedule_removal()
 
 
-def _coletar_runtime_observed_state(*, session, decision, df, trades_abertos, preco_atual, regime_info):
+def _coletar_runtime_observed_state(*, session, decision, df, trades_abertos, preco_atual, regime_info, data_fresh_hint=None):
     if df is None or getattr(df, "empty", True):
-        raise PaperRuntimeSessionError("runtime dataframe is required.")
-
-    if "close_time" not in df.columns:
-        data_fresh = False
+        data_fresh = bool(data_fresh_hint) if data_fresh_hint is not None else False
+    elif "close_time" not in df.columns:
+        data_fresh = bool(data_fresh_hint) if data_fresh_hint is not None else False
     else:
         ultimo_close_time = df["close_time"].iloc[-1]
         try:
@@ -540,7 +555,7 @@ def _coletar_runtime_observed_state(*, session, decision, df, trades_abertos, pr
             else:
                 data_fresh = (datetime.now(timezone.utc) - close_dt.astimezone(timezone.utc)).total_seconds() <= 2 * 3600
         except Exception:
-            data_fresh = False
+            data_fresh = bool(data_fresh_hint) if data_fresh_hint is not None else False
 
     session_id = session.record.session_id
     paper_trades = [
@@ -636,23 +651,17 @@ def _coletar_runtime_observed_state(*, session, decision, df, trades_abertos, pr
             spread_cost = Decimal(str(persisted_cost_source.get("spread_cost") or 0))
             slippage_cost = Decimal(str(persisted_cost_source.get("slippage_cost") or 0))
             entry_notional = abs(quantidade_persistida * (fill_price_persistido or preco_base_persistido or Decimal("0")))
-            exit_notional = abs(quantidade_persistida * (saida_persistida or preco_base_persistido or Decimal("0")))
+            exit_notional = abs(quantidade_persistida * (saida_persistida or preco_base_persistido or Decimal("0"))) if exit_fee > 0 else Decimal("0")
+            total_notional = entry_notional + exit_notional if exit_notional > 0 else entry_notional
             observed_costs = {
                 "entry_fee_rate": (entry_fee / entry_notional) if entry_notional > 0 else Decimal(str(costs.get("entry_fee_rate", "0.0004"))),
                 "exit_fee_rate": (exit_fee / exit_notional) if exit_notional > 0 else Decimal(str(costs.get("exit_fee_rate", "0.0004"))),
-                "spread_bps": ((spread_cost / abs(quantidade_persistida * preco_base_persistido)) * Decimal("10000"))
-                if quantidade_persistida > 0 and preco_base_persistido > 0 and spread_cost >= 0
+                "spread_bps": ((spread_cost / total_notional) * Decimal("10000"))
+                if quantidade_persistida > 0 and total_notional > 0 and spread_cost >= 0
                 else Decimal(str(costs.get("spread_bps", "5"))),
-                "slippage_bps": ((slippage_cost / abs(quantidade_persistida * preco_base_persistido)) * Decimal("10000"))
-                if quantidade_persistida > 0 and preco_base_persistido > 0 and slippage_cost >= 0
+                "slippage_bps": ((slippage_cost / total_notional) * Decimal("10000"))
+                if quantidade_persistida > 0 and total_notional > 0 and slippage_cost >= 0
                 else Decimal(str(costs.get("slippage_bps", "5"))),
-                "entry_fee": entry_fee,
-                "exit_fee": exit_fee,
-                "spread_cost": spread_cost,
-                "slippage_cost": slippage_cost,
-                "pnl_bruto": Decimal(str(persisted_cost_source.get("pnl_bruto") or 0)),
-                "custos_totais": Decimal(str(persisted_cost_source.get("custos_totais") or 0)),
-                "pnl_liquido": Decimal(str(persisted_cost_source.get("pnl_liquido") or 0)),
             }
         except Exception:
             observed_costs = {
@@ -725,25 +734,9 @@ async def _processar_trades_paper_abertos(context, chat_id, trades, candle, df, 
                     "close",
                     f"{trade['id']}:{saida}",
                 )
-                runtime_observed_post = None
-                runtime_snapshot_post = None
-                if runtime_session is not None:
-                    trades_pos = [item for item in trades if item["id"] != trade["id"]]
-                    runtime_observed_post = _coletar_runtime_observed_state(
-                        session=runtime_session,
-                        decision=runtime_session.decision,
-                        df=df,
-                        trades_abertos=trades_pos,
-                        preco_atual=saida,
-                        regime_info=regime_info,
-                    )
-                    runtime_snapshot_post = build_snapshot_from_observed_state(
-                        session=runtime_session.record,
-                        decision=runtime_session.decision,
-                        observed=runtime_observed_post,
-                        timestamp_utc=close_candle_time,
-                    )
                 mensagem_fechamento = f"Paper SOL fechado por {'STOP' if stop_atingido else 'TAKE PROFIT'}. Resultado: {fmt_num(lucro_percent, '+.2f')}%"
+
+                data_fresh_snapshot = (datetime.now(timezone.utc) - close_candle_time).total_seconds() <= 2 * 3600
 
                 def _outbox_factory_close(trade_id, _timestamp):
                     runtime_events = [
@@ -795,13 +788,17 @@ async def _processar_trades_paper_abertos(context, chat_id, trades, candle, df, 
                         candle_close_time=close_candle_time,
                         idempotency_key=close_idempotency_key,
                         runtime_events=runtime_events,
-                        snapshot_observed=runtime_observed_post or {},
+                        snapshot_context={
+                            "preco_atual": saida,
+                            "regime_info": regime_info,
+                            "data_fresh": data_fresh_snapshot,
+                        },
                         telegram_text=mensagem_fechamento,
                         telegram_chat_id=chat_id,
                     )
                     return _paper_runtime_outbox_record(outbox_payload)
 
-                finalizar_trade_paper(
+                fechamento_ok = finalizar_trade_paper(
                     trade["id"],
                     float(resultado_trade.exit_price),
                     float(resultado_trade.pnl_percent),
@@ -821,6 +818,8 @@ async def _processar_trades_paper_abertos(context, chat_id, trades, candle, df, 
                     close_idempotency_key=close_idempotency_key,
                     outbox_event_factory=_outbox_factory_close if runtime_session is not None else None,
                 )
+                if not fechamento_ok:
+                    raise PaperRuntimeSessionError("paper trade close failed.")
                 if runtime_session is not None:
                     await _reconciliar_paper_runtime_outbox(
                         context,
@@ -868,18 +867,9 @@ async def _processar_trades_paper_abertos(context, chat_id, trades, candle, df, 
                     "close",
                     f"{trade['id']}:{saida}",
                 )
-                runtime_observed_post = None
-                if runtime_session is not None:
-                    trades_pos = [item for item in trades if item["id"] != trade["id"]]
-                    runtime_observed_post = _coletar_runtime_observed_state(
-                        session=runtime_session,
-                        decision=runtime_session.decision,
-                        df=df,
-                        trades_abertos=trades_pos,
-                        preco_atual=saida,
-                        regime_info=regime_info,
-                    )
                 mensagem_fechamento = f"Paper SOL fechado por {'STOP' if stop_atingido else 'TAKE PROFIT'}. Resultado: {fmt_num(lucro_percent, '+.2f')}%"
+
+                data_fresh_snapshot = (datetime.now(timezone.utc) - close_candle_time).total_seconds() <= 2 * 3600
 
                 def _outbox_factory_close(trade_id, _timestamp):
                     runtime_events = [
@@ -932,13 +922,17 @@ async def _processar_trades_paper_abertos(context, chat_id, trades, candle, df, 
                             candle_close_time=close_candle_time,
                             idempotency_key=close_idempotency_key,
                             runtime_events=runtime_events,
-                            snapshot_observed=runtime_observed_post or {},
+                            snapshot_context={
+                                "preco_atual": saida,
+                                "regime_info": regime_info,
+                                "data_fresh": data_fresh_snapshot,
+                            },
                             telegram_text=mensagem_fechamento,
                             telegram_chat_id=chat_id,
                         )
                     )
 
-                finalizar_trade_paper(
+                fechamento_ok = finalizar_trade_paper(
                     trade["id"],
                     float(resultado_trade.exit_price),
                     float(resultado_trade.pnl_percent),
@@ -958,6 +952,8 @@ async def _processar_trades_paper_abertos(context, chat_id, trades, candle, df, 
                     close_idempotency_key=close_idempotency_key,
                     outbox_event_factory=_outbox_factory_close if runtime_session is not None else None,
                 )
+                if not fechamento_ok:
+                    raise PaperRuntimeSessionError("paper trade close failed.")
                 if runtime_session is not None:
                     await _reconciliar_paper_runtime_outbox(
                         context,
@@ -1312,23 +1308,7 @@ async def monitorar_paper_sol(context):
             "status": "open",
             "valor_arriscado": float(trade_intent.risk_amount),
         }
-        runtime_observed_post = None
-        runtime_snapshot_post = None
-        if runtime_session is not None:
-            runtime_observed_post = _coletar_runtime_observed_state(
-                session=runtime_session,
-                decision=runtime_session.decision,
-                df=df,
-                trades_abertos=aberto + [observed_trade_aberto],
-                preco_atual=preco_atual,
-                regime_info=regime_info,
-            )
-            runtime_snapshot_post = build_snapshot_from_observed_state(
-                session=runtime_session.record,
-                decision=runtime_session.decision,
-                observed=runtime_observed_post,
-                timestamp_utc=candle_close_time,
-            )
+        data_fresh_snapshot = (datetime.now(timezone.utc) - candle_close_time).total_seconds() <= 2 * 3600
 
         def _outbox_factory_open(trade_id, _timestamp):
             runtime_events = [
@@ -1378,9 +1358,13 @@ async def monitorar_paper_sol(context):
                 session_id=runtime_session.record.session_id if runtime_session else session_scope_id,
                 candle_close_time=candle_close_time,
                 idempotency_key=open_idempotency_key,
-                    runtime_events=runtime_events,
-                    snapshot_observed=runtime_observed_post or {},
-                    telegram_text=mensagem_abertura,
+                runtime_events=runtime_events,
+                snapshot_context={
+                    "preco_atual": preco_atual,
+                    "regime_info": regime_info,
+                    "data_fresh": data_fresh_snapshot,
+                },
+                telegram_text=mensagem_abertura,
                 telegram_chat_id=chat_id,
             )
             return _paper_runtime_outbox_record(outbox_payload)

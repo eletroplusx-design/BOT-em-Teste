@@ -693,6 +693,189 @@ def test_monitoracao_com_sessao_valida_revalida_e_permite_ordem(monkeypatch, tmp
     assert ctx.bot.sent
 
 
+def test_outbox_real_transita_abertura_fechamento_e_notificacao(monkeypatch, tmp_path):
+    import storage
+
+    trades_db = tmp_path / "paper_trades.db"
+    monkeypatch.setattr(storage, "DB_NAME", str(trades_db))
+    storage.inicializar_banco(str(trades_db))
+    monkeypatch.setattr(
+        paper_engine,
+        "obter_outbox_paper_pendentes",
+        lambda session_id=None: storage.obter_outbox_paper_pendentes(session_id=session_id, db_name=str(trades_db)),
+    )
+    monkeypatch.setattr(
+        paper_engine,
+        "atualizar_outbox_paper_trade",
+        lambda event_id, **kwargs: storage.atualizar_outbox_paper_trade(event_id, db_name=str(trades_db), **kwargs),
+    )
+    monkeypatch.setattr(
+        paper_engine,
+        "obter_trades_paper_abertos",
+        lambda symbol=None, session_id=None: storage.obter_trades_paper_abertos(symbol=symbol, session_id=session_id),
+    )
+
+    store = _store(tmp_path)
+    session = _session(store, session_id="real-outbox")
+    import sqlite3
+
+    contexto = _DummyContext({"chat_id": 123, "user_id": 123, "chat_type": "private", "session_id": session.record.session_id})
+
+    open_time = datetime(2026, 7, 11, 12, 0, tzinfo=timezone.utc)
+    close_time = datetime(2026, 7, 11, 13, 0, tzinfo=timezone.utc)
+
+    def _open_outbox_factory(trade_id, timestamp):
+        return paper_engine._paper_runtime_outbox_record(
+            paper_engine._paper_runtime_outbox_payload(
+                operation_type="OPEN",
+                trade_id=trade_id,
+                session_id=session.record.session_id,
+                candle_close_time=open_time,
+                idempotency_key=f"open:{trade_id}",
+                runtime_events=[
+                    {
+                        "event_type": paper_engine.PaperRuntimeEventType.TRADE_RECORDED.value,
+                        "result": "OPENED",
+                        "idempotency_key": f"open-event:{trade_id}",
+                        "payload": {"action": "OPEN", "trade_id": trade_id, "session_id": session.record.session_id},
+                    }
+                ],
+                snapshot_context={
+                    "preco_atual": 100.0,
+                    "regime_info": {"regime": "BULL", "adx": 30, "volatilidade": "NORMAL"},
+                    "data_fresh": True,
+                },
+                telegram_text="Paper SOL aberto",
+                telegram_chat_id=123,
+            )
+        )
+
+    trade_id = storage.registrar_trade_paper(
+        "SOLUSDT",
+        "COMPRA",
+        100.0,
+        95.0,
+        110.0,
+        1.0,
+        100.0,
+        2.0,
+        session_id=session.record.session_id,
+        idempotency_key="idem-open",
+        candle_close_time=open_time,
+        signal_identity="signal-open",
+        preco_base=100.0,
+        fill_price=100.0,
+        entry_fee=0.0,
+        spread_cost=0.0,
+        slippage_cost=0.0,
+        outbox_event_factory=_open_outbox_factory,
+        db_name=str(trades_db),
+    )
+    assert trade_id is not None
+
+    import asyncio
+
+    asyncio.run(paper_engine._reconciliar_paper_runtime_outbox(contexto, session, session_scope_id=session.record.session_id, chat_id=123))
+    assert len(contexto.bot.sent) == 1
+
+    with sqlite3.connect(trades_db) as conn:
+        row = conn.execute(
+            """
+            SELECT status, runtime_delivered_at_utc, snapshot_applied_at_utc, telegram_sent_at_utc
+            FROM paper_trade_outbox
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        assert row is not None
+        assert row[0] == "NOTIFIED"
+        assert row[1] is not None
+        assert row[2] is not None
+        assert row[3] is not None
+
+    def _close_outbox_factory(trade_id, timestamp):
+        return paper_engine._paper_runtime_outbox_record(
+            paper_engine._paper_runtime_outbox_payload(
+                operation_type="CLOSE",
+                trade_id=trade_id,
+                session_id=session.record.session_id,
+                candle_close_time=close_time,
+                idempotency_key=f"close:{trade_id}",
+                runtime_events=[
+                    {
+                        "event_type": paper_engine.PaperRuntimeEventType.TRADE_RECORDED.value,
+                        "result": "CLOSED",
+                        "idempotency_key": f"close-event:{trade_id}",
+                        "payload": {
+                            "action": "CLOSE",
+                            "trade_id": trade_id,
+                            "session_id": session.record.session_id,
+                            "direcao": "COMPRA",
+                            "saida": 110.0,
+                        },
+                    }
+                ],
+                snapshot_context={
+                    "preco_atual": 110.0,
+                    "regime_info": {"regime": "BULL", "adx": 30, "volatilidade": "NORMAL"},
+                    "data_fresh": True,
+                },
+                telegram_text="Paper SOL fechado",
+                telegram_chat_id=123,
+            )
+        )
+
+    fechamento_ok = storage.finalizar_trade_paper(
+        trade_id,
+        110.0,
+        10.0,
+        10.0,
+        "GANHO",
+        "TAKE_PROFIT",
+        idempotency_key="idem-close",
+        session_id=session.record.session_id,
+        candle_close_time=close_time,
+        fill_price=110.0,
+        pnl_bruto=10.0,
+        custos_totais=0.0,
+        pnl_liquido=10.0,
+        exit_fee=0.0,
+        spread_cost=0.0,
+        slippage_cost=0.0,
+        close_idempotency_key="idem-close",
+        outbox_event_factory=_close_outbox_factory,
+        db_name=str(trades_db),
+    )
+    assert fechamento_ok is True
+
+    asyncio.run(paper_engine._reconciliar_paper_runtime_outbox(contexto, session, session_scope_id=session.record.session_id, chat_id=123))
+    assert len(contexto.bot.sent) == 2
+
+    with sqlite3.connect(trades_db) as conn:
+        outbox_rows = conn.execute(
+            """
+            SELECT status, runtime_delivered_at_utc, snapshot_applied_at_utc, telegram_sent_at_utc
+            FROM paper_trade_outbox
+            ORDER BY id
+            """
+        ).fetchall()
+        assert outbox_rows
+        assert all(row[0] == "NOTIFIED" for row in outbox_rows)
+        assert all(row[1] is not None and row[2] is not None and row[3] is not None for row in outbox_rows)
+
+    with sqlite3.connect(store.db_path) as conn:
+        snapshot_count = conn.execute(
+            "SELECT COUNT(*) FROM paper_runtime_snapshots WHERE session_id = ?",
+            (session.record.session_id,),
+        ).fetchone()[0]
+        event_count = conn.execute(
+            "SELECT COUNT(*) FROM paper_runtime_events WHERE session_id = ?",
+            (session.record.session_id,),
+        ).fetchone()[0]
+    assert snapshot_count >= 1
+    assert event_count >= 1
+
+
 @pytest.mark.parametrize(
     "missing_field",
     [
