@@ -22,6 +22,14 @@ from .models import (
 
 SCHEMA_VERSION = 1
 
+_REQUIRED_TABLES = {
+    "paper_runtime_meta",
+    "paper_runtime_sessions",
+    "paper_runtime_snapshots",
+    "paper_runtime_events",
+    "paper_runtime_idempotency",
+}
+
 
 def _now_utc() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -162,8 +170,78 @@ class PaperRuntimeStore:
                     "INSERT OR REPLACE INTO paper_runtime_meta(key, value) VALUES('schema_version', ?)",
                     (str(SCHEMA_VERSION),),
                 )
+            elif str(current["value"]) != str(SCHEMA_VERSION):
+                raise PaperRuntimeStoreError("unsupported runtime schema version.")
+            self._validate_schema_locked(conn)
             conn.execute("COMMIT")
         self._initialized = True
+
+    def _validate_schema_locked(self, conn: sqlite3.Connection) -> None:
+        tables = {row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        missing = sorted(_REQUIRED_TABLES - tables)
+        if missing:
+            raise PaperRuntimeStoreError(f"runtime schema missing tables: {', '.join(missing)}")
+        expected_columns = {
+            "paper_runtime_sessions": {
+                "session_id",
+                "state",
+                "version",
+                "contract_hash",
+                "decision_json",
+                "decision_hash",
+                "evidence_hash",
+                "paper_limits_hash",
+                "strategy_version",
+                "symbol",
+                "interval",
+                "configuration_hash",
+                "paper_limits_json",
+                "configuration_json",
+                "execution_contract_json",
+                "execution_contract_hash",
+                "paper_only",
+                "created_at_utc",
+                "updated_at_utc",
+                "session_started_utc",
+                "last_snapshot_hash",
+                "last_event_hash",
+                "suspended_reason",
+                "completed_reason",
+                "failed_reason",
+                "active",
+            },
+            "paper_runtime_snapshots": {
+                "session_id",
+                "sequence",
+                "snapshot_hash",
+                "timestamp_utc",
+                "payload_json",
+                "decision_hash",
+                "evidence_hash",
+                "result_status",
+                "created_at_utc",
+            },
+            "paper_runtime_events": {
+                "event_id",
+                "session_id",
+                "sequence",
+                "event_type",
+                "timestamp_utc",
+                "previous_hash",
+                "content_hash",
+                "event_hash",
+                "decision_hash",
+                "evidence_hash",
+                "result",
+                "payload_json",
+                "created_at_utc",
+            },
+        }
+        for table, required_columns in expected_columns.items():
+            columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+            missing_columns = sorted(required_columns - columns)
+            if missing_columns:
+                raise PaperRuntimeStoreError(f"runtime schema missing columns for {table}: {', '.join(missing_columns)}")
 
     def _ensure_initialized(self, *, require_exists: bool = False) -> None:
         if self._initialized:
@@ -320,6 +398,40 @@ class PaperRuntimeStore:
             conn.execute("COMMIT")
             return self.load_session(contract.session_id)
 
+    def _store_idempotent_response(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        idempotency_key: str,
+        session_id: str,
+        kind: str,
+        request_payload: Mapping[str, Any],
+        response_payload: Mapping[str, Any],
+    ) -> None:
+        existing = conn.execute(
+            "SELECT response_json FROM paper_runtime_idempotency WHERE idempotency_key = ?",
+            (idempotency_key,),
+        ).fetchone()
+        request_hash = sha256_hex({"kind": kind, "request": request_payload})
+        response_json = json.dumps(
+            {
+                "request_hash": request_hash,
+                "request": sanitize_payload(dict(request_payload)),
+                "response": serialize_value(response_payload),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        if existing is not None:
+            stored = json.loads(existing["response_json"])
+            if stored.get("request_hash") != request_hash:
+                raise PaperRuntimeSessionError("idempotency key reuse with different payload.")
+            return
+        conn.execute(
+            "INSERT INTO paper_runtime_idempotency(idempotency_key, session_id, kind, response_json, created_at_utc) VALUES (?, ?, ?, ?, ?)",
+            (idempotency_key, session_id, kind, response_json, _now_utc()),
+        )
+
     def _append_event_locked(
         self,
         conn: sqlite3.Connection,
@@ -339,6 +451,8 @@ class PaperRuntimeStore:
             ).fetchone()
             if row is not None:
                 data = json.loads(row["response_json"])
+                if data.get("request_hash") != sha256_hex({"kind": event_type.value, "request": {"payload": payload, "decision_hash": decision_hash, "evidence_hash": evidence_hash, "result": result, "session_id": session_id}}):
+                    raise PaperRuntimeSessionError("idempotency key reuse with different payload.")
                 return PaperRuntimeEvent(
                     event_id=data["event_id"],
                     session_id=data["session_id"],
@@ -370,6 +484,10 @@ class PaperRuntimeStore:
                 "payload": payload_sanitized,
                 "result": result,
                 "timestamp_utc": timestamp_utc.isoformat().replace("+00:00", "Z"),
+                "decision_hash": decision_hash,
+                "evidence_hash": evidence_hash,
+                "session_id": session_id,
+                "sequence": sequence,
             }
         )
         event_hash = chain_hash(
@@ -417,9 +535,13 @@ class PaperRuntimeStore:
             ),
         )
         if idempotency_key:
-            conn.execute(
-                "INSERT OR REPLACE INTO paper_runtime_idempotency(idempotency_key, session_id, kind, response_json, created_at_utc) VALUES (?, ?, ?, ?, ?)",
-                (idempotency_key, session_id, event_type.value, json.dumps(event.as_dict(), ensure_ascii=False, sort_keys=True), _now_utc()),
+            self._store_idempotent_response(
+                conn,
+                idempotency_key=idempotency_key,
+                session_id=session_id,
+                kind=event_type.value,
+                request_payload={"payload": payload_sanitized, "decision_hash": decision_hash, "evidence_hash": evidence_hash, "result": result, "session_id": session_id},
+                response_payload=event.as_dict(),
             )
         conn.execute(
             """
@@ -475,6 +597,18 @@ class PaperRuntimeStore:
         snapshot_hash = str(payload.get("snapshot_hash") or sha256_hex(payload))
         with self._connect(require_exists=True) as conn:
             conn.execute("BEGIN IMMEDIATE")
+            if idempotency_key:
+                row = conn.execute(
+                    "SELECT response_json FROM paper_runtime_idempotency WHERE idempotency_key = ?",
+                    (idempotency_key,),
+                ).fetchone()
+                request_hash = sha256_hex({"kind": "SNAPSHOT_RECORDED", "request": {"snapshot": payload, "decision_hash": decision_hash, "evidence_hash": evidence_hash, "result_status": result_status, "session_id": session_id}})
+                if row is not None:
+                    stored = json.loads(row["response_json"])
+                    if stored.get("request_hash") != request_hash:
+                        raise PaperRuntimeSessionError("idempotency key reuse with different payload.")
+                    conn.execute("COMMIT")
+                    return stored.get("response", {})
             existing = conn.execute(
                 "SELECT * FROM paper_runtime_snapshots WHERE session_id = ? AND snapshot_hash = ?",
                 (session_id, snapshot_hash),
@@ -508,6 +642,16 @@ class PaperRuntimeStore:
                     _now_utc(),
                 ),
             )
+            self._append_event_locked(
+                conn,
+                session_id=session_id,
+                event_type=PaperRuntimeEventType.SNAPSHOT_RECORDED,
+                payload={"snapshot": payload},
+                decision_hash=decision_hash,
+                evidence_hash=evidence_hash,
+                result=result_status,
+                idempotency_key=None,
+            )
             conn.execute(
                 """
                 UPDATE paper_runtime_sessions
@@ -528,6 +672,15 @@ class PaperRuntimeStore:
                 (_now_utc(), snapshot_hash, result_status, result_status, result_status, session_id),
             )
             conn.execute("COMMIT")
+            if idempotency_key:
+                self._store_idempotent_response(
+                    conn,
+                    idempotency_key=idempotency_key,
+                    session_id=session_id,
+                    kind="SNAPSHOT_RECORDED",
+                    request_payload={"snapshot": payload, "decision_hash": decision_hash, "evidence_hash": evidence_hash, "result_status": result_status, "session_id": session_id},
+                    response_payload={"session_id": session_id, "sequence": sequence, "snapshot_hash": snapshot_hash, "result_status": result_status},
+                )
             return {
                 "session_id": session_id,
                 "sequence": sequence,
@@ -542,11 +695,24 @@ class PaperRuntimeStore:
         expected_version: int,
         next_state: PaperRuntimeState,
         reason: str | None = None,
+        idempotency_key: str | None = None,
     ) -> PaperRuntimeSessionRecord:
         self._ensure_initialized(require_exists=True)
         next_state = PaperRuntimeState(next_state)
         with self._connect(require_exists=True) as conn:
             conn.execute("BEGIN IMMEDIATE")
+            if idempotency_key:
+                row = conn.execute(
+                    "SELECT response_json FROM paper_runtime_idempotency WHERE idempotency_key = ?",
+                    (idempotency_key,),
+                ).fetchone()
+                request_hash = sha256_hex({"kind": "TRANSITION", "request": {"session_id": session_id, "expected_version": expected_version, "next_state": next_state.value, "reason": reason}})
+                if row is not None:
+                    stored = json.loads(row["response_json"])
+                    if stored.get("request_hash") != request_hash:
+                        raise PaperRuntimeSessionError("idempotency key reuse with different payload.")
+                    conn.execute("COMMIT")
+                    return self._row_to_session(self._fetch_session_row(conn, session_id))
             row = self._fetch_session_row(conn, session_id)
             if row is None:
                 raise PaperRuntimeStoreError("runtime session not found.")
@@ -584,7 +750,30 @@ class PaperRuntimeStore:
             assignments = ", ".join(f"{key} = :{key}" for key in fields)
             fields["session_id"] = session_id
             conn.execute(f"UPDATE paper_runtime_sessions SET {assignments} WHERE session_id = :session_id", fields)
+            self._append_event_locked(
+                conn,
+                session_id=session_id,
+                event_type={
+                    PaperRuntimeState.SUSPENDED: PaperRuntimeEventType.SESSION_SUSPENDED,
+                    PaperRuntimeState.COMPLETED: PaperRuntimeEventType.SESSION_COMPLETED,
+                    PaperRuntimeState.FAILED: PaperRuntimeEventType.SESSION_FAILED,
+                }.get(next_state, PaperRuntimeEventType.SESSION_STARTED),
+                payload={"next_state": next_state.value, "reason": reason},
+                decision_hash=current.decision_hash,
+                evidence_hash=current.evidence_hash,
+                result=next_state.value,
+                idempotency_key=None,
+            )
             conn.execute("COMMIT")
+            if idempotency_key:
+                self._store_idempotent_response(
+                    conn,
+                    idempotency_key=idempotency_key,
+                    session_id=session_id,
+                    kind="TRANSITION",
+                    request_payload={"session_id": session_id, "expected_version": expected_version, "next_state": next_state.value, "reason": reason},
+                    response_payload={"session_id": session_id, "next_state": next_state.value},
+                )
             return self.load_session(session_id)
 
     def load_events(self, session_id: str) -> list[PaperRuntimeEvent]:
@@ -598,6 +787,18 @@ class PaperRuntimeStore:
         previous_hash = ""
         for row in rows:
             payload = json.loads(row["payload_json"])
+            content_hash = event_content_hash(
+                {
+                    "event_type": row["event_type"],
+                    "payload": payload,
+                    "result": row["result"],
+                    "timestamp_utc": row["timestamp_utc"],
+                    "decision_hash": row["decision_hash"],
+                    "evidence_hash": row["evidence_hash"],
+                    "session_id": row["session_id"],
+                    "sequence": row["sequence"],
+                }
+            )
             event = PaperRuntimeEvent(
                 event_id=row["event_id"],
                 session_id=row["session_id"],
@@ -614,12 +815,12 @@ class PaperRuntimeStore:
             )
             expected_hash = chain_hash(
                 previous_hash,
-                event.content_hash,
+                content_hash,
                 session_id=event.session_id,
                 sequence=event.sequence,
                 event_type=event.event_type.value,
             )
-            if event.previous_hash != previous_hash or event.event_hash != expected_hash:
+            if event.content_hash != content_hash or event.previous_hash != previous_hash or event.event_hash != expected_hash:
                 raise PaperRuntimeAuditError("audit chain diverged.")
             previous_hash = event.event_hash
             events.append(event)

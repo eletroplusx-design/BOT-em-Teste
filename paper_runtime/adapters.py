@@ -41,16 +41,12 @@ def create_monitored_session(
     session_started_utc: datetime,
     store: PaperRuntimeStore | None = None,
 ) -> PaperRuntimeSession:
-    if decision.status is not PromotionStatus.APPROVED_FOR_MONITORED_PAPER:
-        raise PaperRuntimeSessionError("decision must be approved for monitored paper.")
-    runtime_store = store or get_default_store()
-    contract = build_runtime_contract_from_decision(
+    return PaperRuntimeSession.create_from_decision(
         decision,
         session_id=session_id,
         session_started_utc=session_started_utc,
+        store=store,
     )
-    record = runtime_store.create_session(contract)
-    return PaperRuntimeSession(record, contract, runtime_store, decision=decision)
 
 
 def get_monitored_session(

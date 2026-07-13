@@ -15,6 +15,7 @@ def _autorizar_chat_teste(monkeypatch):
     monkeypatch.setattr(config, "TELEGRAM_AUTHORIZED_IDS", {123})
     monkeypatch.setattr(config, "TELEGRAM_AUTHORIZED_CHAT_IDS", {123})
     monkeypatch.setattr(config, "TELEGRAM_GROUPS_ENABLED", False)
+    monkeypatch.setattr(paper_engine, "PAPER_MONITORED_RUNTIME_REQUIRED", False)
     yield
 
 

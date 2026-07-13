@@ -60,13 +60,14 @@ def _decision_from_record(record: PaperRuntimeSessionRecord) -> PromotionDecisio
     criteria = tuple(
         PromotionCriterionResult(
             name=item.get("name", "criterion"),
-            passed=bool(item.get("passed", False)),
+            passed=(item["passed"] if type(item.get("passed")) is bool else _raise_stored_bool_error("stored decision criterion passed flag must be boolean.")),
             expected=item.get("expected"),
             actual=item.get("actual"),
             reason=item.get("reason", ""),
         )
         for item in decision_data.get("criteria_evaluated", [])
     )
+
     decision = PromotionDecision(
         status=PromotionStatus(decision_data.get("status", PromotionStatus.APPROVED_FOR_MONITORED_PAPER.value)),
         frozen_selection=frozen_selection,
@@ -92,9 +93,32 @@ def _decision_from_record(record: PaperRuntimeSessionRecord) -> PromotionDecisio
     return decision
 
 
+def _validate_recovered_session(record: PaperRuntimeSessionRecord, decision: PromotionDecision, contract: PaperRuntimeContract) -> None:
+    if record.decision_hash != decision.decision_hash:
+        raise PaperRuntimeSessionError("stored decision hash mismatch.")
+    if record.evidence_hash != decision.evidence_hash:
+        raise PaperRuntimeSessionError("stored evidence hash mismatch.")
+    if record.paper_limits_hash != decision.paper_limits_hash:
+        raise PaperRuntimeSessionError("stored paper limits hash mismatch.")
+    if record.contract_hash != contract.contract_hash:
+        raise PaperRuntimeSessionError("stored contract hash mismatch.")
+    if record.configuration_hash != promotion_hash({"configuration": decision.frozen_selection.as_dict()}):
+        raise PaperRuntimeSessionError("stored configuration hash mismatch.")
+    if record.execution_contract_hash != promotion_hash({"execution_contract": decision.phase5_manifest.get("execution_contract", {})}):
+        raise PaperRuntimeSessionError("stored execution contract hash mismatch.")
+    if record.paper_only is not True or not contract.paper_only:
+        raise PaperRuntimeSessionError("paper-only runtime contract mismatch.")
+    if record.session_id != contract.session_id or record.session_started_utc != contract.session_started_utc:
+        raise PaperRuntimeSessionError("session identity mismatch.")
+
+
+def _raise_stored_bool_error(message: str) -> bool:
+    raise PaperRuntimeSessionError(message)
+
+
 def _contract_from_record(record: PaperRuntimeSessionRecord, decision: PromotionDecision | None = None) -> PaperRuntimeContract:
     if decision is not None:
-        paper_limits = decision.paper_limits
+        paper_limits = MonitoredPaperLimits(**decision.paper_limits).as_dict()
         configuration = decision.frozen_selection.as_dict()
         execution_contract = decision.phase5_manifest.get("execution_contract", {})
     else:
@@ -158,6 +182,8 @@ class PaperRuntimeSession:
         session_started_utc: datetime,
         store: PaperRuntimeStore | None = None,
     ) -> "PaperRuntimeSession":
+        if type(decision) is not PromotionDecision:
+            raise PaperRuntimeSessionError("promotion decision must be an exact PromotionDecision instance.")
         if decision.status is not PromotionStatus.APPROVED_FOR_MONITORED_PAPER:
             raise PaperRuntimeSessionError("only approved monitored paper decisions can start a runtime session.")
         if decision.paper_limits_hash != promotion_hash(decision.paper_limits):
@@ -192,6 +218,8 @@ class PaperRuntimeSession:
             raise PaperRuntimeSessionError("runtime session not found.")
         decision = _decision_from_record(record)
         contract = _contract_from_record(record, decision)
+        _validate_recovered_session(record, decision, contract)
+        runtime_store.assert_audit_chain(session_id)
         return cls(record, contract, runtime_store, decision=decision)
 
     def reload(self) -> PaperRuntimeSessionRecord:

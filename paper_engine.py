@@ -5,6 +5,7 @@ from decimal import Decimal
 from config import (
     CAPITAL_PAPER,
     FVG_JANELA,
+    PAPER_MONITORED_RUNTIME_REQUIRED,
     PAPER_TRADING_ATIVO,
     RR_MINIMO,
     STRATEGY_VERSION,
@@ -55,6 +56,9 @@ except Exception:  # pragma: no cover - fallback defensivo
     get_monitored_session = None
     build_snapshot_from_observed_state = None
     evaluate_monitored_session = None
+    PAPER_RUNTIME_AVAILABLE = False
+else:
+    PAPER_RUNTIME_AVAILABLE = True
 
 
 PAPER_SYMBOL = "SOLUSDT"
@@ -153,7 +157,7 @@ def registrar_decisao_observabilidade(**kwargs):
         log_decisao(**payload)
         atualizar_cache_log(payload)
     except Exception as exc:
-        logging.warning(f"Falha ao registrar decisao observabilidade: {exc}")
+        logging.warning(f"Falha ao registrar decisao observabilidade: {exc.__class__.__name__}")
 
 
 def esta_em_killzone():
@@ -172,7 +176,7 @@ def _obter_sinal_paper_sol():
         try:
             contextos = backtester._precomputar_contextos_otimizacao(df)
         except Exception as exc:
-            logging.warning(f"Falha ao precomputar contextos do paper SOL: {exc}")
+            logging.warning(f"Falha ao precomputar contextos do paper SOL: {exc.__class__.__name__}")
             return None
         if not contextos:
             return None
@@ -194,13 +198,13 @@ def _obter_sinal_paper_sol():
             payload.setdefault("motivo", payload.get("reason"))
             return payload
         except DomainValidationError as exc:
-            logging.warning(f"Falha ao validar sinal paper SOL: {exc}")
+            logging.warning(f"Falha ao validar sinal paper SOL: {exc.__class__.__name__}")
             return None
         except Exception as exc:
-            logging.warning(f"Falha ao validar sinal paper SOL: {exc}")
+            logging.warning(f"Falha ao validar sinal paper SOL: {exc.__class__.__name__}")
             return None
     except Exception as exc:
-        logging.warning(f"Falha ao gerar sinal paper SOL: {exc}")
+        logging.warning(f"Falha ao gerar sinal paper SOL: {exc.__class__.__name__}")
         return None
 
 
@@ -219,7 +223,7 @@ def _avaliar_filtros_paper(sinal, decisao_info, regime_info):
 
 
 def _obter_runtime_session_do_job(job_data):
-    if get_monitored_session is None:
+    if not PAPER_RUNTIME_AVAILABLE:
         return None
     if not job_data:
         return None
@@ -229,8 +233,206 @@ def _obter_runtime_session_do_job(job_data):
     try:
         return get_monitored_session(session_id=session_id)
     except Exception as exc:
-        logging.warning(f"Sessao paper monitorada indisponivel: {exc}")
+        logging.warning(f"Sessao paper monitorada indisponivel: {exc.__class__.__name__}")
         return None
+
+
+def _runtime_monitoring_enabled() -> bool:
+    return PAPER_MONITORED_RUNTIME_REQUIRED
+
+
+def _bloquear_runtime_monitorado(motivo: str, *, chat_id=None, regime_info=None, fonte_dados="N/D", erro="N/D", direcao="N/A", preco=None, adx=None, volume_status="N/D"):
+    registrar_decisao_observabilidade(
+        symbol=PAPER_SYMBOL,
+        modo="PAPER_SOL",
+        decisao="PAPER_SUSPENDED" if "sessao" in motivo.lower() or "runtime" in motivo.lower() else "ERRO",
+        direcao=direcao,
+        preco=preco,
+        regime=(regime_info or {}).get("regime", "N/D") if regime_info else "N/D",
+        adx=(regime_info or {}).get("adx") if regime_info else adx,
+        volume_status=(regime_info or {}).get("volatilidade", volume_status) if regime_info else volume_status,
+        motivo=motivo,
+        bloqueado_por="SESSION",
+        fonte_dados=fonte_dados,
+        erro=erro,
+    )
+
+
+def _remover_jobs_runtime_monitorado(context, session_id: str | None) -> None:
+    if not session_id:
+        return
+    try:
+        jobs = context.job_queue.get_jobs_by_name(PAPER_JOB_NAME)
+    except Exception:
+        return
+    for job in jobs:
+        job_data = getattr(job, "data", {}) or {}
+        if job_data.get("session_id") == session_id:
+            job.schedule_removal()
+
+
+def _coletar_runtime_observed_state(*, session, decision, df, trades_abertos, preco_atual, regime_info):
+    ultimo_close_time = df["close_time"].iloc[-1] if "close_time" in df.columns else None
+    data_fresh = True
+    if ultimo_close_time is not None:
+        try:
+            close_dt = ultimo_close_time.to_pydatetime() if hasattr(ultimo_close_time, "to_pydatetime") else ultimo_close_time
+            if close_dt.tzinfo is None:
+                data_fresh = False
+            else:
+                data_fresh = (datetime.now(timezone.utc) - close_dt.astimezone(timezone.utc)).total_seconds() <= 2 * 3600
+        except Exception:
+            data_fresh = False
+
+    paper_trades = [trade for trade in trades_abertos if trade.get("tipo") == "paper" or trade.get("status") == "open"]
+    closed_trades = []
+    try:
+        from storage import obter_ultimos_trades_paper
+
+        closed_trades = obter_ultimos_trades_paper(symbol=PAPER_SYMBOL, limite=50)
+    except Exception:
+        closed_trades = []
+
+    current_loss_streak = 0
+    for trade in reversed(closed_trades):
+        if float(trade.get("lucro_reais") or 0.0) < 0:
+            current_loss_streak += 1
+        elif float(trade.get("lucro_reais") or 0.0) > 0:
+            break
+
+    session_drawdown_percent = Decimal("0")
+    if closed_trades:
+        saldo = Decimal("0")
+        pico = Decimal("0")
+        for trade in closed_trades:
+            saldo += Decimal(str(trade.get("lucro_percent") or 0))
+            if saldo > pico:
+                pico = saldo
+            if pico > 0:
+                drawdown = ((pico - saldo) / pico) * Decimal("100")
+                if drawdown > session_drawdown_percent:
+                    session_drawdown_percent = drawdown
+
+    open_positions = len(paper_trades)
+    executed_trades = len(closed_trades) + open_positions
+    paper_capital_used = Decimal(str(max(0.0, sum(float(t.get("valor_arriscado") or 0.0) for t in paper_trades))))
+    risk_per_trade_percent = Decimal(str(decision.paper_limits.get("risk_per_trade_max_percent", "1")))
+    observed_costs = {
+        "entry_fee_rate": decision.phase5_manifest.get("costs", {}).get("entry_fee_rate", "0.0004"),
+        "exit_fee_rate": decision.phase5_manifest.get("costs", {}).get("exit_fee_rate", "0.0004"),
+        "spread_bps": decision.phase5_manifest.get("costs", {}).get("spread_bps", "5"),
+        "slippage_bps": decision.phase5_manifest.get("costs", {}).get("slippage_bps", "5"),
+    }
+    if not isinstance(regime_info, dict):
+        regime_info = {}
+    return {
+        "data_fresh": data_fresh,
+        "session_drawdown_percent": session_drawdown_percent,
+        "current_loss_streak": current_loss_streak,
+        "open_positions": open_positions,
+        "executed_trades": executed_trades,
+        "observed_costs": observed_costs,
+        "session_state": session.record.state.value,
+        "paper_capital_used": paper_capital_used if paper_capital_used > 0 else Decimal(str(preco_atual or 0)),
+        "risk_per_trade_percent": risk_per_trade_percent,
+        "internal_error": None,
+        "attempted_live": False,
+    }
+
+
+async def _processar_trades_paper_abertos(context, chat_id, trades, candle, regime_info, fonte_dados):
+    if not trades:
+        return False
+    for trade in trades:
+        direcao = trade["direcao"]
+        stop_loss = trade["stop_loss"]
+        take_profit = trade["take_profit"]
+        quantidade = trade["quantidade"]
+        entrada = trade["entrada"]
+
+        if direcao == "COMPRA":
+            stop_atingido = float(candle["low"]) <= stop_loss
+            take_atingido = float(candle["high"]) >= take_profit
+            if stop_atingido or take_atingido:
+                saida = stop_loss if stop_atingido else take_profit
+                lucro_reais = quantidade * (saida - entrada)
+                lucro_percent = (lucro_reais / CAPITAL_PAPER) * 100
+                resultado_trade = _construir_trade_result_paper(
+                    trade,
+                    saida,
+                    lucro_percent,
+                    lucro_reais,
+                    fonte_dados,
+                    "STOP" if stop_atingido else "TAKE_PROFIT",
+                )
+                finalizar_trade_paper(
+                    trade["id"],
+                    float(resultado_trade.exit_price),
+                    float(resultado_trade.pnl_percent),
+                    float(resultado_trade.pnl_reais),
+                    resultado_trade.resultado,
+                    resultado_trade.reason,
+                )
+                registrar_decisao_observabilidade(
+                    symbol=PAPER_SYMBOL,
+                    modo="PAPER_SOL",
+                    decisao="TRADE_FECHADO",
+                    direcao=direcao,
+                    preco=saida,
+                    regime=regime_info.get("regime"),
+                    adx=regime_info.get("adx"),
+                    volume_status=regime_info.get("volatilidade"),
+                    motivo="Fechado no STOP" if stop_atingido else "Fechado no TAKE PROFIT",
+                    bloqueado_por="N/A",
+                    fonte_dados=fonte_dados,
+                    erro="N/A",
+                )
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"Paper SOL fechado por {'STOP' if stop_atingido else 'TAKE PROFIT'}. Resultado: {fmt_num(lucro_percent, '+.2f')}%",
+                )
+        else:
+            stop_atingido = float(candle["high"]) >= stop_loss
+            take_atingido = float(candle["low"]) <= take_profit
+            if stop_atingido or take_atingido:
+                saida = stop_loss if stop_atingido else take_profit
+                lucro_reais = quantidade * (entrada - saida)
+                lucro_percent = (lucro_reais / CAPITAL_PAPER) * 100
+                resultado_trade = _construir_trade_result_paper(
+                    trade,
+                    saida,
+                    lucro_percent,
+                    lucro_reais,
+                    fonte_dados,
+                    "STOP" if stop_atingido else "TAKE_PROFIT",
+                )
+                finalizar_trade_paper(
+                    trade["id"],
+                    float(resultado_trade.exit_price),
+                    float(resultado_trade.pnl_percent),
+                    float(resultado_trade.pnl_reais),
+                    resultado_trade.resultado,
+                    resultado_trade.reason,
+                )
+                registrar_decisao_observabilidade(
+                    symbol=PAPER_SYMBOL,
+                    modo="PAPER_SOL",
+                    decisao="TRADE_FECHADO",
+                    direcao=direcao,
+                    preco=saida,
+                    regime=regime_info.get("regime"),
+                    adx=regime_info.get("adx"),
+                    volume_status=regime_info.get("volatilidade"),
+                    motivo="Fechado no STOP" if stop_atingido else "Fechado no TAKE PROFIT",
+                    bloqueado_por="N/A",
+                    fonte_dados=fonte_dados,
+                    erro="N/A",
+                )
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"Paper SOL fechado por {'STOP' if stop_atingido else 'TAKE PROFIT'}. Resultado: {fmt_num(lucro_percent, '+.2f')}%",
+                )
+    return True
 
 
 async def monitorar_paper_sol(context):
@@ -246,22 +448,24 @@ async def monitorar_paper_sol(context):
             logging.warning("Monitoramento paper SOL bloqueado por autorizacao.")
             return
         runtime_session = _obter_runtime_session_do_job(job_data)
-        if job_data.get("session_id") and runtime_session is None:
-            registrar_decisao_observabilidade(
-                symbol=PAPER_SYMBOL,
-                modo="PAPER_SOL",
-                decisao="ERRO",
-                direcao="N/A",
-                preco=None,
-                regime="N/D",
-                adx=None,
-                volume_status="N/D",
-                motivo="Sessao paper monitorada indisponivel.",
-                bloqueado_por="SESSION",
-                fonte_dados="N/D",
-                erro="sessao monitora ausente",
-            )
-            return
+        if _runtime_monitoring_enabled():
+            session_id = job_data.get("session_id")
+            if not session_id or runtime_session is None or not runtime_session.is_running():
+                _bloquear_runtime_monitorado(
+                    "Sessao paper monitorada indisponivel.",
+                    chat_id=chat_id,
+                    fonte_dados="N/D",
+                    erro="runtime indisponivel",
+                )
+                return
+            if build_snapshot_from_observed_state is None or evaluate_monitored_session is None:
+                _bloquear_runtime_monitorado(
+                    "Runtime paper monitorado indisponivel.",
+                    chat_id=chat_id,
+                    fonte_dados="N/D",
+                    erro="runtime import indisponivel",
+                )
+                return
         if backtester is None:
             registrar_decisao_observabilidade(
                 symbol=PAPER_SYMBOL,
@@ -304,214 +508,29 @@ async def monitorar_paper_sol(context):
         regime_info = classificar_regime(df)
         aberto = obter_trades_paper_abertos(PAPER_SYMBOL)
 
-        if aberto:
-            for trade in aberto:
-                direcao = trade["direcao"]
-                stop_loss = trade["stop_loss"]
-                take_profit = trade["take_profit"]
-                quantidade = trade["quantidade"]
-                entrada = trade["entrada"]
-
-                if direcao == "COMPRA":
-                    stop_atingido = float(candle["low"]) <= stop_loss
-                    take_atingido = float(candle["high"]) >= take_profit
-                    if stop_atingido:
-                        saida = stop_loss
-                        lucro_reais = quantidade * (saida - entrada)
-                        lucro_percent = (lucro_reais / CAPITAL_PAPER) * 100
-                        resultado_trade = _construir_trade_result_paper(
-                            trade,
-                            saida,
-                            lucro_percent,
-                            lucro_reais,
-                            fonte_dados,
-                            "STOP",
-                        )
-                        finalizar_trade_paper(
-                            trade["id"],
-                            float(resultado_trade.exit_price),
-                            float(resultado_trade.pnl_percent),
-                            float(resultado_trade.pnl_reais),
-                            resultado_trade.resultado,
-                            resultado_trade.reason,
-                        )
-                        registrar_decisao_observabilidade(
-                            symbol=PAPER_SYMBOL,
-                            modo="PAPER_SOL",
-                            decisao="TRADE_FECHADO",
-                            direcao=direcao,
-                            preco=saida,
-                            regime=regime_info.get("regime"),
-                            adx=regime_info.get("adx"),
-                            volume_status=regime_info.get("volatilidade"),
-                            motivo="Fechado no STOP",
-                            bloqueado_por="N/A",
-                            fonte_dados=fonte_dados,
-                            erro="N/A",
-                        )
-                        await context.bot.send_message(
-                            chat_id=chat_id,
-                            text=f"Paper SOL fechado por STOP. Resultado: {fmt_num(lucro_percent, '+.2f')}%",
-                        )
-                        continue
-                    if take_atingido:
-                        saida = take_profit
-                        lucro_reais = quantidade * (saida - entrada)
-                        lucro_percent = (lucro_reais / CAPITAL_PAPER) * 100
-                        resultado_trade = _construir_trade_result_paper(
-                            trade,
-                            saida,
-                            lucro_percent,
-                            lucro_reais,
-                            fonte_dados,
-                            "TAKE_PROFIT",
-                        )
-                        finalizar_trade_paper(
-                            trade["id"],
-                            float(resultado_trade.exit_price),
-                            float(resultado_trade.pnl_percent),
-                            float(resultado_trade.pnl_reais),
-                            resultado_trade.resultado,
-                            resultado_trade.reason,
-                        )
-                        registrar_decisao_observabilidade(
-                            symbol=PAPER_SYMBOL,
-                            modo="PAPER_SOL",
-                            decisao="TRADE_FECHADO",
-                            direcao=direcao,
-                            preco=saida,
-                            regime=regime_info.get("regime"),
-                            adx=regime_info.get("adx"),
-                            volume_status=regime_info.get("volatilidade"),
-                            motivo="Fechado no TAKE PROFIT",
-                            bloqueado_por="N/A",
-                            fonte_dados=fonte_dados,
-                            erro="N/A",
-                        )
-                        await context.bot.send_message(
-                            chat_id=chat_id,
-                            text=f"Paper SOL fechado por TAKE PROFIT. Resultado: {fmt_num(lucro_percent, '+.2f')}%",
-                        )
-                        continue
-                else:
-                    stop_atingido = float(candle["high"]) >= stop_loss
-                    take_atingido = float(candle["low"]) <= take_profit
-                    if stop_atingido:
-                        saida = stop_loss
-                        lucro_reais = quantidade * (entrada - saida)
-                        lucro_percent = (lucro_reais / CAPITAL_PAPER) * 100
-                        resultado_trade = _construir_trade_result_paper(
-                            trade,
-                            saida,
-                            lucro_percent,
-                            lucro_reais,
-                            fonte_dados,
-                            "STOP",
-                        )
-                        finalizar_trade_paper(
-                            trade["id"],
-                            float(resultado_trade.exit_price),
-                            float(resultado_trade.pnl_percent),
-                            float(resultado_trade.pnl_reais),
-                            resultado_trade.resultado,
-                            resultado_trade.reason,
-                        )
-                        registrar_decisao_observabilidade(
-                            symbol=PAPER_SYMBOL,
-                            modo="PAPER_SOL",
-                            decisao="TRADE_FECHADO",
-                            direcao=direcao,
-                            preco=saida,
-                            regime=regime_info.get("regime"),
-                            adx=regime_info.get("adx"),
-                            volume_status=regime_info.get("volatilidade"),
-                            motivo="Fechado no STOP",
-                            bloqueado_por="N/A",
-                            fonte_dados=fonte_dados,
-                            erro="N/A",
-                        )
-                        await context.bot.send_message(
-                            chat_id=chat_id,
-                            text=f"Paper SOL fechado por STOP. Resultado: {fmt_num(lucro_percent, '+.2f')}%",
-                        )
-                        continue
-                    if take_atingido:
-                        saida = take_profit
-                        lucro_reais = quantidade * (entrada - saida)
-                        lucro_percent = (lucro_reais / CAPITAL_PAPER) * 100
-                        resultado_trade = _construir_trade_result_paper(
-                            trade,
-                            saida,
-                            lucro_percent,
-                            lucro_reais,
-                            fonte_dados,
-                            "TAKE_PROFIT",
-                        )
-                        finalizar_trade_paper(
-                            trade["id"],
-                            float(resultado_trade.exit_price),
-                            float(resultado_trade.pnl_percent),
-                            float(resultado_trade.pnl_reais),
-                            resultado_trade.resultado,
-                            resultado_trade.reason,
-                        )
-                        registrar_decisao_observabilidade(
-                            symbol=PAPER_SYMBOL,
-                            modo="PAPER_SOL",
-                            decisao="TRADE_FECHADO",
-                            direcao=direcao,
-                            preco=saida,
-                            regime=regime_info.get("regime"),
-                            adx=regime_info.get("adx"),
-                            volume_status=regime_info.get("volatilidade"),
-                            motivo="Fechado no TAKE PROFIT",
-                            bloqueado_por="N/A",
-                            fonte_dados=fonte_dados,
-                            erro="N/A",
-                        )
-                        await context.bot.send_message(
-                            chat_id=chat_id,
-                            text=f"Paper SOL fechado por TAKE PROFIT. Resultado: {fmt_num(lucro_percent, '+.2f')}%",
-                        )
-                        continue
+        if await _processar_trades_paper_abertos(context, chat_id, aberto, candle, regime_info, fonte_dados):
             return
 
-        if runtime_session is not None and build_snapshot_from_observed_state is not None and evaluate_monitored_session is not None:
+        if _runtime_monitoring_enabled():
             runtime_decision = runtime_session.decision
             if runtime_decision is None:
-                registrar_decisao_observabilidade(
-                    symbol=PAPER_SYMBOL,
-                    modo="PAPER_SOL",
-                    decisao="ERRO",
-                    direcao="N/A",
-                    preco=preco_atual,
-                    regime=regime_info.get("regime"),
-                    adx=regime_info.get("adx"),
-                    volume_status=regime_info.get("volatilidade"),
-                    motivo="Sessao runtime sem decisao monitoravel.",
-                    bloqueado_por="SESSION",
+                _bloquear_runtime_monitorado(
+                    "Sessao runtime sem decisao monitoravel.",
+                    chat_id=chat_id,
+                    regime_info=regime_info,
                     fonte_dados=fonte_dados,
+                    preco=preco_atual,
                     erro="runtime decision ausente",
                 )
                 return
-            runtime_observed = {
-                "data_fresh": True,
-                "session_drawdown_percent": Decimal("0"),
-                "current_loss_streak": 0,
-                "open_positions": len(aberto),
-                "executed_trades": len(aberto),
-                "observed_costs": {
-                    "entry_fee_rate": "0.0004",
-                    "exit_fee_rate": "0.0004",
-                    "spread_bps": "5",
-                    "slippage_bps": "5",
-                },
-                "session_state": runtime_session.record.state.value,
-                "paper_capital_used": Decimal(str(CAPITAL_PAPER)),
-                "risk_per_trade_percent": Decimal("1.0"),
-                "internal_error": None,
-                "attempted_live": False,
-            }
+            runtime_observed = _coletar_runtime_observed_state(
+                session=runtime_session,
+                decision=runtime_decision,
+                df=df,
+                trades_abertos=aberto,
+                preco_atual=preco_atual,
+                regime_info=regime_info,
+            )
             try:
                 runtime_snapshot = build_snapshot_from_observed_state(
                     session=runtime_session.record,
@@ -538,24 +557,20 @@ async def monitorar_paper_sol(context):
                         fonte_dados=fonte_dados,
                         erro="N/A",
                     )
+                    _remover_jobs_runtime_monitorado(context, runtime_session.record.session_id)
                     logging.warning("Sessao paper monitorada suspensa; novas ordens bloqueadas.")
                     return
             except Exception as exc:
-                registrar_decisao_observabilidade(
-                    symbol=PAPER_SYMBOL,
-                    modo="PAPER_SOL",
-                    decisao="ERRO",
-                    direcao="N/A",
-                    preco=preco_atual,
-                    regime=regime_info.get("regime"),
-                    adx=regime_info.get("adx"),
-                    volume_status=regime_info.get("volatilidade"),
-                    motivo="Falha ao revalidar a sessao paper monitorada.",
-                    bloqueado_por="SESSION",
+                _bloquear_runtime_monitorado(
+                    "Falha ao revalidar a sessao paper monitorada.",
+                    chat_id=chat_id,
+                    regime_info=regime_info,
                     fonte_dados=fonte_dados,
-                    erro=str(exc),
+                    preco=preco_atual,
+                    erro="revalidacao runtime falhou",
                 )
-                logging.warning(f"Falha ao revalidar sessao paper monitorada: {exc}")
+                _remover_jobs_runtime_monitorado(context, runtime_session.record.session_id)
+                logging.warning("Falha ao revalidar sessao paper monitorada.")
                 return
 
         sinal = _obter_sinal_paper_sol()
@@ -740,6 +755,6 @@ async def monitorar_paper_sol(context):
             motivo="Falha no monitoramento do paper SOL.",
             bloqueado_por="N/A",
             fonte_dados="N/D",
-            erro=str(exc),
+            erro=exc.__class__.__name__,
         )
-        logging.warning(f"Erro no monitoramento paper SOL: {exc}")
+        logging.warning(f"Erro no monitoramento paper SOL: {exc.__class__.__name__}")
