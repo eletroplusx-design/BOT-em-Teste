@@ -1,5 +1,4 @@
 import logging
-import logging
 import sqlite3
 from datetime import datetime, timezone
 
@@ -72,6 +71,9 @@ def inicializar_banco(db_name=DB_NAME):
                 CREATE TABLE IF NOT EXISTS trades (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     timestamp TEXT NOT NULL,
+                    session_id TEXT,
+                    idempotency_key TEXT,
+                    idempotency_hash TEXT,
                     direcao TEXT NOT NULL,
                     resultado TEXT NOT NULL,
                     score INTEGER NOT NULL,
@@ -96,6 +98,9 @@ def inicializar_banco(db_name=DB_NAME):
                 "lucro_reais": "REAL",
                 "motivo_saida": "TEXT",
                 "filtros_aplicados": "INTEGER DEFAULT 1",
+                "session_id": "TEXT",
+                "idempotency_key": "TEXT",
+                "idempotency_hash": "TEXT",
             }
             for coluna, tipo in alteracoes.items():
                 if coluna not in colunas:
@@ -120,6 +125,12 @@ def inicializar_banco(db_name=DB_NAME):
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_tipo_simbolo_status ON trades(tipo, simbolo, status)")
             cursor.execute(
                 "CREATE INDEX IF NOT EXISTS idx_trades_tipo_simbolo_status_fechado_em ON trades(tipo, simbolo, status, fechado_em)"
+            )
+            cursor.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_idempotency_key ON trades(idempotency_key) WHERE idempotency_key IS NOT NULL"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_trades_session_id_tipo_status ON trades(session_id, tipo, status)"
             )
             conn.commit()
         return True
@@ -302,19 +313,21 @@ def buscar_trades_paper(limite=10, symbol="SOLUSDT"):
         return []
 
 
-def obter_trades_paper_abertos(symbol="SOLUSDT"):
+def obter_trades_paper_abertos(symbol="SOLUSDT", session_id=None):
     try:
         with sqlite3.connect(DB_NAME) as conn:
             cursor = conn.cursor()
-            rows = cursor.execute(
-                """
-                SELECT id, timestamp, simbolo, direcao, entrada, stop_loss, take_profit, quantidade, valor_arriscado, aberto_em
+            query = """
+                SELECT id, timestamp, simbolo, session_id, direcao, entrada, stop_loss, take_profit, quantidade, valor_arriscado, aberto_em
                 FROM trades
                 WHERE tipo = 'paper' AND simbolo = ? AND status = 'open'
-                ORDER BY timestamp ASC
-                """,
-                (symbol,),
-            ).fetchall()
+            """
+            parametros = [symbol]
+            if session_id is not None:
+                query += " AND session_id = ?"
+                parametros.append(session_id)
+            query += " ORDER BY timestamp ASC"
+            rows = cursor.execute(query, parametros).fetchall()
         trades = []
         for linha in rows:
             trades.append(
@@ -322,13 +335,14 @@ def obter_trades_paper_abertos(symbol="SOLUSDT"):
                     "id": linha[0],
                     "timestamp": linha[1],
                     "symbol": linha[2],
-                    "direcao": linha[3],
-                    "entrada": float(linha[4]) if linha[4] is not None else None,
-                    "stop_loss": float(linha[5]) if linha[5] is not None else None,
-                    "take_profit": float(linha[6]) if linha[6] is not None else None,
-                    "quantidade": float(linha[7] or 0.0),
-                    "valor_arriscado": float(linha[8] or 0.0),
-                    "aberto_em": linha[9],
+                    "session_id": linha[3],
+                    "direcao": linha[4],
+                    "entrada": float(linha[5]) if linha[5] is not None else None,
+                    "stop_loss": float(linha[6]) if linha[6] is not None else None,
+                    "take_profit": float(linha[7]) if linha[7] is not None else None,
+                    "quantidade": float(linha[8] or 0.0),
+                    "valor_arriscado": float(linha[9] or 0.0),
+                    "aberto_em": linha[10],
                 }
             )
         return trades
@@ -347,33 +361,55 @@ def registrar_trade_paper(
     valor_arriscado,
     rr_planejado,
     filtros_aplicados=True,
+    session_id=None,
+    idempotency_key=None,
+    db_name=None,
 ):
     try:
-        with sqlite3.connect(DB_NAME) as conn:
+        if db_name is None:
+            db_name = DB_NAME
+        inicializar_banco(db_name)
+        with sqlite3.connect(db_name) as conn:
             cursor = conn.cursor()
             timestamp = datetime.now(timezone.utc).isoformat()
+            request_hash = None
+            if idempotency_key is not None:
+                request_hash = f"{symbol}|{direcao}|{entrada}|{stop_loss}|{take_profit}|{quantidade}|{valor_arriscado}|{rr_planejado}|{1 if filtros_aplicados else 0}|{session_id}"
+                row = cursor.execute(
+                    "SELECT id, idempotency_hash FROM trades WHERE idempotency_key = ?",
+                    (idempotency_key,),
+                ).fetchone()
+                if row is not None:
+                    if row[1] != request_hash:
+                        raise ValueError("idempotency key reuse with different payload")
+                    return row[0]
             cursor.execute(
                 """
                 INSERT INTO trades (
-                    timestamp, tipo, simbolo, status, direcao, resultado, score,
+                    timestamp, tipo, simbolo, session_id, status, direcao, resultado, score,
                     lucro_percent, rr_planejado, entrada, stop_loss, take_profit,
-                    quantidade, valor_arriscado, aberto_em, filtros_aplicados
+                    quantidade, valor_arriscado, aberto_em, filtros_aplicados, idempotency_key, idempotency_hash
                 )
-                VALUES (?, 'paper', ?, 'open', ?, 'PENDENTE', 0, 0.0, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (:timestamp, 'paper', :symbol, :session_id, 'open', :direcao, 'PENDENTE', 0, 0.0,
+                        :rr_planejado, :entrada, :stop_loss, :take_profit, :quantidade, :valor_arriscado,
+                        :aberto_em, :filtros_aplicados, :idempotency_key, :idempotency_hash)
                 """,
-                (
-                    timestamp,
-                    symbol,
-                    direcao,
-                    rr_planejado,
-                    entrada,
-                    stop_loss,
-                    take_profit,
-                    quantidade,
-                    valor_arriscado,
-                    timestamp,
-                    1 if filtros_aplicados else 0,
-                ),
+                {
+                    "timestamp": timestamp,
+                    "symbol": symbol,
+                    "session_id": session_id,
+                    "direcao": direcao,
+                    "rr_planejado": rr_planejado,
+                    "entrada": entrada,
+                    "stop_loss": stop_loss,
+                    "take_profit": take_profit,
+                    "quantidade": quantidade,
+                    "valor_arriscado": valor_arriscado,
+                    "aberto_em": timestamp,
+                    "filtros_aplicados": 1 if filtros_aplicados else 0,
+                    "idempotency_key": idempotency_key,
+                    "idempotency_hash": request_hash,
+                },
             )
             conn.commit()
             return cursor.lastrowid
@@ -382,11 +418,21 @@ def registrar_trade_paper(
         return None
 
 
-def finalizar_trade_paper(trade_id, saida, lucro_percent, lucro_reais, resultado, motivo_saida):
+def finalizar_trade_paper(trade_id, saida, lucro_percent, lucro_reais, resultado, motivo_saida, idempotency_key=None, db_name=None):
     try:
-        with sqlite3.connect(DB_NAME) as conn:
+        if db_name is None:
+            db_name = DB_NAME
+        inicializar_banco(db_name)
+        with sqlite3.connect(db_name) as conn:
             cursor = conn.cursor()
             timestamp = datetime.now(timezone.utc).isoformat()
+            if idempotency_key is not None:
+                row = cursor.execute(
+                    "SELECT saida, lucro_percent, lucro_reais, resultado, motivo_saida FROM trades WHERE id = ?",
+                    (trade_id,),
+                ).fetchone()
+                if row is not None:
+                    return True
             cursor.execute(
                 """
                 UPDATE trades
@@ -549,19 +595,24 @@ def reset_db(db_name=DB_NAME):
         return False
 
 
-def obter_ultimos_trades_paper(symbol="SOLUSDT", limite=30, db_name=DB_NAME):
+def obter_ultimos_trades_paper(symbol="SOLUSDT", limite=30, db_name=DB_NAME, session_id=None):
     try:
         with sqlite3.connect(db_name) as conn:
             cursor = conn.cursor()
-            rows = cursor.execute(
-                """
+            query = """
                 SELECT timestamp, resultado, lucro_percent, lucro_reais, filtros_aplicados
                 FROM trades
                 WHERE tipo = 'paper' AND simbolo = ? AND status = 'closed'
-                ORDER BY timestamp DESC
-                LIMIT ?
-                """,
-                (symbol, limite),
+            """
+            parametros = [symbol]
+            if session_id is not None:
+                query += " AND session_id = ?"
+                parametros.append(session_id)
+            query += " ORDER BY timestamp DESC LIMIT ?"
+            parametros.append(limite)
+            rows = cursor.execute(
+                query,
+                parametros,
             ).fetchall()
         trades = []
         for linha in rows:

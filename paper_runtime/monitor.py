@@ -17,6 +17,21 @@ def _require_mapping(value: Any, field_name: str) -> Mapping[str, Any]:
     return value
 
 
+def _require_observed_field(observed: Mapping[str, Any], field_name: str) -> Any:
+    if field_name not in observed:
+        raise PaperRuntimeMonitorError(f"{field_name} is required.")
+    value = observed[field_name]
+    if value is None:
+        raise PaperRuntimeMonitorError(f"{field_name} is required.")
+    return value
+
+
+def _require_observed_key(observed: Mapping[str, Any], field_name: str) -> Any:
+    if field_name not in observed:
+        raise PaperRuntimeMonitorError(f"{field_name} is required.")
+    return observed[field_name]
+
+
 def build_snapshot_from_observed_state(
     *,
     session: PaperRuntimeSessionRecord,
@@ -26,6 +41,7 @@ def build_snapshot_from_observed_state(
 ) -> PaperMonitoringSnapshot:
     observed = _require_mapping(observed, "observed")
     timestamp = timestamp_utc or datetime.now(timezone.utc)
+    observed_costs = _require_mapping(_require_observed_key(observed, "observed_costs"), "observed_costs")
     return PaperMonitoringSnapshot(
         timestamp_utc=timestamp,
         decision_hash=decision.decision_hash,
@@ -35,17 +51,17 @@ def build_snapshot_from_observed_state(
         trading_mode="PAPER",
         session_id=session.session_id,
         session_started_utc=session.session_started_utc,
-        data_fresh=observed.get("data_fresh", True),
-        session_drawdown_percent=Decimal(str(observed.get("session_drawdown_percent", "0"))),
-        current_loss_streak=int(observed.get("current_loss_streak", 0)),
-        open_positions=int(observed.get("open_positions", 0)),
-        executed_trades=int(observed.get("executed_trades", 0)),
-        observed_costs=dict(_require_mapping(observed.get("observed_costs", {}), "observed_costs")),
-        session_state=str(observed.get("session_state", session.state.value)),
-        paper_capital_used=Decimal(str(observed.get("paper_capital_used", "0"))),
-        risk_per_trade_percent=Decimal(str(observed.get("risk_per_trade_percent", "0"))),
-        internal_error=observed.get("internal_error"),
-        attempted_live=observed.get("attempted_live", False),
+        data_fresh=_require_observed_key(observed, "data_fresh"),
+        session_drawdown_percent=Decimal(str(_require_observed_key(observed, "session_drawdown_percent"))),
+        current_loss_streak=int(_require_observed_key(observed, "current_loss_streak")),
+        open_positions=int(_require_observed_key(observed, "open_positions")),
+        executed_trades=int(_require_observed_key(observed, "executed_trades")),
+        observed_costs=dict(observed_costs),
+        session_state=str(_require_observed_key(observed, "session_state")),
+        paper_capital_used=Decimal(str(_require_observed_key(observed, "paper_capital_used"))),
+        risk_per_trade_percent=Decimal(str(_require_observed_key(observed, "risk_per_trade_percent"))),
+        internal_error=_require_observed_key(observed, "internal_error"),
+        attempted_live=_require_observed_key(observed, "attempted_live"),
     )
 
 

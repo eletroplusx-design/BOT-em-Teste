@@ -655,8 +655,7 @@ class PaperRuntimeStore:
             conn.execute(
                 """
                 UPDATE paper_runtime_sessions
-                   SET version = version + 1,
-                       updated_at_utc = ?,
+                   SET updated_at_utc = ?,
                        last_snapshot_hash = ?,
                        state = CASE
                            WHEN ? = 'SUSPENDED' THEN 'SUSPENDED'
@@ -671,7 +670,6 @@ class PaperRuntimeStore:
                 """,
                 (_now_utc(), snapshot_hash, result_status, result_status, result_status, session_id),
             )
-            conn.execute("COMMIT")
             if idempotency_key:
                 self._store_idempotent_response(
                     conn,
@@ -681,6 +679,7 @@ class PaperRuntimeStore:
                     request_payload={"snapshot": payload, "decision_hash": decision_hash, "evidence_hash": evidence_hash, "result_status": result_status, "session_id": session_id},
                     response_payload={"session_id": session_id, "sequence": sequence, "snapshot_hash": snapshot_hash, "result_status": result_status},
                 )
+            conn.execute("COMMIT")
             return {
                 "session_id": session_id,
                 "sequence": sequence,
@@ -733,7 +732,6 @@ class PaperRuntimeStore:
                 raise PaperRuntimeSessionError("invalid session transition.")
             fields: dict[str, Any] = {
                 "state": next_state.value,
-                "version": current.version + 1,
                 "updated_at_utc": _now_utc(),
             }
             if next_state == PaperRuntimeState.SUSPENDED:
@@ -764,7 +762,6 @@ class PaperRuntimeStore:
                 result=next_state.value,
                 idempotency_key=None,
             )
-            conn.execute("COMMIT")
             if idempotency_key:
                 self._store_idempotent_response(
                     conn,
@@ -774,7 +771,206 @@ class PaperRuntimeStore:
                     request_payload={"session_id": session_id, "expected_version": expected_version, "next_state": next_state.value, "reason": reason},
                     response_payload={"session_id": session_id, "next_state": next_state.value},
                 )
+            conn.execute("COMMIT")
             return self.load_session(session_id)
+
+    def record_monitoring_result(
+        self,
+        session_id: str,
+        *,
+        snapshot: Mapping[str, Any],
+        decision_hash: str,
+        evidence_hash: str,
+        result_status: str,
+        expected_version: int,
+        transition_state: PaperRuntimeState | None = None,
+        transition_reason: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        self._ensure_initialized(require_exists=True)
+        payload = dict(snapshot)
+        snapshot_hash = str(payload.get("snapshot_hash") or sha256_hex(payload))
+        request_payload = {
+            "session_id": session_id,
+            "snapshot": payload,
+            "decision_hash": decision_hash,
+            "evidence_hash": evidence_hash,
+            "result_status": result_status,
+            "expected_version": expected_version,
+            "transition_state": transition_state.value if transition_state is not None else None,
+            "transition_reason": transition_reason,
+        }
+        with self._connect(require_exists=True) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if idempotency_key:
+                row = conn.execute(
+                    "SELECT response_json FROM paper_runtime_idempotency WHERE idempotency_key = ?",
+                    (idempotency_key,),
+                ).fetchone()
+                request_hash = sha256_hex({"kind": "MONITORING_RESULT", "request": request_payload})
+                if row is not None:
+                    stored = json.loads(row["response_json"])
+                    if stored.get("request_hash") != request_hash:
+                        raise PaperRuntimeSessionError("idempotency key reuse with different payload.")
+                    conn.execute("COMMIT")
+                    return stored.get("response", {})
+            row = self._fetch_session_row(conn, session_id)
+            if row is None:
+                raise PaperRuntimeStoreError("runtime session not found.")
+            current = self._row_to_session(row)
+            if current.version != expected_version:
+                raise PaperRuntimeSessionError("session version mismatch.")
+            if current.state is not PaperRuntimeState.RUNNING:
+                raise PaperRuntimeSessionError("runtime session is not running.")
+
+            existing_snapshot = conn.execute(
+                "SELECT sequence, snapshot_hash, result_status FROM paper_runtime_snapshots WHERE session_id = ? AND snapshot_hash = ?",
+                (session_id, snapshot_hash),
+            ).fetchone()
+            if existing_snapshot is not None:
+                response = {
+                    "session_id": session_id,
+                    "sequence": existing_snapshot["sequence"],
+                    "snapshot_hash": existing_snapshot["snapshot_hash"],
+                    "result_status": existing_snapshot["result_status"],
+                }
+                if transition_state is not None:
+                    response["transition_state"] = PaperRuntimeState(transition_state).value
+                if idempotency_key:
+                    self._store_idempotent_response(
+                        conn,
+                        idempotency_key=idempotency_key,
+                        session_id=session_id,
+                        kind="MONITORING_RESULT",
+                        request_payload=request_payload,
+                        response_payload=response,
+                    )
+                conn.execute("COMMIT")
+                return response
+
+            snapshot_sequence = current.version + 1
+            conn.execute(
+                """
+                INSERT INTO paper_runtime_snapshots (
+                    session_id, sequence, snapshot_hash, timestamp_utc, payload_json, decision_hash, evidence_hash,
+                    result_status, created_at_utc
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    session_id,
+                    snapshot_sequence,
+                    snapshot_hash,
+                    _ensure_timezone_aware_text(str(payload["timestamp_utc"])),
+                    json.dumps(serialize_value(payload), ensure_ascii=False, sort_keys=True),
+                    decision_hash,
+                    evidence_hash,
+                    result_status,
+                    _now_utc(),
+                ),
+            )
+            snapshot_event = self._append_event_locked(
+                conn,
+                session_id=session_id,
+                event_type=PaperRuntimeEventType.SNAPSHOT_RECORDED,
+                payload={"snapshot": payload},
+                decision_hash=decision_hash,
+                evidence_hash=evidence_hash,
+                result=result_status,
+                idempotency_key=None,
+            )
+            conn.execute(
+                """
+                UPDATE paper_runtime_sessions
+                   SET updated_at_utc = ?,
+                       last_snapshot_hash = ?,
+                       last_event_hash = ?,
+                       state = CASE
+                           WHEN ? = 'SUSPENDED' THEN 'SUSPENDED'
+                           WHEN ? = 'COMPLETED' THEN 'COMPLETED'
+                           ELSE state
+                       END,
+                       active = CASE
+                           WHEN ? IN ('SUSPENDED', 'COMPLETED', 'FAILED') THEN 0
+                           ELSE active
+                       END
+                 WHERE session_id = ?
+                """,
+                (
+                    _now_utc(),
+                    snapshot_hash,
+                    snapshot_event.event_hash,
+                    result_status,
+                    result_status,
+                    result_status,
+                    session_id,
+                ),
+            )
+            transition_event = None
+            if transition_state is not None:
+                next_state = PaperRuntimeState(transition_state)
+                current = self._row_to_session(self._fetch_session_row(conn, session_id))
+                if current.version != snapshot_sequence:
+                    raise PaperRuntimeSessionError("session version mismatch after snapshot write.")
+                transition_event = self._append_event_locked(
+                    conn,
+                    session_id=session_id,
+                    event_type={
+                        PaperRuntimeState.SUSPENDED: PaperRuntimeEventType.SESSION_SUSPENDED,
+                        PaperRuntimeState.COMPLETED: PaperRuntimeEventType.SESSION_COMPLETED,
+                        PaperRuntimeState.FAILED: PaperRuntimeEventType.SESSION_FAILED,
+                    }.get(next_state, PaperRuntimeEventType.SESSION_STARTED),
+                    payload={"next_state": next_state.value, "reason": transition_reason},
+                    decision_hash=decision_hash,
+                    evidence_hash=evidence_hash,
+                    result=next_state.value,
+                    idempotency_key=None,
+                )
+                conn.execute(
+                    """
+                    UPDATE paper_runtime_sessions
+                       SET updated_at_utc = ?,
+                           state = ?,
+                           active = ?,
+                           suspended_reason = CASE WHEN ? = 'SUSPENDED' THEN ? ELSE suspended_reason END,
+                           completed_reason = CASE WHEN ? = 'COMPLETED' THEN ? ELSE completed_reason END,
+                           failed_reason = CASE WHEN ? = 'FAILED' THEN ? ELSE failed_reason END,
+                           last_event_hash = ?
+                     WHERE session_id = ?
+                    """,
+                    (
+                        _now_utc(),
+                        next_state.value,
+                        0 if next_state in {PaperRuntimeState.SUSPENDED, PaperRuntimeState.COMPLETED, PaperRuntimeState.FAILED} else 1,
+                        next_state.value,
+                        transition_reason,
+                        next_state.value,
+                        transition_reason,
+                        next_state.value,
+                        transition_reason,
+                        transition_event.event_hash,
+                        session_id,
+                    ),
+                )
+            response = {
+                "session_id": session_id,
+                "sequence": snapshot_sequence,
+                "snapshot_hash": snapshot_hash,
+                "result_status": result_status,
+            }
+            if transition_event is not None:
+                response["transition_event_hash"] = transition_event.event_hash
+                response["transition_state"] = transition_event.result
+            if idempotency_key:
+                self._store_idempotent_response(
+                    conn,
+                    idempotency_key=idempotency_key,
+                    session_id=session_id,
+                    kind="MONITORING_RESULT",
+                    request_payload=request_payload,
+                    response_payload=response,
+                )
+            conn.execute("COMMIT")
+            return response
 
     def load_events(self, session_id: str) -> list[PaperRuntimeEvent]:
         self._ensure_initialized(require_exists=True)
@@ -783,9 +979,13 @@ class PaperRuntimeStore:
                 "SELECT * FROM paper_runtime_events WHERE session_id = ? ORDER BY sequence ASC",
                 (session_id,),
             ).fetchall()
+            session_row = self._fetch_session_row(conn, session_id)
+        if session_row is None:
+            raise PaperRuntimeStoreError("runtime session not found.")
         events: list[PaperRuntimeEvent] = []
         previous_hash = ""
-        for row in rows:
+        expected_sequence = 2
+        for index, row in enumerate(rows):
             payload = json.loads(row["payload_json"])
             content_hash = event_content_hash(
                 {
@@ -820,10 +1020,19 @@ class PaperRuntimeStore:
                 sequence=event.sequence,
                 event_type=event.event_type.value,
             )
+            if index == 0 and event.sequence != expected_sequence:
+                raise PaperRuntimeAuditError("audit chain diverged.")
+            if index > 0 and event.sequence != expected_sequence:
+                raise PaperRuntimeAuditError("audit chain diverged.")
             if event.content_hash != content_hash or event.previous_hash != previous_hash or event.event_hash != expected_hash:
                 raise PaperRuntimeAuditError("audit chain diverged.")
             previous_hash = event.event_hash
+            expected_sequence += 1
             events.append(event)
+        if session_row["last_event_hash"] and previous_hash != session_row["last_event_hash"]:
+            raise PaperRuntimeAuditError("audit chain diverged.")
+        if events and events[-1].sequence != session_row["version"]:
+            raise PaperRuntimeAuditError("audit chain diverged.")
         return events
 
     def assert_audit_chain(self, session_id: str) -> None:

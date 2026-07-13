@@ -272,9 +272,13 @@ def _remover_jobs_runtime_monitorado(context, session_id: str | None) -> None:
 
 
 def _coletar_runtime_observed_state(*, session, decision, df, trades_abertos, preco_atual, regime_info):
-    ultimo_close_time = df["close_time"].iloc[-1] if "close_time" in df.columns else None
-    data_fresh = True
-    if ultimo_close_time is not None:
+    if df is None or getattr(df, "empty", True):
+        raise PaperRuntimeSessionError("runtime dataframe is required.")
+
+    if "close_time" not in df.columns:
+        data_fresh = False
+    else:
+        ultimo_close_time = df["close_time"].iloc[-1]
         try:
             close_dt = ultimo_close_time.to_pydatetime() if hasattr(ultimo_close_time, "to_pydatetime") else ultimo_close_time
             if close_dt.tzinfo is None:
@@ -284,44 +288,56 @@ def _coletar_runtime_observed_state(*, session, decision, df, trades_abertos, pr
         except Exception:
             data_fresh = False
 
-    paper_trades = [trade for trade in trades_abertos if trade.get("tipo") == "paper" or trade.get("status") == "open"]
-    closed_trades = []
+    session_id = session.record.session_id
+    paper_trades = [
+        trade
+        for trade in trades_abertos
+        if (trade.get("tipo") == "paper" or trade.get("status") == "open") and trade.get("session_id") == session_id
+    ]
     try:
         from storage import obter_ultimos_trades_paper
 
-        closed_trades = obter_ultimos_trades_paper(symbol=PAPER_SYMBOL, limite=50)
-    except Exception:
-        closed_trades = []
+        closed_trades = obter_ultimos_trades_paper(symbol=PAPER_SYMBOL, limite=500, session_id=session_id)
+    except Exception as exc:
+        raise PaperRuntimeSessionError("failed to load closed paper trades.") from exc
 
     current_loss_streak = 0
     for trade in reversed(closed_trades):
-        if float(trade.get("lucro_reais") or 0.0) < 0:
+        lucro_reais = Decimal(str(trade.get("lucro_reais") or 0))
+        if lucro_reais < 0:
             current_loss_streak += 1
-        elif float(trade.get("lucro_reais") or 0.0) > 0:
+        elif lucro_reais > 0:
             break
 
     session_drawdown_percent = Decimal("0")
-    if closed_trades:
-        saldo = Decimal("0")
-        pico = Decimal("0")
-        for trade in closed_trades:
-            saldo += Decimal(str(trade.get("lucro_percent") or 0))
-            if saldo > pico:
-                pico = saldo
-            if pico > 0:
-                drawdown = ((pico - saldo) / pico) * Decimal("100")
-                if drawdown > session_drawdown_percent:
-                    session_drawdown_percent = drawdown
+    saldo = Decimal(str(CAPITAL_PAPER))
+    pico = saldo
+    for trade in closed_trades:
+        saldo += Decimal(str(trade.get("lucro_reais") or 0))
+        if saldo > pico:
+            pico = saldo
+        if pico > 0:
+            drawdown = ((pico - saldo) / pico) * Decimal("100")
+            if drawdown > session_drawdown_percent:
+                session_drawdown_percent = drawdown
 
     open_positions = len(paper_trades)
     executed_trades = len(closed_trades) + open_positions
-    paper_capital_used = Decimal(str(max(0.0, sum(float(t.get("valor_arriscado") or 0.0) for t in paper_trades))))
-    risk_per_trade_percent = Decimal(str(decision.paper_limits.get("risk_per_trade_max_percent", "1")))
+    if paper_trades:
+        paper_capital_used = sum(Decimal(str(t.get("valor_arriscado") or 0)) for t in paper_trades)
+        risk_per_trade_percent = max(
+            (Decimal(str(t.get("valor_arriscado") or 0)) / Decimal(str(CAPITAL_PAPER))) * Decimal("100")
+            for t in paper_trades
+        )
+    else:
+        paper_capital_used = Decimal("0")
+        risk_per_trade_percent = Decimal("0")
+    costs = decision.phase5_manifest.get("execution_contract", {}) if isinstance(decision.phase5_manifest, dict) else {}
     observed_costs = {
-        "entry_fee_rate": decision.phase5_manifest.get("costs", {}).get("entry_fee_rate", "0.0004"),
-        "exit_fee_rate": decision.phase5_manifest.get("costs", {}).get("exit_fee_rate", "0.0004"),
-        "spread_bps": decision.phase5_manifest.get("costs", {}).get("spread_bps", "5"),
-        "slippage_bps": decision.phase5_manifest.get("costs", {}).get("slippage_bps", "5"),
+        "entry_fee_rate": costs.get("entry_fee_rate", "0.0004"),
+        "exit_fee_rate": costs.get("exit_fee_rate", "0.0004"),
+        "spread_bps": costs.get("spread_bps", "5"),
+        "slippage_bps": costs.get("slippage_bps", "5"),
     }
     if not isinstance(regime_info, dict):
         regime_info = {}
@@ -333,7 +349,7 @@ def _coletar_runtime_observed_state(*, session, decision, df, trades_abertos, pr
         "executed_trades": executed_trades,
         "observed_costs": observed_costs,
         "session_state": session.record.state.value,
-        "paper_capital_used": paper_capital_used if paper_capital_used > 0 else Decimal(str(preco_atual or 0)),
+        "paper_capital_used": paper_capital_used,
         "risk_per_trade_percent": risk_per_trade_percent,
         "internal_error": None,
         "attempted_live": False,
@@ -448,6 +464,7 @@ async def monitorar_paper_sol(context):
             logging.warning("Monitoramento paper SOL bloqueado por autorizacao.")
             return
         runtime_session = _obter_runtime_session_do_job(job_data)
+        session_scope_id = runtime_session.record.session_id if runtime_session is not None else job_data.get("session_id")
         if _runtime_monitoring_enabled():
             session_id = job_data.get("session_id")
             if not session_id or runtime_session is None or not runtime_session.is_running():
@@ -506,7 +523,7 @@ async def monitorar_paper_sol(context):
         atualizar_cache_preco(PAPER_SYMBOL, preco_atual, fonte_dados, "PAPER_SOL")
         candle = df.iloc[-1]
         regime_info = classificar_regime(df)
-        aberto = obter_trades_paper_abertos(PAPER_SYMBOL)
+        aberto = obter_trades_paper_abertos(PAPER_SYMBOL, session_id=session_scope_id)
 
         if await _processar_trades_paper_abertos(context, chat_id, aberto, candle, regime_info, fonte_dados):
             return
@@ -682,7 +699,25 @@ async def monitorar_paper_sol(context):
             float(trade_intent.risk_amount),
             rr_planejado,
             filtros_aplicados=filtros_aplicados,
+            session_id=session_scope_id,
+            idempotency_key=f"paper-open:{session_scope_id or 'global'}:{sinal['direcao']}:{entrada}:{stop_loss}:{take_profit}",
         )
+        if trade_id is None:
+            registrar_decisao_observabilidade(
+                symbol=PAPER_SYMBOL,
+                modo="PAPER_SOL",
+                decisao="ERRO",
+                direcao=sinal.get("direcao"),
+                preco=entrada,
+                regime=regime_info.get("regime"),
+                adx=regime_info.get("adx"),
+                volume_status=decisao_info.get("volume_status"),
+                motivo="Falha ao registrar trade paper.",
+                bloqueado_por="RISK",
+                fonte_dados=fonte_dados,
+                erro="trade paper indisponivel",
+            )
+            return
 
         if filtros_aplicados:
             registrar_decisao_observabilidade(

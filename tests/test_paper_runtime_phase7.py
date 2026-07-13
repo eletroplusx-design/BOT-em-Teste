@@ -436,7 +436,7 @@ def test_ordem_nao_ocorre_antes_da_validacao(monkeypatch, tmp_path):
     monkeypatch.setattr(paper_engine, "can_execute_sensitive_telegram_action", lambda *args, **kwargs: True)
     monkeypatch.setattr(paper_engine, "get_monitored_session", lambda session_id=None, decision_hash=None: session if session_id == session.record.session_id else None)
     monkeypatch.setattr(paper_engine, "backtester", SimpleNamespace(baixar_dados_historicos=lambda symbol=None: _paper_df()))
-    monkeypatch.setattr(paper_engine, "obter_trades_paper_abertos", lambda symbol=None: [])
+    monkeypatch.setattr(paper_engine, "obter_trades_paper_abertos", lambda symbol=None, session_id=None: [])
     monkeypatch.setattr(paper_engine, "classificar_regime", lambda df: {"regime": "BULL", "adx": 30, "volatilidade": "ALTA"})
     monkeypatch.setattr(paper_engine, "esta_em_killzone", lambda: True)
     monkeypatch.setattr(
@@ -465,7 +465,7 @@ def test_falha_de_persistencia_impede_ordem(monkeypatch, tmp_path):
     monkeypatch.setattr(paper_engine, "can_execute_sensitive_telegram_action", lambda *args, **kwargs: True)
     monkeypatch.setattr(paper_engine, "get_monitored_session", lambda session_id=None, decision_hash=None: session if session_id == session.record.session_id else None)
     monkeypatch.setattr(paper_engine, "backtester", SimpleNamespace(baixar_dados_historicos=lambda symbol=None: _paper_df()))
-    monkeypatch.setattr(paper_engine, "obter_trades_paper_abertos", lambda symbol=None: [])
+    monkeypatch.setattr(paper_engine, "obter_trades_paper_abertos", lambda symbol=None, session_id=None: [])
     monkeypatch.setattr(paper_engine, "classificar_regime", lambda df: {"regime": "BULL", "adx": 30, "volatilidade": "ALTA"})
     monkeypatch.setattr(
         paper_engine,
@@ -576,7 +576,7 @@ def test_monitoracao_com_sessao_valida_revalida_e_permite_ordem(monkeypatch, tmp
     monkeypatch.setattr(paper_engine, "can_execute_sensitive_telegram_action", lambda *args, **kwargs: True)
     monkeypatch.setattr(paper_engine, "get_monitored_session", lambda session_id=None, decision_hash=None: session if session_id == session.record.session_id else None)
     monkeypatch.setattr(paper_engine, "backtester", SimpleNamespace(baixar_dados_historicos=lambda symbol=None: _paper_df()))
-    monkeypatch.setattr(paper_engine, "obter_trades_paper_abertos", lambda symbol=None: [])
+    monkeypatch.setattr(paper_engine, "obter_trades_paper_abertos", lambda symbol=None, session_id=None: [])
     monkeypatch.setattr(paper_engine, "classificar_regime", lambda df: {"regime": "BULL", "adx": 30, "volatilidade": "ALTA"})
     monkeypatch.setattr(paper_engine, "esta_em_killzone", lambda: True)
     monkeypatch.setattr(
@@ -618,3 +618,169 @@ def test_monitoracao_com_sessao_valida_revalida_e_permite_ordem(monkeypatch, tmp
     asyncio.run(paper_engine.monitorar_paper_sol(ctx))
     assert calls["trade"] == 1
     assert ctx.bot.sent
+
+
+@pytest.mark.parametrize(
+    "missing_field",
+    [
+        "data_fresh",
+        "session_drawdown_percent",
+        "current_loss_streak",
+        "open_positions",
+        "executed_trades",
+        "observed_costs",
+        "session_state",
+        "paper_capital_used",
+        "risk_per_trade_percent",
+        "attempted_live",
+        "internal_error",
+    ],
+)
+def test_snapshot_requer_campos_observados_explicitos(tmp_path, missing_field):
+    store = _store(tmp_path)
+    session = _session(store, session_id=f"required-{missing_field}")
+    observed = _observed()
+    observed.pop(missing_field, None)
+    with pytest.raises(PaperRuntimeMonitorError):
+        build_snapshot_from_observed_state(
+            session=session.record,
+            decision=session.decision,
+            observed=observed,
+            timestamp_utc=datetime(2026, 7, 11, 12, 0, tzinfo=timezone.utc),
+        )
+
+
+def test_coleta_runtime_close_time_ausente_desativa_freshness(tmp_path):
+    store = _store(tmp_path)
+    session = _session(store, session_id="close-missing")
+    import pandas as pd
+
+    df = pd.DataFrame(
+        {
+            "open": [100.0, 101.0],
+            "high": [102.0, 103.0],
+            "low": [99.0, 100.0],
+            "close": [101.0, 102.0],
+            "volume": [1000.0, 1000.0],
+        }
+    )
+    observed = paper_engine._coletar_runtime_observed_state(
+        session=session,
+        decision=session.decision,
+        df=df,
+        trades_abertos=[],
+        preco_atual=102.0,
+        regime_info={"regime": "BULL", "adx": 30, "volatilidade": "NORMAL"},
+    )
+    assert observed["data_fresh"] is False
+    assert observed["paper_capital_used"] == Decimal("0")
+    assert observed["risk_per_trade_percent"] == Decimal("0")
+
+
+def test_coleta_runtime_falha_ao_buscar_trades(tmp_path, monkeypatch):
+    store = _store(tmp_path)
+    session = _session(store, session_id="trades-fail")
+    import storage
+
+    monkeypatch.setattr(storage, "obter_ultimos_trades_paper", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
+    with pytest.raises(PaperRuntimeSessionError):
+        paper_engine._coletar_runtime_observed_state(
+            session=session,
+            decision=session.decision,
+            df=_paper_df(),
+            trades_abertos=[],
+            preco_atual=102.0,
+            regime_info={"regime": "BULL", "adx": 30, "volatilidade": "NORMAL"},
+        )
+
+
+def test_primeira_perda_gera_drawdown_positivo(tmp_path, monkeypatch):
+    store = _store(tmp_path)
+    session = _session(store, session_id="drawdown-positive")
+    import storage
+
+    monkeypatch.setattr(
+        storage,
+        "obter_ultimos_trades_paper",
+        lambda *args, **kwargs: [
+            {"lucro_reais": -100.0, "lucro_percent": -1.0, "session_id": session.record.session_id},
+        ],
+    )
+    observed = paper_engine._coletar_runtime_observed_state(
+        session=session,
+        decision=session.decision,
+        df=_paper_df(),
+        trades_abertos=[],
+        preco_atual=102.0,
+        regime_info={"regime": "BULL", "adx": 30, "volatilidade": "NORMAL"},
+    )
+    assert observed["session_drawdown_percent"] > 0
+
+
+def test_trades_de_outra_sessao_nao_contaminam_metricas(tmp_path, monkeypatch):
+    store = _store(tmp_path)
+    session = _session(store, session_id="same-session")
+    import storage
+
+    called = {"session_id": None}
+
+    def fake_obter_ultimos_trades_paper(*args, **kwargs):
+        called["session_id"] = kwargs.get("session_id")
+        return [{"lucro_reais": 50.0, "lucro_percent": 0.5, "session_id": session.record.session_id}]
+
+    monkeypatch.setattr(storage, "obter_ultimos_trades_paper", fake_obter_ultimos_trades_paper)
+    observed = paper_engine._coletar_runtime_observed_state(
+        session=session,
+        decision=session.decision,
+        df=_paper_df(),
+        trades_abertos=[
+            {"id": 1, "session_id": "outra-sessao", "tipo": "paper", "status": "open", "valor_arriscado": 500.0},
+            {"id": 2, "session_id": session.record.session_id, "tipo": "paper", "status": "open", "valor_arriscado": 100.0},
+        ],
+        preco_atual=102.0,
+        regime_info={"regime": "BULL", "adx": 30, "volatilidade": "NORMAL"},
+    )
+    assert called["session_id"] == session.record.session_id
+    assert observed["open_positions"] == 1
+    assert observed["paper_capital_used"] == Decimal("100")
+
+
+def test_monitor_snapshot_rollback_total_em_falha_idempotencia(tmp_path, monkeypatch):
+    store = _store(tmp_path)
+    session = _session(store, session_id="rollback")
+    snapshot = _snapshot(session)
+    monkeypatch.setattr(store, "_store_idempotent_response", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
+    with pytest.raises(RuntimeError):
+        session.evaluate_snapshot(snapshot, decision=session.decision, idempotency_key="idem-rollback")
+    with sqlite3.connect(store.db_path) as conn:
+        snapshot_count = conn.execute("SELECT COUNT(*) FROM paper_runtime_snapshots WHERE session_id = ?", (session.record.session_id,)).fetchone()[0]
+        event_count = conn.execute("SELECT COUNT(*) FROM paper_runtime_events WHERE session_id = ?", (session.record.session_id,)).fetchone()[0]
+    assert snapshot_count == 0
+    assert event_count == 1
+    assert store.load_session(session.record.session_id).state is PaperRuntimeState.RUNNING
+
+
+def test_idempotencia_mesma_chave_papel_divergente_falha(tmp_path, monkeypatch):
+    import storage
+
+    monkeypatched_db = str(tmp_path / "trades.db")
+    storage.inicializar_banco(monkeypatched_db)
+    trade_id = storage.registrar_trade_paper("SOLUSDT", "COMPRA", 100.0, 95.0, 110.0, 1.0, 10.0, 2.0, session_id="sess-1", idempotency_key="idem-trade", db_name=monkeypatched_db)
+    assert trade_id is not None
+    mesmo_id = storage.registrar_trade_paper("SOLUSDT", "COMPRA", 100.0, 95.0, 110.0, 1.0, 10.0, 2.0, session_id="sess-1", idempotency_key="idem-trade", db_name=monkeypatched_db)
+    assert mesmo_id == trade_id
+    divergente = storage.registrar_trade_paper("SOLUSDT", "COMPRA", 101.0, 95.0, 110.0, 1.0, 10.0, 2.0, session_id="sess-1", idempotency_key="idem-trade", db_name=monkeypatched_db)
+    assert divergente is None
+
+
+@pytest.mark.parametrize("sequence_to_delete", [2, 3, 4])
+def test_truncamento_evento_primeiro_intermediario_ultimo_detectado(tmp_path, sequence_to_delete):
+    store = _store(tmp_path)
+    session = _session(store, session_id=f"truncate-{sequence_to_delete}")
+    session.evaluate_snapshot(_snapshot(session), decision=session.decision)
+    session.evaluate_snapshot(_snapshot(session, executed_trades=1), decision=session.decision)
+    with sqlite3.connect(store.db_path) as conn:
+        conn.execute("DELETE FROM paper_runtime_events WHERE session_id = ? AND sequence = ?", (session.record.session_id, sequence_to_delete))
+        conn.commit()
+    with pytest.raises(PaperRuntimeAuditError):
+        store.load_events(session.record.session_id)

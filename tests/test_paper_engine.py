@@ -238,7 +238,7 @@ def test_monitorar_paper_sol_abre_trade(monkeypatch, sample_btc_data):
     fake_backtester = MagicMock()
     fake_backtester.baixar_dados_historicos.return_value = sample_btc_data
     monkeypatch.setattr(paper_engine, "backtester", fake_backtester)
-    monkeypatch.setattr(paper_engine, "obter_trades_paper_abertos", lambda symbol: [])
+    monkeypatch.setattr(paper_engine, "obter_trades_paper_abertos", lambda symbol=None, session_id=None: [])
     monkeypatch.setattr(paper_engine, "classificar_regime", lambda df: {"regime": "BULL", "adx": 30, "volatilidade": "NORMAL"})
     monkeypatch.setattr(
         paper_engine,
@@ -265,7 +265,7 @@ def test_monitorar_paper_sol_bloqueios_e_erros(monkeypatch, sample_btc_data):
     fake_backtester = MagicMock()
     fake_backtester.baixar_dados_historicos.return_value = sample_btc_data
     monkeypatch.setattr(paper_engine, "backtester", fake_backtester)
-    monkeypatch.setattr(paper_engine, "obter_trades_paper_abertos", lambda symbol: [])
+    monkeypatch.setattr(paper_engine, "obter_trades_paper_abertos", lambda symbol=None, session_id=None: [])
     monkeypatch.setattr(paper_engine, "classificar_regime", lambda df: {"regime": "BULL", "adx": 30, "volatilidade": "NORMAL"})
     monkeypatch.setattr(paper_engine, "tomar_decisao", lambda *args, **kwargs: {"rsi": 50, "volume_status": "NEUTRO", "motivo": "ok"})
     monkeypatch.setattr(paper_engine, "esta_em_killzone", lambda: False)
@@ -314,7 +314,7 @@ def test_monitorar_paper_sol_trade_aberto_take_e_stop_e_filtros(monkeypatch):
     monkeypatch.setattr(
         paper_engine,
         "obter_trades_paper_abertos",
-        lambda symbol: [
+        lambda symbol=None, session_id=None: [
             {
                 "id": 1,
                 "timestamp": "2026-01-01T00:00:00+00:00",
@@ -359,7 +359,7 @@ def test_monitorar_paper_sol_trade_aberto_take_e_stop_e_filtros(monkeypatch):
             "timestamp": pd.date_range("2026-01-01", periods=3, freq="h"),
         }
     )
-    monkeypatch.setattr(paper_engine, "obter_trades_paper_abertos", lambda symbol: [])
+    monkeypatch.setattr(paper_engine, "obter_trades_paper_abertos", lambda symbol=None, session_id=None: [])
     monkeypatch.setattr(
         paper_engine,
         "_obter_sinal_paper_sol",
@@ -368,6 +368,7 @@ def test_monitorar_paper_sol_trade_aberto_take_e_stop_e_filtros(monkeypatch):
     monkeypatch.setattr(paper_engine, "tomar_decisao", lambda *args, **kwargs: {"rsi": 50, "volume_status": "NEUTRO", "motivo": "ok"})
     monkeypatch.setattr(paper_engine, "calcular_tamanho_posicao", lambda capital, risco_percentual, entrada, stop: (1.0, 100.0))
     monkeypatch.setattr(paper_engine, "_avaliar_filtros_paper", lambda sinal, decisao_info, regime_info: (False, {"killzone_ok": False, "adx_ok": True, "rsi_ok": True}))
+    monkeypatch.setattr(paper_engine, "esta_em_killzone", lambda: True)
     decisao_mock = MagicMock()
     monkeypatch.setattr(paper_engine, "registrar_decisao_observabilidade", decisao_mock)
 
@@ -379,7 +380,7 @@ def test_monitorar_paper_sol_rr_baixo_e_risk_manager_indisponivel(monkeypatch, s
     fake_backtester = MagicMock()
     fake_backtester.baixar_dados_historicos.return_value = sample_btc_data
     monkeypatch.setattr(paper_engine, "backtester", fake_backtester)
-    monkeypatch.setattr(paper_engine, "obter_trades_paper_abertos", lambda symbol: [])
+    monkeypatch.setattr(paper_engine, "obter_trades_paper_abertos", lambda symbol=None, session_id=None: [])
     monkeypatch.setattr(paper_engine, "classificar_regime", lambda df: {"regime": "BULL", "adx": 30, "volatilidade": "NORMAL"})
     monkeypatch.setattr(paper_engine, "esta_em_killzone", lambda: True)
     monkeypatch.setattr(
@@ -413,7 +414,7 @@ def test_monitorar_paper_sol_fecha_trade_compra_e_venda(monkeypatch):
     monkeypatch.setattr(
         paper_engine,
         "obter_trades_paper_abertos",
-        lambda symbol: [
+        lambda symbol=None, session_id=None: [
             {
                 "id": 1,
                 "timestamp": "2026-01-01T00:00:00+00:00",
@@ -443,7 +444,7 @@ def test_monitorar_paper_sol_fecha_trade_compra_e_venda(monkeypatch):
     monkeypatch.setattr(
         paper_engine,
         "obter_trades_paper_abertos",
-        lambda symbol: [
+        lambda symbol=None, session_id=None: [
             {
                 "id": 2,
                 "timestamp": "2026-01-01T00:00:00+00:00",

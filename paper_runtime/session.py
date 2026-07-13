@@ -255,22 +255,19 @@ class PaperRuntimeSession:
             limits=limits,
             session_contract=self.contract_as_monitoring(),
         )
-        self._store.append_snapshot(
+        transition_state = PaperRuntimeState.SUSPENDED if monitoring_decision.status is PromotionStatus.PAPER_SUSPENDED else None
+        self._store.record_monitoring_result(
             self._record.session_id,
             snapshot=snapshot.as_dict(),
             decision_hash=monitoring_decision.decision_hash,
             evidence_hash=monitoring_decision.evidence_hash,
             result_status=monitoring_decision.status.value,
+            expected_version=self._record.version,
+            transition_state=transition_state,
+            transition_reason=monitoring_decision.reasons[0] if monitoring_decision.reasons else "monitoring suspended",
             idempotency_key=idempotency_key,
         )
         self._record = self._store.load_session(self._record.session_id)
-        if monitoring_decision.status is PromotionStatus.PAPER_SUSPENDED:
-            self._record = self._store.transition_session(
-                self._record.session_id,
-                expected_version=self._record.version,
-                next_state=PaperRuntimeState.SUSPENDED,
-                reason=monitoring_decision.reasons[0] if monitoring_decision.reasons else "monitoring suspended",
-            )
         return RuntimeEvaluationResult(
             monitoring_decision=monitoring_decision,
             session=self._record,
