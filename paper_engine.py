@@ -1,5 +1,6 @@
 import logging
 from datetime import datetime, timezone
+from decimal import Decimal
 
 from config import (
     CAPITAL_PAPER,
@@ -41,6 +42,19 @@ try:
     import backtester
 except Exception:  # pragma: no cover - fallback defensivo
     backtester = None
+
+try:
+    from paper_runtime import (
+        PaperRuntimeSessionError,
+        build_snapshot_from_observed_state,
+        evaluate_monitored_session,
+        get_monitored_session,
+    )
+except Exception:  # pragma: no cover - fallback defensivo
+    PaperRuntimeSessionError = Exception
+    get_monitored_session = None
+    build_snapshot_from_observed_state = None
+    evaluate_monitored_session = None
 
 
 PAPER_SYMBOL = "SOLUSDT"
@@ -204,6 +218,21 @@ def _avaliar_filtros_paper(sinal, decisao_info, regime_info):
     return filtros_aplicados, {"killzone_ok": killzone_ok, "adx_ok": adx_ok, "rsi_ok": rsi_ok}
 
 
+def _obter_runtime_session_do_job(job_data):
+    if get_monitored_session is None:
+        return None
+    if not job_data:
+        return None
+    session_id = job_data.get("session_id")
+    if not session_id:
+        return None
+    try:
+        return get_monitored_session(session_id=session_id)
+    except Exception as exc:
+        logging.warning(f"Sessao paper monitorada indisponivel: {exc}")
+        return None
+
+
 async def monitorar_paper_sol(context):
     if not PAPER_TRADING_ATIVO:
         return
@@ -215,6 +244,23 @@ async def monitorar_paper_sol(context):
         chat_type = job_data.get("chat_type")
         if not can_execute_sensitive_telegram_action(user_id, chat_id, chat_type):
             logging.warning("Monitoramento paper SOL bloqueado por autorizacao.")
+            return
+        runtime_session = _obter_runtime_session_do_job(job_data)
+        if job_data.get("session_id") and runtime_session is None:
+            registrar_decisao_observabilidade(
+                symbol=PAPER_SYMBOL,
+                modo="PAPER_SOL",
+                decisao="ERRO",
+                direcao="N/A",
+                preco=None,
+                regime="N/D",
+                adx=None,
+                volume_status="N/D",
+                motivo="Sessao paper monitorada indisponivel.",
+                bloqueado_por="SESSION",
+                fonte_dados="N/D",
+                erro="sessao monitora ausente",
+            )
             return
         if backtester is None:
             registrar_decisao_observabilidade(
@@ -429,6 +475,88 @@ async def monitorar_paper_sol(context):
                         )
                         continue
             return
+
+        if runtime_session is not None and build_snapshot_from_observed_state is not None and evaluate_monitored_session is not None:
+            runtime_decision = runtime_session.decision
+            if runtime_decision is None:
+                registrar_decisao_observabilidade(
+                    symbol=PAPER_SYMBOL,
+                    modo="PAPER_SOL",
+                    decisao="ERRO",
+                    direcao="N/A",
+                    preco=preco_atual,
+                    regime=regime_info.get("regime"),
+                    adx=regime_info.get("adx"),
+                    volume_status=regime_info.get("volatilidade"),
+                    motivo="Sessao runtime sem decisao monitoravel.",
+                    bloqueado_por="SESSION",
+                    fonte_dados=fonte_dados,
+                    erro="runtime decision ausente",
+                )
+                return
+            runtime_observed = {
+                "data_fresh": True,
+                "session_drawdown_percent": Decimal("0"),
+                "current_loss_streak": 0,
+                "open_positions": len(aberto),
+                "executed_trades": len(aberto),
+                "observed_costs": {
+                    "entry_fee_rate": "0.0004",
+                    "exit_fee_rate": "0.0004",
+                    "spread_bps": "5",
+                    "slippage_bps": "5",
+                },
+                "session_state": runtime_session.record.state.value,
+                "paper_capital_used": Decimal(str(CAPITAL_PAPER)),
+                "risk_per_trade_percent": Decimal("1.0"),
+                "internal_error": None,
+                "attempted_live": False,
+            }
+            try:
+                runtime_snapshot = build_snapshot_from_observed_state(
+                    session=runtime_session.record,
+                    decision=runtime_decision,
+                    observed=runtime_observed,
+                    timestamp_utc=datetime.now(timezone.utc),
+                )
+                runtime_result = runtime_session.evaluate_snapshot(
+                    runtime_snapshot,
+                    decision=runtime_decision,
+                )
+                if not runtime_result.approved:
+                    registrar_decisao_observabilidade(
+                        symbol=PAPER_SYMBOL,
+                        modo="PAPER_SOL",
+                        decisao="PAPER_SUSPENDED",
+                        direcao="N/A",
+                        preco=preco_atual,
+                        regime=regime_info.get("regime"),
+                        adx=regime_info.get("adx"),
+                        volume_status=regime_info.get("volatilidade"),
+                        motivo="Sessao paper monitorada suspensa.",
+                        bloqueado_por="SESSION",
+                        fonte_dados=fonte_dados,
+                        erro="N/A",
+                    )
+                    logging.warning("Sessao paper monitorada suspensa; novas ordens bloqueadas.")
+                    return
+            except Exception as exc:
+                registrar_decisao_observabilidade(
+                    symbol=PAPER_SYMBOL,
+                    modo="PAPER_SOL",
+                    decisao="ERRO",
+                    direcao="N/A",
+                    preco=preco_atual,
+                    regime=regime_info.get("regime"),
+                    adx=regime_info.get("adx"),
+                    volume_status=regime_info.get("volatilidade"),
+                    motivo="Falha ao revalidar a sessao paper monitorada.",
+                    bloqueado_por="SESSION",
+                    fonte_dados=fonte_dados,
+                    erro=str(exc),
+                )
+                logging.warning(f"Falha ao revalidar sessao paper monitorada: {exc}")
+                return
 
         sinal = _obter_sinal_paper_sol()
         if not sinal or sinal.get("direcao") not in ("COMPRA", "VENDA"):
