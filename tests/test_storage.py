@@ -1,5 +1,7 @@
 import sqlite3
 
+import pytest
+
 import storage
 
 
@@ -113,6 +115,142 @@ def test_buscar_logs_vazios_e_falha(monkeypatch, temp_db_path):
     assert storage.buscar_ultimos_decision_logs(limite=5) == []
 
 
+def test_leituras_estritas_lancam_erro_em_falha_sqlite(monkeypatch, temp_db_path):
+    _setup_db(monkeypatch, temp_db_path)
+
+    class FakeConn:
+        def __enter__(self):
+            raise sqlite3.OperationalError("boom")
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(storage.sqlite3, "connect", lambda *args, **kwargs: FakeConn())
+    with pytest.raises(storage.PaperTradeStorageReadError):
+        storage.obter_trades_paper_abertos("SOLUSDT", strict=True)
+    with pytest.raises(storage.PaperTradeStorageReadError):
+        storage.obter_ultimos_trades_paper("SOLUSDT", strict=True)
+    with pytest.raises(storage.PaperTradeStorageReadError):
+        storage.obter_outbox_paper_pendentes(strict=True)
+
+
+def test_leituras_estritas_bloqueiam_schema_invalido(monkeypatch, temp_db_path):
+    _setup_db(monkeypatch, temp_db_path)
+
+    class FakeCursor:
+        def execute(self, *args, **kwargs):
+            raise sqlite3.DatabaseError("no such table")
+
+        def fetchall(self):
+            return []
+
+    class FakeConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def cursor(self):
+            return FakeCursor()
+
+    monkeypatch.setattr(storage.sqlite3, "connect", lambda *args, **kwargs: FakeConn())
+    with pytest.raises(storage.PaperTradeStorageReadError):
+        storage.obter_trades_paper_abertos("SOLUSDT", strict=True)
+    with pytest.raises(storage.PaperTradeStorageReadError):
+        storage.obter_ultimos_trades_paper("SOLUSDT", strict=True)
+    with pytest.raises(storage.PaperTradeStorageReadError):
+        storage.obter_outbox_paper_pendentes(strict=True)
+
+
+def test_outbox_estrito_nao_recria_banco_ausente(monkeypatch, tmp_path):
+    db_path = tmp_path / "missing_outbox.db"
+    assert not db_path.exists()
+    with pytest.raises(storage.PaperTradeStorageReadError):
+        storage.obter_outbox_paper_pendentes(db_name=str(db_path), strict=True)
+    assert not db_path.exists()
+
+
+def test_outbox_estrito_bloqueia_schema_ausente(monkeypatch, temp_db_path):
+    _setup_db(monkeypatch, temp_db_path)
+    with sqlite3.connect(temp_db_path) as conn:
+        conn.execute("DROP TABLE paper_trade_outbox")
+        conn.commit()
+    with pytest.raises(storage.PaperTradeStorageReadError):
+        storage.obter_outbox_paper_pendentes(db_name=temp_db_path, strict=True)
+
+
+def test_leituras_legitimas_sem_registros_continuam_vazias(monkeypatch, temp_db_path):
+    _setup_db(monkeypatch, temp_db_path)
+    assert storage.obter_trades_paper_abertos("SOLUSDT", db_name=temp_db_path, strict=False) == []
+    assert storage.obter_ultimos_trades_paper("SOLUSDT", db_name=temp_db_path, strict=False) == []
+    assert storage.obter_outbox_paper_pendentes(db_name=temp_db_path, strict=False) == []
+
+
+def test_outbox_update_missing_event_e_transicao_invalida(monkeypatch, temp_db_path):
+    _setup_db(monkeypatch, temp_db_path)
+    assert storage.atualizar_outbox_paper_trade(
+        "missing",
+        status="DELIVERED",
+        runtime_delivered_at_utc=storage._agora_iso(),
+    ) is False
+    assert storage.atualizar_outbox_paper_trade(
+        "missing",
+        snapshot_applied_at_utc=storage._agora_iso(),
+    ) is False
+    assert storage.atualizar_outbox_paper_trade(
+        "missing",
+        telegram_sent_at_utc=storage._agora_iso(),
+    ) is False
+
+    trade_id = storage.registrar_trade_paper(
+        symbol="SOLUSDT",
+        direcao="COMPRA",
+        entrada=100,
+        stop_loss=95,
+        take_profit=110,
+        quantidade=1.0,
+        valor_arriscado=100,
+        rr_planejado=2.0,
+        filtros_aplicados=True,
+        db_name=temp_db_path,
+    )
+    assert trade_id is not None
+    event_id = storage.registrar_paper_trade_outbox(
+        event_id="evt-1",
+        session_id="sess-1",
+        trade_id=trade_id,
+        operation_type="OPEN",
+        candle_close_time="2026-01-01T00:00:00+00:00",
+        idempotency_key="idem-1",
+        payload={
+            "operation_type": "OPEN",
+            "trade_id": trade_id,
+            "session_id": "sess-1",
+            "candle_close_time": "2026-01-01T00:00:00+00:00",
+            "idempotency_key": "idem-1",
+            "snapshot_idempotency_key": "idem-1:snapshot",
+            "runtime_events": [],
+            "snapshot_context": {
+                "preco_atual": 100.0,
+                "regime_info": {},
+                "data_fresh": True,
+            },
+            "telegram": {"chat_id": 1, "text": "ok"},
+        },
+        db_name=temp_db_path,
+    )
+    assert event_id == "evt-1"
+    with sqlite3.connect(temp_db_path) as conn:
+        conn.execute("UPDATE paper_trade_outbox SET status = 'NOTIFIED' WHERE event_id = ?", ("evt-1",))
+        conn.commit()
+    assert storage.atualizar_outbox_paper_trade(
+        "evt-1",
+        status="DELIVERED",
+        runtime_delivered_at_utc=storage._agora_iso(),
+    ) is False
+
+
 def test_trade_paper_workflow(monkeypatch, temp_db_path):
     _setup_db(monkeypatch, temp_db_path)
     trade_id = storage.registrar_trade_paper(
@@ -125,19 +263,53 @@ def test_trade_paper_workflow(monkeypatch, temp_db_path):
         valor_arriscado=100,
         rr_planejado=2.0,
         filtros_aplicados=True,
+        entry_spread_cost=0.25,
+        entry_slippage_cost=0.15,
+        spread_cost=0.25,
+        slippage_cost=0.15,
     )
     assert trade_id is not None
 
-    abertos = storage.obter_trades_paper_abertos("SOLUSDT")
+    with sqlite3.connect(temp_db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT entry_spread_cost, entry_slippage_cost, exit_spread_cost, exit_slippage_cost, spread_cost, slippage_cost
+            FROM trades
+            WHERE id = ?
+            """,
+            (trade_id,),
+        ).fetchone()
+    assert row == (0.25, 0.15, None, None, 0.25, 0.15)
+
+    abertos = storage.obter_trades_paper_abertos("SOLUSDT", db_name=temp_db_path)
     assert len(abertos) == 1
     assert abertos[0]["id"] == trade_id
 
     count_abertos = storage.contar_trades_abertos_paper("SOLUSDT")
     assert count_abertos == 1
 
-    close_ok = storage.finalizar_trade_paper(trade_id, 110, 10.0, 15.0, "GANHO", "TAKE_PROFIT")
+    close_ok = storage.finalizar_trade_paper(
+        trade_id,
+        110,
+        10.0,
+        15.0,
+        "GANHO",
+        "TAKE_PROFIT",
+        idempotency_key="idem-close",
+    )
     assert close_ok is True
     assert storage.contar_trades_abertos_paper("SOLUSDT") == 0
+    assert storage.finalizar_trade_paper(
+        trade_id,
+        110,
+        10.0,
+        15.0,
+        "GANHO",
+        "TAKE_PROFIT",
+        idempotency_key="idem-close",
+    ) is True
+    with pytest.raises(storage.PaperTradeFinalizationError):
+        storage.finalizar_trade_paper(trade_id, 111, 11.0, 16.0, "GANHO", "TAKE_PROFIT", idempotency_key="idem-close")
 
     stats = storage.obter_paper_stats("SOLUSDT")
     assert stats is not None
@@ -147,6 +319,70 @@ def test_trade_paper_workflow(monkeypatch, temp_db_path):
     trade_list = storage.buscar_trades_paper(limite=10, symbol="SOLUSDT")
     assert len(trade_list) == 1
     assert trade_list[0]["status"] == "closed"
+    with sqlite3.connect(temp_db_path) as conn:
+        row = conn.execute(
+            "SELECT preco_base, fill_price, entry_fee, entry_spread_cost, entry_slippage_cost, exit_spread_cost, exit_slippage_cost, close_idempotency_key, close_idempotency_hash, pnl_liquido FROM trades WHERE id = ?",
+            (trade_id,),
+        ).fetchone()
+    assert row[0] == 100.0
+    assert row[1] is not None
+    assert row[2] is not None
+    assert row[3] is not None
+    assert row[4] is not None
+    assert row[5] is not None
+    assert row[6] is not None
+    assert row[7] == "idem-close"
+    assert row[8] is not None
+    assert row[9] is not None
+
+
+def test_obter_trades_paper_abertos_e_ultimos_trades_expoem_contracto_temporal(monkeypatch, temp_db_path):
+    _setup_db(monkeypatch, temp_db_path)
+    trade_id = storage.registrar_trade_paper(
+        symbol="SOLUSDT",
+        direcao="COMPRA",
+        entrada=100,
+        stop_loss=95,
+        take_profit=110,
+        quantidade=1.0,
+        valor_arriscado=100,
+        rr_planejado=2.0,
+        filtros_aplicados=True,
+        session_id="sess-contract",
+        idempotency_key="idem-open-contract",
+        candle_close_time="2026-01-01T00:00:00+00:00",
+        signal_identity="signal-contract",
+        preco_base=100.0,
+        fill_price=100.0,
+        entry_fee=0.4,
+        entry_spread_cost=0.05,
+        entry_slippage_cost=0.05,
+        spread_cost=0.05,
+        slippage_cost=0.05,
+        db_name=temp_db_path,
+    )
+    assert trade_id is not None
+
+    abertos = storage.obter_trades_paper_abertos("SOLUSDT", db_name=temp_db_path)
+    assert len(abertos) == 1
+    assert abertos[0]["tipo"] == "paper"
+    assert abertos[0]["status"] == "open"
+    assert abertos[0]["session_id"] == "sess-contract"
+
+    storage.finalizar_trade_paper(
+        trade_id,
+        110,
+        10.0,
+        10.0,
+        "GANHO",
+        "TAKE_PROFIT",
+        idempotency_key="idem-close-contract",
+        db_name=temp_db_path,
+    )
+    ultimos = storage.obter_ultimos_trades_paper("SOLUSDT", limite=5, db_name=temp_db_path, session_id="sess-contract")
+    assert len(ultimos) == 1
+    assert "fechado_em" in ultimos[0]
+    assert ultimos[0]["fechado_em"] is not None
 
 
 def test_contar_fechados_hoje_e_paper_stats_sem_filtrado(monkeypatch, temp_db_path):
@@ -180,7 +416,7 @@ def test_obter_paper_stats_vazio(monkeypatch, temp_db_path):
 def test_buscar_trades_paper_vazio_e_erro(monkeypatch, temp_db_path):
     _setup_db(monkeypatch, temp_db_path)
     assert storage.buscar_trades_paper(limite=10, symbol="SOLUSDT") == []
-    assert storage.obter_trades_paper_abertos("SOLUSDT") == []
+    assert storage.obter_trades_paper_abertos("SOLUSDT", db_name=temp_db_path) == []
     assert storage.contar_trades_abertos_paper("SOLUSDT") == 0
     assert storage.contar_trades_fechados_hoje("SOLUSDT") == 0
 
@@ -193,7 +429,7 @@ def test_buscar_trades_paper_vazio_e_erro(monkeypatch, temp_db_path):
 
     monkeypatch.setattr(storage.sqlite3, "connect", lambda *args, **kwargs: FakeConn())
     assert storage.buscar_trades_paper(limite=10, symbol="SOLUSDT") == []
-    assert storage.obter_trades_paper_abertos("SOLUSDT") == []
+    assert storage.obter_trades_paper_abertos("SOLUSDT", db_name=temp_db_path) == []
 
 
 def test_registrar_e_finalizar_trade_paper_falhas(monkeypatch, temp_db_path):

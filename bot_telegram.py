@@ -21,6 +21,7 @@ from telegram.ext import (
 from telegram.request import HTTPXRequest
 import pandas as pd
 import warnings
+import config
 
 warnings.filterwarnings("ignore", message=".*per_message=False.*")
 
@@ -733,7 +734,8 @@ async def monitorar_preco(context: ContextTypes.DEFAULT_TYPE):
                     "chat_id": chat_id,
                     "user_id": user_id,
                     "chat_type": chat_type,
-                }
+                    **({"session_id": job_data.get("session_id")} if job_data.get("session_id") is not None else {}),
+                },
             )
             ultimo_regime_vigia = regime_atual
             await context.bot.send_message(
@@ -1005,10 +1007,20 @@ async def ativar_vigia(update: Update, context: ContextTypes.DEFAULT_TYPE):
         name="vigia_btc", data={'chat_id': chat_id, 'user_id': user_id, 'chat_type': chat_type}
     )
     if PAPER_TRADING_ATIVO and not context.job_queue.get_jobs_by_name(PAPER_JOB_NAME):
-        context.job_queue.run_repeating(
-            monitorar_paper_sol, interval=60, first=15,
-            name=PAPER_JOB_NAME, data={'chat_id': chat_id, 'user_id': user_id, 'chat_type': chat_type}
-        )
+        runtime_session = None
+        if hasattr(paper_engine_module, "get_monitored_session"):
+            try:
+                runtime_session = paper_engine_module.get_monitored_session()
+            except Exception:
+                runtime_session = None
+        if runtime_session is not None and getattr(runtime_session, "record", None) is not None and runtime_session.record.active:
+            paper_job_data = {'chat_id': chat_id, 'user_id': user_id, 'chat_type': chat_type, 'session_id': runtime_session.record.session_id}
+            context.job_queue.run_repeating(
+                monitorar_paper_sol, interval=60, first=15,
+                name=PAPER_JOB_NAME, data=paper_job_data
+            )
+        elif getattr(config, "PAPER_MONITORED_RUNTIME_REQUIRED", True):
+            logging.warning("Paper monitorado exigido, mas nenhuma sessao valida esta ativa; job nao agendado.")
     vigia_ativo = True
     await update.message.reply_text(f"🔍 Vigia ativado! Monitorando a cada 1 minuto. Adapta-se ao regime automaticamente.\nModo: {MODO_OPERACAO}\nPara parar, use /parar.")
 
