@@ -650,9 +650,12 @@ def test_decisao_deterministica_polity_hash_timestamp_and_live_attempt_fail():
     assert evaluate_paper_monitoring(decision_a, _paper_snapshot(decision_a, attempted_live=True), session_contract=session_contract).status == PromotionStatus.PAPER_SUSPENDED
     assert evaluate_paper_monitoring(decision_a, _paper_snapshot(decision_a, observed_costs={"entry_fee_rate": "0.0004", "exit_fee_rate": "0.0004", "spread_bps": "5", "slippage_bps": "5"}), session_contract=session_contract).status == PromotionStatus.APPROVED_FOR_MONITORED_PAPER
     assert evaluate_paper_monitoring(decision_a, _paper_snapshot(decision_a, observed_costs={"entry_fee_rate": "0.1", "exit_fee_rate": "0.0004", "spread_bps": "5", "slippage_bps": "5"}), session_contract=session_contract).status == PromotionStatus.PAPER_SUSPENDED
-    assert evaluate_paper_monitoring(decision_a, _paper_snapshot(decision_a, observed_costs={"entry_fee_rate": "-0.1", "exit_fee_rate": "0.0004", "spread_bps": "5", "slippage_bps": "5"}), session_contract=session_contract).status == PromotionStatus.PAPER_SUSPENDED
-    assert evaluate_paper_monitoring(decision_a, _paper_snapshot(decision_a, observed_costs={"entry_fee_rate": "NaN", "exit_fee_rate": "0.0004", "spread_bps": "5", "slippage_bps": "5"}), session_contract=session_contract).status == PromotionStatus.PAPER_SUSPENDED
-    assert evaluate_paper_monitoring(decision_a, _paper_snapshot(decision_a, observed_costs={"entry_fee_rate": "Infinity", "exit_fee_rate": "0.0004", "spread_bps": "5", "slippage_bps": "5"}), session_contract=session_contract).status == PromotionStatus.PAPER_SUSPENDED
+    with pytest.raises(PromotionPolicyError):
+        _paper_snapshot(decision_a, observed_costs={"entry_fee_rate": "-0.1", "exit_fee_rate": "0.0004", "spread_bps": "5", "slippage_bps": "5"})
+    with pytest.raises(PromotionPolicyError):
+        _paper_snapshot(decision_a, observed_costs={"entry_fee_rate": "NaN", "exit_fee_rate": "0.0004", "spread_bps": "5", "slippage_bps": "5"})
+    with pytest.raises(PromotionPolicyError):
+        _paper_snapshot(decision_a, observed_costs={"entry_fee_rate": "Infinity", "exit_fee_rate": "0.0004", "spread_bps": "5", "slippage_bps": "5"})
     assert evaluate_paper_monitoring(decision_a, _paper_snapshot(decision_a, observed_costs={}), session_contract=session_contract).status == PromotionStatus.PAPER_SUSPENDED
     assert evaluate_paper_monitoring(decision_a, _paper_snapshot(decision_a, observed_costs={"entry_fee_rate": "0.0004", "exit_fee_rate": "0.0004", "spread_bps": "5", "slippage_bps": "5", "extra": "1"}), session_contract=session_contract).status == PromotionStatus.PAPER_SUSPENDED
     assert evaluate_paper_monitoring(decision_a, _paper_snapshot(decision_a, paper_capital_used="20000"), session_contract=session_contract).status == PromotionStatus.PAPER_SUSPENDED

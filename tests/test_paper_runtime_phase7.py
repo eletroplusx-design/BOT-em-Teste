@@ -477,22 +477,26 @@ def test_tentativa_live_suspende(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "observed_costs, expected_reason",
+    "observed_costs, expected_reason, expect_raise",
     [
-        ({}, "missing observed cost keys"),
-        ({"entry_fee_rate": "0.0004", "exit_fee_rate": "0.0004", "spread_bps": "5"}, "missing observed cost keys"),
-        ({"entry_fee_rate": "0.0004", "exit_fee_rate": "0.0004", "spread_bps": "5", "slippage_bps": "5", "other": "1"}, "unknown observed cost keys"),
-        ({"entry_fee_rate": "-0.1", "exit_fee_rate": "0.0004", "spread_bps": "5", "slippage_bps": "5"}, "cannot be negative"),
-        ({"entry_fee_rate": "NaN", "exit_fee_rate": "0.0004", "spread_bps": "5", "slippage_bps": "5"}, "must be finite"),
+        ({}, "missing observed cost keys", False),
+        ({"entry_fee_rate": "0.0004", "exit_fee_rate": "0.0004", "spread_bps": "5"}, "missing observed cost keys", False),
+        ({"entry_fee_rate": "0.0004", "exit_fee_rate": "0.0004", "spread_bps": "5", "slippage_bps": "5", "other": "1"}, "unknown observed cost keys", False),
+        ({"entry_fee_rate": "-0.1", "exit_fee_rate": "0.0004", "spread_bps": "5", "slippage_bps": "5"}, "cannot be negative", True),
+        ({"entry_fee_rate": "NaN", "exit_fee_rate": "0.0004", "spread_bps": "5", "slippage_bps": "5"}, "must be finite", True),
     ],
 )
-def test_custos_invalidos_suspendem(tmp_path, observed_costs, expected_reason):
+def test_custos_invalidos_suspendem(tmp_path, observed_costs, expected_reason, expect_raise):
     store = _store(tmp_path)
     session = _session(store, session_id=f"cost-{expected_reason}")
-    snapshot = _snapshot(session, observed_costs=observed_costs)
-    result = session.evaluate_snapshot(snapshot, decision=session.decision)
-    assert result.monitoring_decision.status is PromotionStatus.PAPER_SUSPENDED
-    assert expected_reason in result.monitoring_decision.reasons[0].lower()
+    if expect_raise:
+        with pytest.raises(PromotionPolicyError):
+            _snapshot(session, observed_costs=observed_costs)
+    else:
+        snapshot = _snapshot(session, observed_costs=observed_costs)
+        result = session.evaluate_snapshot(snapshot, decision=session.decision)
+        assert result.monitoring_decision.status is PromotionStatus.PAPER_SUSPENDED
+        assert expected_reason in result.monitoring_decision.reasons[0].lower()
 
 
 def test_falha_interna_suspende(tmp_path):
