@@ -720,18 +720,18 @@ def test_outbox_real_transita_abertura_fechamento_e_notificacao(monkeypatch, tmp
     import sqlite3
 
     contexto = _DummyContext({"chat_id": 123, "user_id": 123, "chat_type": "private", "session_id": session.record.session_id})
-    def _fake_evaluate_snapshot(snapshot, decision=None, idempotency_key=None, limits=None):
-        session._store.append_snapshot(
-            session.record.session_id,
+    def _fake_evaluate_snapshot(self, snapshot, decision=None, idempotency_key=None, limits=None):
+        self._store.append_snapshot(
+            self.record.session_id,
             snapshot=getattr(snapshot, "as_dict", lambda: snapshot)(),
-            decision_hash=session.decision.decision_hash,
-            evidence_hash=session.decision.evidence_hash,
+            decision_hash=self.decision.decision_hash,
+            evidence_hash=self.decision.evidence_hash,
             result_status="APPROVED",
             idempotency_key=idempotency_key,
         )
-        return SimpleNamespace(monitoring_decision=SimpleNamespace(status="APPROVED"), session=session.record, approved=True)
+        return SimpleNamespace(monitoring_decision=SimpleNamespace(status="APPROVED"), session=self.record, approved=True)
 
-    session.evaluate_snapshot = _fake_evaluate_snapshot
+    monkeypatch.setattr(type(session), "evaluate_snapshot", _fake_evaluate_snapshot, raising=False)
 
     agora = datetime.now(timezone.utc)
     open_time = agora - timedelta(minutes=30)
@@ -900,6 +900,426 @@ def test_outbox_real_transita_abertura_fechamento_e_notificacao(monkeypatch, tmp
         ).fetchone()[0]
     assert snapshot_count >= 1
     assert event_count >= 1
+
+
+def test_monitorar_paper_sol_costs_abertura_e_fechamento_5bps(monkeypatch, tmp_path):
+    import storage
+
+    trades_db = tmp_path / "paper_trades_costs.db"
+    monkeypatch.setattr(storage, "DB_NAME", str(trades_db))
+    storage.inicializar_banco(str(trades_db))
+
+    store = _store(tmp_path)
+    session = _session(store, session_id="costs-5bps")
+    ctx = _DummyContext({"chat_id": 123, "user_id": 123, "chat_type": "private", "session_id": session.record.session_id})
+    monkeypatch.setattr(paper_engine, "get_monitored_session", lambda session_id=None, decision_hash=None, store=None: session if session_id == session.record.session_id else None)
+    monkeypatch.setattr(paper_engine, "_runtime_monitoring_enabled", lambda: False)
+    monkeypatch.setattr(paper_engine, "can_execute_sensitive_telegram_action", lambda *args, **kwargs: True)
+    monkeypatch.setattr(paper_engine, "backtester", SimpleNamespace(baixar_dados_historicos=lambda symbol=None: _paper_df()))
+    monkeypatch.setattr(storage, "DB_NAME", str(trades_db))
+    monkeypatch.setattr(paper_engine, "obter_trades_paper_abertos", lambda symbol=None, session_id=None: storage.obter_trades_paper_abertos(symbol=symbol, session_id=session_id))
+    monkeypatch.setattr(paper_engine, "classificar_regime", lambda df: {"regime": "BULL", "adx": 30, "volatilidade": "NORMAL"})
+    monkeypatch.setattr(paper_engine, "esta_em_killzone", lambda: True)
+    monkeypatch.setattr(
+        paper_engine,
+        "_obter_sinal_paper_sol",
+        lambda: {"direcao": "COMPRA", "entrada": 100.0, "stop_loss": 95.0, "take_profit": 110.0, "rr": 2.0, "motivo": "ok"},
+    )
+    monkeypatch.setattr(paper_engine, "tomar_decisao", lambda *args, **kwargs: {"volume_status": "ALTO", "motivo": "ok", "rsi": 50})
+    monkeypatch.setattr(paper_engine, "calcular_tamanho_posicao", lambda capital, risco, entrada, stop: (1.0, 5.0))
+
+    original_registrar = paper_engine.registrar_trade_paper
+    captured = {}
+
+    def _captura_trade_paper(*args, **kwargs):
+        captured.update(kwargs)
+        return original_registrar(*args, **kwargs)
+
+    monkeypatch.setattr(paper_engine, "registrar_trade_paper", _captura_trade_paper)
+
+    import asyncio
+
+    asyncio.run(paper_engine.monitorar_paper_sol(ctx))
+    assert captured["entry_spread_cost"] == pytest.approx(0.05, rel=1e-9)
+    assert captured["entry_slippage_cost"] == pytest.approx(0.05, rel=1e-9)
+
+    with sqlite3.connect(trades_db) as conn:
+        row = conn.execute(
+            "SELECT entry_spread_cost, entry_slippage_cost FROM trades WHERE tipo = 'paper' AND simbolo = 'SOLUSDT' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    assert row == pytest.approx((0.05, 0.05), rel=1e-9)
+
+    observed_open = paper_engine._coletar_runtime_observed_state(
+        session=session,
+        decision=session.decision,
+        df=_paper_df(),
+        trades_abertos=storage.obter_trades_paper_abertos(symbol="SOLUSDT", session_id=session.record.session_id),
+        preco_atual=100.0,
+        regime_info={"regime": "BULL", "adx": 30, "volatilidade": "NORMAL"},
+    )
+    assert Decimal(str(observed_open["observed_costs"]["spread_bps"])) == Decimal("5")
+    assert Decimal(str(observed_open["observed_costs"]["slippage_bps"])) == Decimal("5")
+
+    closing_df = _paper_df().copy()
+    closing_df.loc[:, "high"] = [120.0, 121.0, 122.0]
+    monkeypatch.setattr(paper_engine, "backtester", SimpleNamespace(baixar_dados_historicos=lambda symbol=None: closing_df))
+    asyncio.run(paper_engine.monitorar_paper_sol(ctx))
+
+    with sqlite3.connect(trades_db) as conn:
+        row = conn.execute(
+            """
+            SELECT entry_spread_cost, entry_slippage_cost, exit_spread_cost, exit_slippage_cost, spread_cost, slippage_cost
+            FROM trades
+            WHERE tipo = 'paper' AND simbolo = 'SOLUSDT'
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    assert row is not None
+    assert row[0] == pytest.approx(0.05, rel=1e-9)
+    assert row[1] == pytest.approx(0.05, rel=1e-9)
+    assert row[2] == pytest.approx(0.055, rel=1e-9)
+    assert row[3] == pytest.approx(0.055, rel=1e-9)
+    assert ((row[4]) / (100.0 + 110.0)) * 10000 == pytest.approx(5.0, rel=1e-9)
+    assert ((row[5]) / (100.0 + 110.0)) * 10000 == pytest.approx(5.0, rel=1e-9)
+
+
+def test_reconciliacao_retoma_apos_falha_entre_runtime_e_snapshot(monkeypatch, tmp_path):
+    import storage
+
+    trades_db = tmp_path / "paper_trades_resume.db"
+    monkeypatch.setattr(storage, "DB_NAME", str(trades_db))
+    storage.inicializar_banco(str(trades_db))
+
+    store = _store(tmp_path)
+    session = _session(store, session_id="resume-snapshot")
+    contexto = _DummyContext({"chat_id": 123, "user_id": 123, "chat_type": "private", "session_id": session.record.session_id})
+    monkeypatch.setattr(paper_engine, "obter_outbox_paper_pendentes", lambda session_id=None: storage.obter_outbox_paper_pendentes(session_id=session_id, db_name=str(trades_db)))
+    monkeypatch.setattr(paper_engine, "atualizar_outbox_paper_trade", lambda event_id, **kwargs: storage.atualizar_outbox_paper_trade(event_id, db_name=str(trades_db), **kwargs))
+    monkeypatch.setattr(storage, "DB_NAME", str(trades_db))
+    monkeypatch.setattr(paper_engine, "obter_trades_paper_abertos", lambda symbol=None, session_id=None: storage.obter_trades_paper_abertos(symbol=symbol, session_id=session_id))
+
+    def _fake_evaluate_snapshot(self, snapshot, decision=None, idempotency_key=None, limits=None):
+        self._store.append_snapshot(
+            self.record.session_id,
+            snapshot=getattr(snapshot, "as_dict", lambda: snapshot)(),
+            decision_hash=self.decision.decision_hash,
+            evidence_hash=self.decision.evidence_hash,
+            result_status="APPROVED",
+            idempotency_key=idempotency_key,
+        )
+        return SimpleNamespace(monitoring_decision=SimpleNamespace(status="APPROVED"), session=self.record, approved=True)
+
+    monkeypatch.setattr(type(session), "evaluate_snapshot", _fake_evaluate_snapshot, raising=False)
+
+    agora = datetime.now(timezone.utc)
+    candle_time = agora - timedelta(minutes=5)
+    trade_id = storage.registrar_trade_paper(
+        "SOLUSDT",
+        "COMPRA",
+        100.0,
+        95.0,
+        110.0,
+        1.0,
+        100.0,
+        2.0,
+        session_id=session.record.session_id,
+        idempotency_key="idem-resume-open",
+        candle_close_time=candle_time,
+        signal_identity="signal-resume-open",
+        preco_base=100.0,
+        fill_price=100.0,
+        entry_fee=0.0,
+        entry_spread_cost=0.05,
+        entry_slippage_cost=0.05,
+        spread_cost=0.05,
+        slippage_cost=0.05,
+        outbox_event_factory=lambda trade_id, timestamp: paper_engine._paper_runtime_outbox_record(
+            paper_engine._paper_runtime_outbox_payload(
+                operation_type="OPEN",
+                trade_id=trade_id,
+                session_id=session.record.session_id,
+                candle_close_time=candle_time,
+                idempotency_key=f"open:{trade_id}",
+                runtime_events=[{"event_type": paper_engine.PaperRuntimeEventType.TRADE_RECORDED.value, "result": "OPENED", "idempotency_key": f"open-event:{trade_id}", "payload": {"action": "OPEN", "trade_id": trade_id}}],
+                snapshot_context={"preco_atual": 100.0, "regime_info": {"regime": "BULL", "adx": 30, "volatilidade": "NORMAL"}, "data_fresh": True},
+                telegram_text="Paper SOL aberto",
+                telegram_chat_id=123,
+            )
+        ),
+        db_name=str(trades_db),
+    )
+    assert trade_id is not None
+
+    state = {"fail_snapshot": True}
+
+    def _update_fail_snapshot(event_id, **kwargs):
+        if kwargs.get("snapshot_applied_at_utc") is not None and state["fail_snapshot"]:
+            state["fail_snapshot"] = False
+            return False
+        return storage.atualizar_outbox_paper_trade(event_id, db_name=str(trades_db), **kwargs)
+
+    monkeypatch.setattr(paper_engine, "atualizar_outbox_paper_trade", _update_fail_snapshot)
+
+    import asyncio
+
+    with pytest.raises(PaperRuntimeSessionError):
+        asyncio.run(paper_engine._reconciliar_paper_runtime_outbox(contexto, session, session_scope_id=session.record.session_id, chat_id=123))
+
+    with sqlite3.connect(trades_db) as conn:
+        row = conn.execute("SELECT status, runtime_delivered_at_utc, snapshot_applied_at_utc, telegram_sent_at_utc FROM paper_trade_outbox WHERE event_id = (SELECT event_id FROM paper_trade_outbox ORDER BY id DESC LIMIT 1)").fetchone()
+    assert row[0] == "DELIVERED"
+    assert row[1] is not None
+    assert row[2] is None
+    assert row[3] is None
+
+    monkeypatch.setattr(paper_engine, "atualizar_outbox_paper_trade", lambda event_id, **kwargs: storage.atualizar_outbox_paper_trade(event_id, db_name=str(trades_db), **kwargs))
+    asyncio.run(paper_engine._reconciliar_paper_runtime_outbox(contexto, session, session_scope_id=session.record.session_id, chat_id=123))
+    with sqlite3.connect(trades_db) as conn:
+        row = conn.execute("SELECT status, snapshot_applied_at_utc, telegram_sent_at_utc FROM paper_trade_outbox WHERE event_id = (SELECT event_id FROM paper_trade_outbox ORDER BY id DESC LIMIT 1)").fetchone()
+    assert row[0] == "NOTIFIED"
+    assert row[1] is not None
+    assert row[2] is not None
+
+
+def test_reconciliacao_retoma_apos_falha_entre_snapshot_e_telegram(monkeypatch, tmp_path):
+    import storage
+
+    trades_db = tmp_path / "paper_trades_resume2.db"
+    monkeypatch.setattr(storage, "DB_NAME", str(trades_db))
+    storage.inicializar_banco(str(trades_db))
+
+    store = _store(tmp_path)
+    session = _session(store, session_id="resume-telegram")
+    contexto = _DummyContext({"chat_id": 123, "user_id": 123, "chat_type": "private", "session_id": session.record.session_id})
+    monkeypatch.setattr(paper_engine, "obter_outbox_paper_pendentes", lambda session_id=None: storage.obter_outbox_paper_pendentes(session_id=session_id, db_name=str(trades_db)))
+    monkeypatch.setattr(paper_engine, "atualizar_outbox_paper_trade", lambda event_id, **kwargs: storage.atualizar_outbox_paper_trade(event_id, db_name=str(trades_db), **kwargs))
+    monkeypatch.setattr(storage, "DB_NAME", str(trades_db))
+    monkeypatch.setattr(paper_engine, "obter_trades_paper_abertos", lambda symbol=None, session_id=None: storage.obter_trades_paper_abertos(symbol=symbol, session_id=session_id))
+    monkeypatch.setattr(type(session), "evaluate_snapshot", lambda self, snapshot, decision=None, idempotency_key=None, limits=None: SimpleNamespace(monitoring_decision=SimpleNamespace(status="APPROVED"), session=self.record, approved=True), raising=False)
+
+    agora = datetime.now(timezone.utc)
+    candle_time = agora - timedelta(minutes=5)
+    storage.registrar_trade_paper(
+        "SOLUSDT",
+        "COMPRA",
+        100.0,
+        95.0,
+        110.0,
+        1.0,
+        100.0,
+        2.0,
+        session_id=session.record.session_id,
+        idempotency_key="idem-resume2-open",
+        candle_close_time=candle_time,
+        signal_identity="signal-resume2-open",
+        preco_base=100.0,
+        fill_price=100.0,
+        entry_fee=0.0,
+        entry_spread_cost=0.05,
+        entry_slippage_cost=0.05,
+        spread_cost=0.05,
+        slippage_cost=0.05,
+        outbox_event_factory=lambda trade_id, timestamp: paper_engine._paper_runtime_outbox_record(
+            paper_engine._paper_runtime_outbox_payload(
+                operation_type="OPEN",
+                trade_id=trade_id,
+                session_id=session.record.session_id,
+                candle_close_time=candle_time,
+                idempotency_key=f"open2:{trade_id}",
+                runtime_events=[{"event_type": paper_engine.PaperRuntimeEventType.TRADE_RECORDED.value, "result": "OPENED", "idempotency_key": f"open2-event:{trade_id}", "payload": {"action": "OPEN", "trade_id": trade_id}}],
+                snapshot_context={"preco_atual": 100.0, "regime_info": {"regime": "BULL", "adx": 30, "volatilidade": "NORMAL"}, "data_fresh": True},
+                telegram_text="Paper SOL aberto",
+                telegram_chat_id=123,
+            )
+        ),
+        db_name=str(trades_db),
+    )
+
+    state = {"fail_telegram": True}
+
+    def _update_fail_telegram(event_id, **kwargs):
+        if kwargs.get("telegram_sent_at_utc") is not None and state["fail_telegram"]:
+            state["fail_telegram"] = False
+            return False
+        return storage.atualizar_outbox_paper_trade(event_id, db_name=str(trades_db), **kwargs)
+
+    monkeypatch.setattr(paper_engine, "atualizar_outbox_paper_trade", _update_fail_telegram)
+    import asyncio
+
+    with pytest.raises(PaperRuntimeSessionError):
+        asyncio.run(paper_engine._reconciliar_paper_runtime_outbox(contexto, session, session_scope_id=session.record.session_id, chat_id=123))
+    with sqlite3.connect(trades_db) as conn:
+        row = conn.execute("SELECT status, snapshot_applied_at_utc, telegram_sent_at_utc FROM paper_trade_outbox ORDER BY id DESC LIMIT 1").fetchone()
+    assert row[0] == "DELIVERED"
+    assert row[1] is not None
+    assert row[2] is None
+
+    monkeypatch.setattr(paper_engine, "atualizar_outbox_paper_trade", lambda event_id, **kwargs: storage.atualizar_outbox_paper_trade(event_id, db_name=str(trades_db), **kwargs))
+    asyncio.run(paper_engine._reconciliar_paper_runtime_outbox(contexto, session, session_scope_id=session.record.session_id, chat_id=123))
+    with sqlite3.connect(trades_db) as conn:
+        row = conn.execute("SELECT status, snapshot_applied_at_utc, telegram_sent_at_utc FROM paper_trade_outbox ORDER BY id DESC LIMIT 1").fetchone()
+    assert row[0] == "NOTIFIED"
+    assert row[1] is not None
+    assert row[2] is not None
+
+
+@pytest.mark.parametrize(
+    "blocked_field",
+    [
+        "runtime_delivered_at_utc",
+        "snapshot_applied_at_utc",
+        "telegram_sent_at_utc",
+    ],
+)
+def test_reconciliacao_bloqueia_outbox_sem_evento_existente(monkeypatch, tmp_path, blocked_field):
+    import storage
+
+    trades_db = tmp_path / f"paper_trades_missing_{blocked_field}.db"
+    monkeypatch.setattr(storage, "DB_NAME", str(trades_db))
+    storage.inicializar_banco(str(trades_db))
+
+    store = _store(tmp_path)
+    session = _session(store, session_id=f"missing-{blocked_field}")
+    contexto = _DummyContext({"chat_id": 123, "user_id": 123, "chat_type": "private", "session_id": session.record.session_id})
+    monkeypatch.setattr(paper_engine, "obter_outbox_paper_pendentes", lambda session_id=None: [
+        paper_engine._paper_runtime_outbox_record(
+            paper_engine._paper_runtime_outbox_payload(
+                operation_type="OPEN",
+                trade_id=1,
+                session_id=session.record.session_id,
+                candle_close_time=datetime(2026, 7, 11, 12, 0, tzinfo=timezone.utc),
+                idempotency_key=f"idem-{blocked_field}",
+                runtime_events=[],
+                snapshot_context={
+                    "preco_atual": 100.0,
+                    "regime_info": {"regime": "BULL", "adx": 30, "volatilidade": "NORMAL"},
+                    "data_fresh": True,
+                },
+                telegram_text="Paper SOL aberto",
+                telegram_chat_id=123,
+            )
+        )
+    ])
+
+    def _fake_update(event_id, **kwargs):
+        if "runtime_delivered_at_utc" in kwargs:
+            return blocked_field != "runtime_delivered_at_utc"
+        if "snapshot_applied_at_utc" in kwargs:
+            return blocked_field != "snapshot_applied_at_utc"
+        if "telegram_sent_at_utc" in kwargs:
+            return blocked_field != "telegram_sent_at_utc"
+        return True
+
+    monkeypatch.setattr(paper_engine, "atualizar_outbox_paper_trade", _fake_update)
+    monkeypatch.setattr(
+        paper_engine,
+        "build_snapshot_from_observed_state",
+        lambda **kwargs: _snapshot(session),
+    )
+    monkeypatch.setattr(
+        type(session),
+        "evaluate_snapshot",
+        lambda self, snapshot, decision=None, idempotency_key=None, limits=None: SimpleNamespace(
+            monitoring_decision=SimpleNamespace(status="APPROVED"),
+            session=self.record,
+            approved=True,
+        ),
+        raising=False,
+    )
+
+    async def _telegram_nao_deveria_ser_enviado(*args, **kwargs):  # pragma: no cover - guard rail
+        raise AssertionError("telegram nao deveria ser enviado")
+
+    if blocked_field in {"runtime_delivered_at_utc", "snapshot_applied_at_utc"}:
+        monkeypatch.setattr(contexto.bot, "send_message", _telegram_nao_deveria_ser_enviado)
+
+    import asyncio
+
+    with pytest.raises(PaperRuntimeSessionError):
+        asyncio.run(
+            paper_engine._reconciliar_paper_runtime_outbox(
+                contexto,
+                session,
+                session_scope_id=session.record.session_id,
+                chat_id=123,
+            )
+        )
+    if blocked_field != "telegram_sent_at_utc":
+        assert contexto.bot.sent == []
+
+
+def test_estado_desconhecido_bloqueia_runtime(monkeypatch, tmp_path):
+    import storage
+
+    store = _store(tmp_path)
+    session = _session(store, session_id="unknown-state")
+    with sqlite3.connect(store.db_path) as conn:
+        conn.execute("UPDATE paper_runtime_sessions SET state = ? WHERE session_id = ?", ("CORRUPTED", session.record.session_id))
+        conn.commit()
+    with pytest.raises((PaperRuntimeSessionError, ValueError)):
+        paper_engine.get_monitored_session(session_id=session.record.session_id, store=store)
+
+
+def test_timestamp_futuro_bloqueia_freshness(monkeypatch, tmp_path):
+    import storage
+
+    trades_db = tmp_path / "paper_trades_future.db"
+    monkeypatch.setattr(storage, "DB_NAME", str(trades_db))
+    storage.inicializar_banco(str(trades_db))
+
+    store = _store(tmp_path)
+    session = _session(store, session_id="future-candle")
+    contexto = _DummyContext({"chat_id": 123, "user_id": 123, "chat_type": "private", "session_id": session.record.session_id})
+    monkeypatch.setattr(paper_engine, "get_monitored_session", lambda session_id=None, decision_hash=None, store=None: session if session_id == session.record.session_id else None)
+    monkeypatch.setattr(paper_engine, "_runtime_monitoring_enabled", lambda: False)
+    monkeypatch.setattr(paper_engine, "can_execute_sensitive_telegram_action", lambda *args, **kwargs: True)
+    monkeypatch.setattr(paper_engine, "backtester", SimpleNamespace(baixar_dados_historicos=lambda symbol=None: _paper_df()))
+    monkeypatch.setattr(paper_engine, "obter_trades_paper_abertos", lambda symbol=None, session_id=None: storage.obter_trades_paper_abertos(symbol=symbol, session_id=session_id))
+    monkeypatch.setattr(paper_engine, "classificar_regime", lambda df: {"regime": "BULL", "adx": 30, "volatilidade": "NORMAL"})
+    monkeypatch.setattr(paper_engine, "esta_em_killzone", lambda: True)
+    monkeypatch.setattr(paper_engine, "_obter_sinal_paper_sol", lambda: {"direcao": "COMPRA", "entrada": 100.0, "stop_loss": 95.0, "take_profit": 110.0, "rr": 2.0, "motivo": "ok"})
+    monkeypatch.setattr(paper_engine, "tomar_decisao", lambda *args, **kwargs: {"volume_status": "ALTO", "motivo": "ok", "rsi": 50})
+    monkeypatch.setattr(paper_engine, "calcular_tamanho_posicao", lambda capital, risco, entrada, stop: (1.0, 5.0))
+    monkeypatch.setattr(
+        paper_engine,
+        "registrar_trade_paper",
+        lambda *args, **kwargs: storage.registrar_trade_paper(
+            *args,
+            **kwargs,
+            db_name=str(trades_db),
+        ),
+    )
+    monkeypatch.setattr(
+        paper_engine,
+        "finalizar_trade_paper",
+        lambda *args, **kwargs: storage.finalizar_trade_paper(*args, **kwargs, db_name=str(trades_db)),
+    )
+    captured = {}
+
+    def _fake_build_snapshot_from_observed_state(**kwargs):
+        captured["data_fresh"] = kwargs["observed"]["data_fresh"]
+        return _snapshot(
+            session,
+            data_fresh=kwargs["observed"]["data_fresh"],
+            paper_capital_used=Decimal("10"),
+            session_drawdown_percent=Decimal("0"),
+            risk_per_trade_percent=Decimal("0.5"),
+        )
+
+    monkeypatch.setattr(paper_engine, "build_snapshot_from_observed_state", _fake_build_snapshot_from_observed_state)
+    monkeypatch.setattr(type(session), "evaluate_snapshot", lambda self, snapshot, decision=None, idempotency_key=None, limits=None: SimpleNamespace(monitoring_decision=SimpleNamespace(status="APPROVED"), session=self.record, approved=True), raising=False)
+    import asyncio
+
+    snapshot_observed = paper_engine._coletar_runtime_observed_state(
+        session=session,
+        decision=session.decision,
+        df=_paper_df().assign(close_time=datetime.now(timezone.utc) + timedelta(minutes=10)),
+        trades_abertos=[],
+        preco_atual=100.0,
+        regime_info={"regime": "BULL", "adx": 30, "volatilidade": "NORMAL"},
+    )
+    assert snapshot_observed["data_fresh"] is False
 
 
 def test_outbox_json_tampered_bloqueia_reconciliacao(monkeypatch, tmp_path):

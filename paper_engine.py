@@ -171,7 +171,15 @@ def _paper_costs_from_contract(runtime_session) -> dict[str, Decimal]:
     }
 
 
-def _paper_trade_costs(direcao: str, entrada: float, saida: float, quantidade: float, costs: dict[str, Decimal]) -> dict[str, Decimal]:
+def _paper_trade_costs(
+    direcao: str,
+    entrada: float,
+    saida: float,
+    quantidade: float,
+    costs: dict[str, Decimal],
+    *,
+    include_exit_costs: bool = True,
+) -> dict[str, Decimal]:
     entrada_dec = Decimal(str(entrada))
     saida_dec = Decimal(str(saida))
     quantidade_dec = Decimal(str(quantidade))
@@ -179,8 +187,8 @@ def _paper_trade_costs(direcao: str, entrada: float, saida: float, quantidade: f
     slippage_rate = costs["slippage_bps"] / Decimal("10000")
     entry_spread = entrada_dec * spread_rate
     entry_slippage = entrada_dec * slippage_rate
-    exit_spread = saida_dec * spread_rate
-    exit_slippage = saida_dec * slippage_rate
+    exit_spread = saida_dec * spread_rate if include_exit_costs else Decimal("0")
+    exit_slippage = saida_dec * slippage_rate if include_exit_costs else Decimal("0")
     if direcao == "COMPRA":
         entry_fill = entrada_dec + entry_spread + entry_slippage
         exit_fill = saida_dec - exit_spread - exit_slippage
@@ -190,7 +198,7 @@ def _paper_trade_costs(direcao: str, entrada: float, saida: float, quantidade: f
         exit_fill = saida_dec + exit_spread + exit_slippage
         pnl_bruto = quantidade_dec * (entrada_dec - saida_dec)
     entry_fee = abs(quantidade_dec * entry_fill * costs["entry_fee_rate"])
-    exit_fee = abs(quantidade_dec * exit_fill * costs["exit_fee_rate"])
+    exit_fee = abs(quantidade_dec * exit_fill * costs["exit_fee_rate"]) if include_exit_costs else Decimal("0")
     entry_spread_cost = abs(quantidade_dec * entry_spread)
     exit_spread_cost = abs(quantidade_dec * exit_spread)
     entry_slippage_cost = abs(quantidade_dec * entry_slippage)
@@ -215,6 +223,24 @@ def _paper_trade_costs(direcao: str, entrada: float, saida: float, quantidade: f
         "custos_totais": custos_totais,
         "pnl_liquido": pnl_liquido,
     }
+
+
+def _trade_order_timestamp_key(trade: dict) -> datetime:
+    for chave in ("fechado_em", "saida_em", "timestamp", "aberto_em"):
+        valor = trade.get(chave)
+        if valor is None:
+            continue
+        if isinstance(valor, datetime):
+            return valor if valor.tzinfo is not None else valor.replace(tzinfo=timezone.utc)
+        try:
+            texto = str(valor)
+            if texto.endswith("Z"):
+                texto = texto.replace("Z", "+00:00")
+            parsed = datetime.fromisoformat(texto)
+            return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+        except Exception:
+            continue
+    return datetime.min.replace(tzinfo=timezone.utc)
 
 
 def _registrar_trade_runtime_event(runtime_session, *, payload, result: str, idempotency_key: str, event_type=PaperRuntimeEventType.TRADE_RECORDED) -> None:
@@ -404,6 +430,22 @@ def _paper_runtime_outbox_validate_record(outbox: dict) -> dict:
     return payload
 
 
+def _paper_runtime_outbox_state_allows_update(current_status: str, updates: dict) -> bool:
+    status = str(current_status or "").strip().upper()
+    if status not in {"PENDING", "DELIVERED", "NOTIFIED"}:
+        return False
+    desired = updates.get("status")
+    if desired is not None:
+        desired = str(desired).strip().upper()
+        if desired not in {"PENDING", "DELIVERED", "NOTIFIED"}:
+            return False
+    if desired == "DELIVERED":
+        return status in {"PENDING", "DELIVERED"}
+    if desired == "NOTIFIED":
+        return status in {"PENDING", "DELIVERED", "NOTIFIED"}
+    return True
+
+
 async def _reconciliar_paper_runtime_outbox(context, runtime_session, *, session_scope_id, chat_id):
     pendentes = obter_outbox_paper_pendentes(session_id=session_scope_id)
     if not pendentes:
@@ -436,7 +478,8 @@ async def _reconciliar_paper_runtime_outbox(context, runtime_session, *, session
             if outbox["snapshot_applied_at_utc"] is None and snapshot_context is not None:
                 current_trades = obter_trades_paper_abertos(PAPER_SYMBOL, session_id=session_scope_id)
                 candle_close_time = datetime.fromisoformat(payload["candle_close_time"].replace("Z", "+00:00"))
-                data_fresh = (datetime.now(timezone.utc) - candle_close_time.astimezone(timezone.utc)).total_seconds() <= 2 * 3600
+                delta_seconds = (datetime.now(timezone.utc) - candle_close_time.astimezone(timezone.utc)).total_seconds()
+                data_fresh = 0 <= delta_seconds <= 2 * 3600
                 snapshot_observed = _coletar_runtime_observed_state(
                     session=runtime_session,
                     decision=runtime_session.decision,
@@ -650,7 +693,8 @@ def _coletar_runtime_observed_state(*, session, decision, df, trades_abertos, pr
             if close_dt.tzinfo is None:
                 data_fresh = False
             else:
-                data_fresh = (datetime.now(timezone.utc) - close_dt.astimezone(timezone.utc)).total_seconds() <= 2 * 3600
+                delta_seconds = (datetime.now(timezone.utc) - close_dt.astimezone(timezone.utc)).total_seconds()
+                data_fresh = 0 <= delta_seconds <= 2 * 3600
         except Exception:
             data_fresh = bool(data_fresh_hint) if data_fresh_hint is not None else False
 
@@ -668,7 +712,7 @@ def _coletar_runtime_observed_state(*, session, decision, df, trades_abertos, pr
         raise PaperRuntimeSessionError("failed to load closed paper trades.") from exc
 
     def _trade_timestamp_key(trade: dict):
-        timestamp_value = trade.get("timestamp") or trade.get("aberto_em") or trade.get("fechado_em")
+        timestamp_value = trade.get("fechado_em") or trade.get("saida_em") or trade.get("timestamp") or trade.get("aberto_em")
         if isinstance(timestamp_value, datetime):
             return timestamp_value if timestamp_value.tzinfo is not None else timestamp_value.replace(tzinfo=timezone.utc)
         try:
@@ -691,7 +735,7 @@ def _coletar_runtime_observed_state(*, session, decision, df, trades_abertos, pr
     session_drawdown_percent = Decimal("0")
     saldo = Decimal(str(CAPITAL_PAPER))
     pico = saldo
-    for trade in closed_trades:
+    for trade in sorted(closed_trades, key=_trade_timestamp_key):
         saldo += Decimal(str(trade.get("lucro_reais") or 0))
         if saldo > pico:
             pico = saldo
@@ -717,7 +761,7 @@ def _coletar_runtime_observed_state(*, session, decision, df, trades_abertos, pr
     except Exception:
         if isinstance(decision.phase5_manifest, dict):
             costs = dict(decision.phase5_manifest.get("execution_contract", {}) or {})
-    candidatos_custo = sorted(paper_trades + closed_trades, key=_trade_timestamp_key, reverse=True)
+    candidatos_custo = sorted(paper_trades + closed_trades, key=_trade_order_timestamp_key, reverse=True)
 
     def _tem_custos_completos(trade: dict) -> bool:
         return trade.get("resultado") is not None or trade.get("saida") is not None or trade.get("fechado_em") is not None or (
@@ -774,19 +818,25 @@ def _coletar_runtime_observed_state(*, session, decision, df, trades_abertos, pr
             entry_slippage_cost = Decimal(str(persisted_cost_source.get("entry_slippage_cost") or 0))
             exit_spread_cost = Decimal(str(persisted_cost_source.get("exit_spread_cost") or 0))
             exit_slippage_cost = Decimal(str(persisted_cost_source.get("exit_slippage_cost") or 0))
-            spread_cost = Decimal(str(persisted_cost_source.get("spread_cost") or (entry_spread_cost + exit_spread_cost)))
-            slippage_cost = Decimal(str(persisted_cost_source.get("slippage_cost") or (entry_slippage_cost + exit_slippage_cost)))
             entry_notional = abs(quantidade_persistida * (fill_price_persistido or preco_base_persistido or Decimal("0")))
-            exit_notional = abs(quantidade_persistida * (saida_persistida or preco_base_persistido or Decimal("0")))
-            total_notional = entry_notional + exit_notional if exit_notional > 0 else entry_notional
+            trade_closed = any(
+                persisted_cost_source.get(chave) is not None
+                for chave in ("fechado_em", "saida", "pnl_liquido", "resultado")
+            ) or str(persisted_cost_source.get("status") or "").lower() == "closed"
+            exit_notional = abs(quantidade_persistida * (saida_persistida or preco_base_persistido or Decimal("0"))) if trade_closed else Decimal("0")
+            total_notional = entry_notional + exit_notional if trade_closed and exit_notional > 0 else entry_notional
+            spread_cost = Decimal(str(persisted_cost_source.get("spread_cost") or (entry_spread_cost + (exit_spread_cost if trade_closed else Decimal("0")))))
+            slippage_cost = Decimal(str(persisted_cost_source.get("slippage_cost") or (entry_slippage_cost + (exit_slippage_cost if trade_closed else Decimal("0")))))
+            spread_component = entry_spread_cost + (exit_spread_cost if trade_closed else Decimal("0"))
+            slippage_component = entry_slippage_cost + (exit_slippage_cost if trade_closed else Decimal("0"))
             observed_costs = {
                 "entry_fee_rate": (entry_fee / entry_notional) if entry_notional > 0 else Decimal(str(costs.get("entry_fee_rate", "0.0004"))),
-                "exit_fee_rate": (exit_fee / exit_notional) if exit_notional > 0 else Decimal(str(costs.get("exit_fee_rate", "0.0004"))),
-                "spread_bps": ((spread_cost / total_notional) * Decimal("10000"))
-                if quantidade_persistida > 0 and total_notional > 0 and spread_cost >= 0
+                "exit_fee_rate": (exit_fee / exit_notional) if trade_closed and exit_notional > 0 else Decimal(str(costs.get("exit_fee_rate", "0.0004"))),
+                "spread_bps": ((spread_component / total_notional) * Decimal("10000"))
+                if quantidade_persistida > 0 and total_notional > 0 and spread_component >= 0
                 else Decimal(str(costs.get("spread_bps", "5"))),
-                "slippage_bps": ((slippage_cost / total_notional) * Decimal("10000"))
-                if quantidade_persistida > 0 and total_notional > 0 and slippage_cost >= 0
+                "slippage_bps": ((slippage_component / total_notional) * Decimal("10000"))
+                if quantidade_persistida > 0 and total_notional > 0 and slippage_component >= 0
                 else Decimal(str(costs.get("slippage_bps", "5"))),
             }
         except Exception:
@@ -808,7 +858,7 @@ def _coletar_runtime_observed_state(*, session, decision, df, trades_abertos, pr
     session_state_raw = getattr(session.record.state, "value", session.record.state)
     session_state = str(session_state_raw).strip().upper()
     if session_state not in {"RUNNING", "COMPLETED"}:
-        session_state = "RUNNING"
+        raise PaperRuntimeSessionError("session state is invalid.")
     return {
         "data_fresh": data_fresh,
         "session_drawdown_percent": session_drawdown_percent,
@@ -866,7 +916,8 @@ async def _processar_trades_paper_abertos(context, chat_id, trades, candle, df, 
                 )
                 mensagem_fechamento = f"Paper SOL fechado por {'STOP' if stop_atingido else 'TAKE PROFIT'}. Resultado: {fmt_num(lucro_percent, '+.2f')}%"
 
-                data_fresh_snapshot = (datetime.now(timezone.utc) - close_candle_time).total_seconds() <= 2 * 3600
+                delta_seconds = (datetime.now(timezone.utc) - close_candle_time).total_seconds()
+                data_fresh_snapshot = 0 <= delta_seconds <= 2 * 3600
 
                 def _outbox_factory_close(trade_id, _timestamp):
                     runtime_events = [
@@ -1003,7 +1054,8 @@ async def _processar_trades_paper_abertos(context, chat_id, trades, candle, df, 
                 )
                 mensagem_fechamento = f"Paper SOL fechado por {'STOP' if stop_atingido else 'TAKE PROFIT'}. Resultado: {fmt_num(lucro_percent, '+.2f')}%"
 
-                data_fresh_snapshot = (datetime.now(timezone.utc) - close_candle_time).total_seconds() <= 2 * 3600
+                delta_seconds = (datetime.now(timezone.utc) - close_candle_time).total_seconds()
+                data_fresh_snapshot = 0 <= delta_seconds <= 2 * 3600
 
                 def _outbox_factory_close(trade_id, _timestamp):
                     runtime_events = [
@@ -1425,6 +1477,7 @@ async def monitorar_paper_sol(context):
                     "slippage_bps": Decimal("5"),
                 }
             ),
+            include_exit_costs=False,
         )
         signal_identity = _paper_runtime_signal_identity(
             sinal,
@@ -1446,7 +1499,19 @@ async def monitorar_paper_sol(context):
             "status": "open",
             "valor_arriscado": float(trade_intent.risk_amount),
         }
-        data_fresh_snapshot = (datetime.now(timezone.utc) - candle_close_time).total_seconds() <= 2 * 3600
+        delta_seconds = (datetime.now(timezone.utc) - candle_close_time).total_seconds()
+        data_fresh_snapshot = 0 <= delta_seconds <= 2 * 3600
+
+        def _mensagem_abertura_paper(trade_id):
+            return (
+                f"Paper SOL aberto\n"
+                f"Direcao: {sinal['direcao']}\n"
+                f"Entrada: {fmt_num(entrada, ',.4f')}\n"
+                f"Stop: {fmt_num(stop_loss, ',.4f')}\n"
+                f"Take: {fmt_num(take_profit, ',.4f')}\n"
+                f"R/R: {fmt_num(rr_planejado)}\n"
+                f"Trade ID: {trade_id}"
+            )
 
         def _outbox_factory_open(trade_id, _timestamp):
             runtime_events = [
@@ -1502,7 +1567,7 @@ async def monitorar_paper_sol(context):
                     "regime_info": regime_info,
                     "data_fresh": data_fresh_snapshot,
                 },
-                telegram_text=mensagem_abertura,
+                telegram_text=_mensagem_abertura_paper(trade_id),
                 telegram_chat_id=chat_id,
             )
             return _paper_runtime_outbox_record(outbox_payload)
@@ -1530,15 +1595,7 @@ async def monitorar_paper_sol(context):
             slippage_cost=float(trade_costs_entry["entry_slippage_cost"]),
             outbox_event_factory=_outbox_factory_open if runtime_session is not None else None,
         )
-        mensagem_abertura = (
-            f"Paper SOL aberto\n"
-            f"Direcao: {sinal['direcao']}\n"
-            f"Entrada: {fmt_num(entrada, ',.4f')}\n"
-            f"Stop: {fmt_num(stop_loss, ',.4f')}\n"
-            f"Take: {fmt_num(take_profit, ',.4f')}\n"
-            f"R/R: {fmt_num(rr_planejado)}\n"
-            f"Trade ID: {trade_id}"
-        )
+        mensagem_abertura = _mensagem_abertura_paper(trade_id)
         if trade_id is None:
             registrar_decisao_observabilidade(
                 symbol=PAPER_SYMBOL,

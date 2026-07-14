@@ -115,6 +115,70 @@ def test_buscar_logs_vazios_e_falha(monkeypatch, temp_db_path):
     assert storage.buscar_ultimos_decision_logs(limite=5) == []
 
 
+def test_outbox_update_missing_event_e_transicao_invalida(monkeypatch, temp_db_path):
+    _setup_db(monkeypatch, temp_db_path)
+    assert storage.atualizar_outbox_paper_trade(
+        "missing",
+        status="DELIVERED",
+        runtime_delivered_at_utc=storage._agora_iso(),
+    ) is False
+    assert storage.atualizar_outbox_paper_trade(
+        "missing",
+        snapshot_applied_at_utc=storage._agora_iso(),
+    ) is False
+    assert storage.atualizar_outbox_paper_trade(
+        "missing",
+        telegram_sent_at_utc=storage._agora_iso(),
+    ) is False
+
+    trade_id = storage.registrar_trade_paper(
+        symbol="SOLUSDT",
+        direcao="COMPRA",
+        entrada=100,
+        stop_loss=95,
+        take_profit=110,
+        quantidade=1.0,
+        valor_arriscado=100,
+        rr_planejado=2.0,
+        filtros_aplicados=True,
+        db_name=temp_db_path,
+    )
+    assert trade_id is not None
+    event_id = storage.registrar_paper_trade_outbox(
+        event_id="evt-1",
+        session_id="sess-1",
+        trade_id=trade_id,
+        operation_type="OPEN",
+        candle_close_time="2026-01-01T00:00:00+00:00",
+        idempotency_key="idem-1",
+        payload={
+            "operation_type": "OPEN",
+            "trade_id": trade_id,
+            "session_id": "sess-1",
+            "candle_close_time": "2026-01-01T00:00:00+00:00",
+            "idempotency_key": "idem-1",
+            "snapshot_idempotency_key": "idem-1:snapshot",
+            "runtime_events": [],
+            "snapshot_context": {
+                "preco_atual": 100.0,
+                "regime_info": {},
+                "data_fresh": True,
+            },
+            "telegram": {"chat_id": 1, "text": "ok"},
+        },
+        db_name=temp_db_path,
+    )
+    assert event_id == "evt-1"
+    with sqlite3.connect(temp_db_path) as conn:
+        conn.execute("UPDATE paper_trade_outbox SET status = 'NOTIFIED' WHERE event_id = ?", ("evt-1",))
+        conn.commit()
+    assert storage.atualizar_outbox_paper_trade(
+        "evt-1",
+        status="DELIVERED",
+        runtime_delivered_at_utc=storage._agora_iso(),
+    ) is False
+
+
 def test_trade_paper_workflow(monkeypatch, temp_db_path):
     _setup_db(monkeypatch, temp_db_path)
     trade_id = storage.registrar_trade_paper(

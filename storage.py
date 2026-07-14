@@ -360,7 +360,7 @@ def _inserir_paper_trade_outbox(
 
 def _atualizar_paper_trade_outbox(cursor, event_id, **updates):
     if not updates:
-        return
+        return 0
     campos = ", ".join(f"{campo} = ?" for campo in updates)
     valores = list(updates.values())
     valores.extend([_agora_iso(), event_id])
@@ -368,6 +368,25 @@ def _atualizar_paper_trade_outbox(cursor, event_id, **updates):
         f"UPDATE paper_trade_outbox SET {campos}, updated_at_utc = ? WHERE event_id = ?",
         valores,
     )
+    return cursor.rowcount
+
+
+def _paper_outbox_transition_is_valid(current_status, updates) -> bool:
+    status = str(current_status or "").strip().upper()
+    if status not in {"PENDING", "DELIVERED", "NOTIFIED"}:
+        return False
+    desired = updates.get("status")
+    if desired is None:
+        return True
+    desired = str(desired).strip().upper()
+    if desired not in {"PENDING", "DELIVERED", "NOTIFIED"}:
+        return False
+    allowed = {
+        "PENDING": {"PENDING", "DELIVERED", "NOTIFIED"},
+        "DELIVERED": {"DELIVERED", "NOTIFIED"},
+        "NOTIFIED": {"NOTIFIED"},
+    }
+    return desired in allowed[status]
 
 
 def registrar_paper_trade_outbox(
@@ -513,6 +532,8 @@ def atualizar_outbox_paper_trade(
             updates["last_error_class"] = last_error_class
         if last_error_code is not None:
             updates["last_error_code"] = last_error_code
+        if not updates:
+            return False
         if attempts_increment:
             with sqlite3.connect(db_name) as conn:
                 cursor = conn.cursor()
@@ -522,13 +543,31 @@ def atualizar_outbox_paper_trade(
                 ).fetchone()
                 if row is None:
                     return False
+                current_status = cursor.execute(
+                    "SELECT status FROM paper_trade_outbox WHERE event_id = ?",
+                    (event_id,),
+                ).fetchone()
+                if current_status is None:
+                    return False
+                if not _paper_outbox_transition_is_valid(current_status[0], updates):
+                    return False
                 updates["attempts"] = int(row[0] or 0) + int(attempts_increment)
-                _atualizar_paper_trade_outbox(cursor, event_id, **updates)
+                if _atualizar_paper_trade_outbox(cursor, event_id, **updates) != 1:
+                    return False
                 conn.commit()
                 return True
         with sqlite3.connect(db_name) as conn:
             cursor = conn.cursor()
-            _atualizar_paper_trade_outbox(cursor, event_id, **updates)
+            current_status = cursor.execute(
+                "SELECT status FROM paper_trade_outbox WHERE event_id = ?",
+                (event_id,),
+            ).fetchone()
+            if current_status is None:
+                return False
+            if not _paper_outbox_transition_is_valid(current_status[0], updates):
+                return False
+            if _atualizar_paper_trade_outbox(cursor, event_id, **updates) != 1:
+                return False
             conn.commit()
         return True
     except Exception as exc:
@@ -1215,7 +1254,7 @@ def obter_ultimos_trades_paper(symbol="SOLUSDT", limite=30, db_name=DB_NAME, ses
             if session_id is not None:
                 query += " AND session_id = ?"
                 parametros.append(session_id)
-            query += " ORDER BY timestamp DESC LIMIT ?"
+            query += " ORDER BY COALESCE(fechado_em, timestamp) DESC LIMIT ?"
             parametros.append(limite)
             rows = cursor.execute(
                 query,
