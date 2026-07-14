@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import gc
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -253,6 +254,114 @@ def test_banco_ausente_nao_recria_recuperacao(tmp_path):
     with pytest.raises(PaperRuntimeStoreError):
         store.load_session("any-session")
     assert not db_path.exists()
+
+
+def test_monitorar_paper_sol_bloqueia_banco_removido(monkeypatch, tmp_path):
+    import storage
+
+    trades_db = tmp_path / "paper_trades_removed.db"
+    storage.inicializar_banco(str(trades_db))
+
+    store = _store(tmp_path)
+    session = _session(store, session_id="removed-db")
+    storage.registrar_trade_paper(
+        "SOLUSDT",
+        "COMPRA",
+        100.0,
+        95.0,
+        110.0,
+        1.0,
+        100.0,
+        2.0,
+        session_id=session.record.session_id,
+        idempotency_key="removed-db-open",
+        candle_close_time="2026-07-11T12:00:00+00:00",
+        signal_identity="removed-db-open",
+        preco_base=100.0,
+        fill_price=100.0,
+        entry_fee=0.4,
+        entry_spread_cost=0.05,
+        entry_slippage_cost=0.05,
+        spread_cost=0.05,
+        slippage_cost=0.05,
+        db_name=str(trades_db),
+    )
+    gc.collect()
+    trades_db.unlink()
+
+    monkeypatch.setattr(paper_engine, "_runtime_monitoring_enabled", lambda: True)
+    monkeypatch.setattr(paper_engine, "can_execute_sensitive_telegram_action", lambda *args, **kwargs: True)
+    monkeypatch.setattr(paper_engine, "get_monitored_session", lambda session_id=None, decision_hash=None, **kwargs: session if session_id == session.record.session_id else None)
+
+    called = {"data": False}
+
+    class _BacktesterStub:
+        def baixar_dados_historicos(self, *args, **kwargs):
+            called["data"] = True
+            raise AssertionError("nao deveria buscar dados")
+
+    monkeypatch.setattr(paper_engine, "backtester", _BacktesterStub())
+    monkeypatch.setattr(
+        paper_engine,
+        "obter_outbox_paper_pendentes",
+        lambda session_id=None, **kwargs: storage.obter_outbox_paper_pendentes(
+            session_id=session_id,
+            db_name=str(trades_db),
+            strict=True,
+        ),
+    )
+    monkeypatch.setattr(paper_engine, "obter_trades_paper_abertos", lambda symbol=None, session_id=None, **kwargs: [])
+
+    contexto = _DummyContext({"chat_id": 123, "user_id": 123, "chat_type": "private", "session_id": session.record.session_id})
+    import asyncio
+
+    asyncio.run(paper_engine.monitorar_paper_sol(contexto))
+    assert called["data"] is False
+    assert not trades_db.exists()
+    assert contexto.bot.sent == []
+
+
+def test_monitorar_paper_sol_bloqueia_schema_outbox_ausente(monkeypatch, tmp_path):
+    import storage
+
+    trades_db = tmp_path / "paper_trades_schema_missing.db"
+    storage.inicializar_banco(str(trades_db))
+    with sqlite3.connect(trades_db) as conn:
+        conn.execute("DROP TABLE paper_trade_outbox")
+        conn.commit()
+
+    store = _store(tmp_path)
+    session = _session(store, session_id="schema-missing")
+
+    monkeypatch.setattr(paper_engine, "_runtime_monitoring_enabled", lambda: True)
+    monkeypatch.setattr(paper_engine, "can_execute_sensitive_telegram_action", lambda *args, **kwargs: True)
+    monkeypatch.setattr(paper_engine, "get_monitored_session", lambda session_id=None, decision_hash=None, **kwargs: session if session_id == session.record.session_id else None)
+
+    called = {"data": False}
+
+    class _BacktesterStub:
+        def baixar_dados_historicos(self, *args, **kwargs):
+            called["data"] = True
+            raise AssertionError("nao deveria buscar dados")
+
+    monkeypatch.setattr(paper_engine, "backtester", _BacktesterStub())
+    monkeypatch.setattr(
+        paper_engine,
+        "obter_outbox_paper_pendentes",
+        lambda session_id=None, **kwargs: storage.obter_outbox_paper_pendentes(
+            session_id=session_id,
+            db_name=str(trades_db),
+            strict=True,
+        ),
+    )
+    monkeypatch.setattr(paper_engine, "obter_trades_paper_abertos", lambda symbol=None, session_id=None, **kwargs: [])
+
+    contexto = _DummyContext({"chat_id": 123, "user_id": 123, "chat_type": "private", "session_id": session.record.session_id})
+    import asyncio
+
+    asyncio.run(paper_engine.monitorar_paper_sol(contexto))
+    assert called["data"] is False
+    assert contexto.bot.sent == []
 
 
 def test_schema_invalido_bloqueia(tmp_path):

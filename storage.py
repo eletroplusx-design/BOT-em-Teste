@@ -3,6 +3,7 @@ import json
 import logging
 import sqlite3
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 
@@ -55,6 +56,37 @@ def _tratar_falha_leitura_storage(contexto: str, exc: Exception, *, strict: bool
     if strict:
         raise PaperTradeStorageReadError(contexto) from exc
     return []
+
+
+def _abrir_conexao_leitura_strita(db_name):
+    db_uri = Path(db_name).resolve().as_uri()
+    return sqlite3.connect(f"{db_uri}?mode=rw", uri=True)
+
+
+def _validar_schema_paper_trade_outbox(cursor):
+    colunas = {row[1] for row in cursor.execute("PRAGMA table_info(paper_trade_outbox)").fetchall()}
+    colunas_obrigatorias = {
+        "id",
+        "event_id",
+        "session_id",
+        "trade_id",
+        "operation_type",
+        "candle_close_time",
+        "idempotency_key",
+        "request_hash",
+        "payload_json",
+        "status",
+        "attempts",
+        "created_at_utc",
+        "updated_at_utc",
+        "runtime_delivered_at_utc",
+        "snapshot_applied_at_utc",
+        "telegram_sent_at_utc",
+        "last_error_class",
+        "last_error_code",
+    }
+    if not colunas_obrigatorias.issubset(colunas):
+        raise sqlite3.DatabaseError("paper_trade_outbox schema invalid")
 
 
 def _trade_cost_helpers(direcao, entrada, quantidade, trade_costs):
@@ -471,23 +503,42 @@ def registrar_paper_trade_outbox(
 
 def obter_outbox_paper_pendentes(session_id=None, db_name=DB_NAME, strict=False):
     try:
-        inicializar_banco(db_name)
-        with sqlite3.connect(db_name) as conn:
-            cursor = conn.cursor()
-            query = """
-                SELECT id, event_id, session_id, trade_id, operation_type, candle_close_time, idempotency_key,
-                       request_hash, payload_json, status, attempts, runtime_delivered_at_utc,
-                       snapshot_applied_at_utc, telegram_sent_at_utc, last_error_class, last_error_code,
-                       created_at_utc, updated_at_utc
-                FROM paper_trade_outbox
-                WHERE telegram_sent_at_utc IS NULL
-            """
-            parametros = []
-            if session_id is not None:
-                query += " AND session_id = ?"
-                parametros.append(session_id)
-            query += " ORDER BY created_at_utc ASC, id ASC"
-            rows = cursor.execute(query, parametros).fetchall()
+        if strict:
+            with _abrir_conexao_leitura_strita(db_name) as conn:
+                cursor = conn.cursor()
+                _validar_schema_paper_trade_outbox(cursor)
+                query = """
+                    SELECT id, event_id, session_id, trade_id, operation_type, candle_close_time, idempotency_key,
+                           request_hash, payload_json, status, attempts, runtime_delivered_at_utc,
+                           snapshot_applied_at_utc, telegram_sent_at_utc, last_error_class, last_error_code,
+                           created_at_utc, updated_at_utc
+                    FROM paper_trade_outbox
+                    WHERE telegram_sent_at_utc IS NULL
+                """
+                parametros = []
+                if session_id is not None:
+                    query += " AND session_id = ?"
+                    parametros.append(session_id)
+                query += " ORDER BY created_at_utc ASC, id ASC"
+                rows = cursor.execute(query, parametros).fetchall()
+        else:
+            inicializar_banco(db_name)
+            with sqlite3.connect(db_name) as conn:
+                cursor = conn.cursor()
+                query = """
+                    SELECT id, event_id, session_id, trade_id, operation_type, candle_close_time, idempotency_key,
+                           request_hash, payload_json, status, attempts, runtime_delivered_at_utc,
+                           snapshot_applied_at_utc, telegram_sent_at_utc, last_error_class, last_error_code,
+                           created_at_utc, updated_at_utc
+                    FROM paper_trade_outbox
+                    WHERE telegram_sent_at_utc IS NULL
+                """
+                parametros = []
+                if session_id is not None:
+                    query += " AND session_id = ?"
+                    parametros.append(session_id)
+                query += " ORDER BY created_at_utc ASC, id ASC"
+                rows = cursor.execute(query, parametros).fetchall()
         return [
             {
                 "id": row[0],

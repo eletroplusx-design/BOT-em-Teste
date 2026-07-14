@@ -163,6 +163,23 @@ def test_leituras_estritas_bloqueiam_schema_invalido(monkeypatch, temp_db_path):
         storage.obter_outbox_paper_pendentes(strict=True)
 
 
+def test_outbox_estrito_nao_recria_banco_ausente(monkeypatch, tmp_path):
+    db_path = tmp_path / "missing_outbox.db"
+    assert not db_path.exists()
+    with pytest.raises(storage.PaperTradeStorageReadError):
+        storage.obter_outbox_paper_pendentes(db_name=str(db_path), strict=True)
+    assert not db_path.exists()
+
+
+def test_outbox_estrito_bloqueia_schema_ausente(monkeypatch, temp_db_path):
+    _setup_db(monkeypatch, temp_db_path)
+    with sqlite3.connect(temp_db_path) as conn:
+        conn.execute("DROP TABLE paper_trade_outbox")
+        conn.commit()
+    with pytest.raises(storage.PaperTradeStorageReadError):
+        storage.obter_outbox_paper_pendentes(db_name=temp_db_path, strict=True)
+
+
 def test_leituras_legitimas_sem_registros_continuam_vazias(monkeypatch, temp_db_path):
     _setup_db(monkeypatch, temp_db_path)
     assert storage.obter_trades_paper_abertos("SOLUSDT", db_name=temp_db_path, strict=False) == []
