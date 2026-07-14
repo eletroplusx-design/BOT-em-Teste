@@ -191,8 +191,12 @@ def _paper_trade_costs(direcao: str, entrada: float, saida: float, quantidade: f
         pnl_bruto = quantidade_dec * (entrada_dec - saida_dec)
     entry_fee = abs(quantidade_dec * entry_fill * costs["entry_fee_rate"])
     exit_fee = abs(quantidade_dec * exit_fill * costs["exit_fee_rate"])
-    spread_cost = abs(quantidade_dec * (entry_spread + exit_spread))
-    slippage_cost = abs(quantidade_dec * (entry_slippage + exit_slippage))
+    entry_spread_cost = abs(quantidade_dec * entry_spread)
+    exit_spread_cost = abs(quantidade_dec * exit_spread)
+    entry_slippage_cost = abs(quantidade_dec * entry_slippage)
+    exit_slippage_cost = abs(quantidade_dec * exit_slippage)
+    spread_cost = entry_spread_cost + exit_spread_cost
+    slippage_cost = entry_slippage_cost + exit_slippage_cost
     custos_totais = entry_fee + exit_fee + spread_cost + slippage_cost
     pnl_liquido = pnl_bruto - custos_totais
     return {
@@ -201,6 +205,10 @@ def _paper_trade_costs(direcao: str, entrada: float, saida: float, quantidade: f
         "exit_fill_price": exit_fill,
         "entry_fee": entry_fee,
         "exit_fee": exit_fee,
+        "entry_spread_cost": entry_spread_cost,
+        "exit_spread_cost": exit_spread_cost,
+        "entry_slippage_cost": entry_slippage_cost,
+        "exit_slippage_cost": exit_slippage_cost,
         "spread_cost": spread_cost,
         "slippage_cost": slippage_cost,
         "pnl_bruto": pnl_bruto,
@@ -309,6 +317,93 @@ def _paper_runtime_outbox_record(payload: dict) -> dict:
     }
 
 
+def _paper_runtime_outbox_validate_record(outbox: dict) -> dict:
+    required = {
+        "event_id",
+        "session_id",
+        "trade_id",
+        "operation_type",
+        "candle_close_time",
+        "idempotency_key",
+        "request_hash",
+        "payload_json",
+        "status",
+        "attempts",
+    }
+    missing = sorted(required - set(outbox))
+    if missing:
+        raise PaperRuntimeSessionError(f"paper outbox missing fields: {', '.join(missing)}")
+    if not isinstance(outbox["event_id"], str) or not outbox["event_id"].strip():
+        raise PaperRuntimeSessionError("paper outbox event_id is invalid.")
+    if not isinstance(outbox["session_id"], str) or not outbox["session_id"].strip():
+        raise PaperRuntimeSessionError("paper outbox session_id is invalid.")
+    if type(outbox["trade_id"]) is not int or outbox["trade_id"] <= 0:
+        raise PaperRuntimeSessionError("paper outbox trade_id is invalid.")
+    if not isinstance(outbox["operation_type"], str) or not outbox["operation_type"].strip():
+        raise PaperRuntimeSessionError("paper outbox operation_type is invalid.")
+    if not isinstance(outbox["candle_close_time"], str) or not outbox["candle_close_time"].strip():
+        raise PaperRuntimeSessionError("paper outbox candle_close_time is invalid.")
+    if not isinstance(outbox["idempotency_key"], str) or not outbox["idempotency_key"].strip():
+        raise PaperRuntimeSessionError("paper outbox idempotency_key is invalid.")
+    if not isinstance(outbox["request_hash"], str) or not outbox["request_hash"].strip():
+        raise PaperRuntimeSessionError("paper outbox request_hash is invalid.")
+    if type(outbox["status"]) is not str or not outbox["status"].strip():
+        raise PaperRuntimeSessionError("paper outbox status is invalid.")
+    if type(outbox["attempts"]) is not int or outbox["attempts"] < 0:
+        raise PaperRuntimeSessionError("paper outbox attempts is invalid.")
+    try:
+        payload = json.loads(outbox["payload_json"])
+    except Exception as exc:
+        raise PaperRuntimeSessionError("paper outbox payload_json is invalid.") from exc
+    if not isinstance(payload, dict):
+        raise PaperRuntimeSessionError("paper outbox payload must be a mapping.")
+    allowed_payload = {
+        "operation_type",
+        "trade_id",
+        "session_id",
+        "candle_close_time",
+        "idempotency_key",
+        "snapshot_idempotency_key",
+        "runtime_events",
+        "snapshot_context",
+        "telegram",
+    }
+    if set(payload) != allowed_payload:
+        raise PaperRuntimeSessionError("paper outbox payload schema mismatch.")
+    if payload["operation_type"] != outbox["operation_type"] or payload["trade_id"] != outbox["trade_id"]:
+        raise PaperRuntimeSessionError("paper outbox payload divergence.")
+    if payload["session_id"] != outbox["session_id"]:
+        raise PaperRuntimeSessionError("paper outbox session mismatch.")
+    if payload["idempotency_key"] != outbox["idempotency_key"]:
+        raise PaperRuntimeSessionError("paper outbox idempotency mismatch.")
+    if payload["candle_close_time"] != outbox["candle_close_time"]:
+        raise PaperRuntimeSessionError("paper outbox candle time mismatch.")
+    recalculated_request_hash = _paper_runtime_outbox_request_hash(payload)
+    recalculated_event_id = sha256_hex({"kind": "paper_runtime_outbox_event_id", "payload": payload})
+    if recalculated_request_hash != outbox["request_hash"] or recalculated_event_id != outbox["event_id"]:
+        raise PaperRuntimeSessionError("paper outbox hash mismatch.")
+    runtime_events = payload.get("runtime_events")
+    if not isinstance(runtime_events, list):
+        raise PaperRuntimeSessionError("paper outbox runtime events are invalid.")
+    snapshot_context = payload.get("snapshot_context")
+    if not isinstance(snapshot_context, dict):
+        raise PaperRuntimeSessionError("paper outbox snapshot context is invalid.")
+    if set(snapshot_context) != {"preco_atual", "regime_info", "data_fresh"}:
+        raise PaperRuntimeSessionError("paper outbox snapshot context schema mismatch.")
+    if type(snapshot_context.get("data_fresh")) is not bool:
+        raise PaperRuntimeSessionError("paper outbox data_fresh must be boolean.")
+    telegram = payload.get("telegram")
+    if not isinstance(telegram, dict):
+        raise PaperRuntimeSessionError("paper outbox telegram payload is invalid.")
+    if set(telegram) != {"chat_id", "text"}:
+        raise PaperRuntimeSessionError("paper outbox telegram schema mismatch.")
+    if "chat_id" in telegram and telegram["chat_id"] is not None and type(telegram["chat_id"]) is not int:
+        raise PaperRuntimeSessionError("paper outbox telegram chat_id is invalid.")
+    if "text" in telegram and not isinstance(telegram["text"], str):
+        raise PaperRuntimeSessionError("paper outbox telegram text is invalid.")
+    return payload
+
+
 async def _reconciliar_paper_runtime_outbox(context, runtime_session, *, session_scope_id, chat_id):
     pendentes = obter_outbox_paper_pendentes(session_id=session_scope_id)
     if not pendentes:
@@ -316,10 +411,12 @@ async def _reconciliar_paper_runtime_outbox(context, runtime_session, *, session
     if runtime_session is None:
         raise PaperRuntimeSessionError("runtime session required to reconcile paper outbox.")
     for outbox in pendentes:
-        payload = json.loads(outbox["payload_json"])
         try:
+            payload = _paper_runtime_outbox_validate_record(outbox)
             if outbox["status"] == "PENDING":
                 for event in payload.get("runtime_events", []):
+                    if not isinstance(event, dict):
+                        raise PaperRuntimeSessionError("paper outbox runtime event is invalid.")
                     event_type = PaperRuntimeEventType(event.get("event_type", PaperRuntimeEventType.TRADE_RECORDED.value))
                     _registrar_trade_runtime_event(
                         runtime_session,
@@ -337,9 +434,9 @@ async def _reconciliar_paper_runtime_outbox(context, runtime_session, *, session
 
             snapshot_context = payload.get("snapshot_context") or {}
             if outbox["snapshot_applied_at_utc"] is None and snapshot_context is not None:
-                if not isinstance(snapshot_context, dict):
-                    raise PaperRuntimeSessionError("paper outbox snapshot context is invalid.")
                 current_trades = obter_trades_paper_abertos(PAPER_SYMBOL, session_id=session_scope_id)
+                candle_close_time = datetime.fromisoformat(payload["candle_close_time"].replace("Z", "+00:00"))
+                data_fresh = (datetime.now(timezone.utc) - candle_close_time.astimezone(timezone.utc)).total_seconds() <= 2 * 3600
                 snapshot_observed = _coletar_runtime_observed_state(
                     session=runtime_session,
                     decision=runtime_session.decision,
@@ -347,13 +444,13 @@ async def _reconciliar_paper_runtime_outbox(context, runtime_session, *, session
                     trades_abertos=current_trades,
                     preco_atual=snapshot_context.get("preco_atual"),
                     regime_info=snapshot_context.get("regime_info") or {},
-                    data_fresh_hint=snapshot_context.get("data_fresh"),
+                    data_fresh_hint=data_fresh,
                 )
                 snapshot = build_snapshot_from_observed_state(
                     session=runtime_session.record,
                     decision=runtime_session.decision,
                     observed=snapshot_observed,
-                    timestamp_utc=datetime.fromisoformat(payload["candle_close_time"].replace("Z", "+00:00")),
+                    timestamp_utc=candle_close_time,
                 )
                 runtime_session.evaluate_snapshot(
                     snapshot,
@@ -570,8 +667,21 @@ def _coletar_runtime_observed_state(*, session, decision, df, trades_abertos, pr
     except Exception as exc:
         raise PaperRuntimeSessionError("failed to load closed paper trades.") from exc
 
+    def _trade_timestamp_key(trade: dict):
+        timestamp_value = trade.get("timestamp") or trade.get("aberto_em") or trade.get("fechado_em")
+        if isinstance(timestamp_value, datetime):
+            return timestamp_value if timestamp_value.tzinfo is not None else timestamp_value.replace(tzinfo=timezone.utc)
+        try:
+            texto = str(timestamp_value)
+            if texto.endswith("Z"):
+                texto = texto.replace("Z", "+00:00")
+            parsed = datetime.fromisoformat(texto)
+            return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+        except Exception:
+            return datetime.min.replace(tzinfo=timezone.utc)
+
     current_loss_streak = 0
-    for trade in reversed(closed_trades):
+    for trade in sorted(closed_trades, key=_trade_timestamp_key, reverse=True):
         lucro_reais = Decimal(str(trade.get("lucro_reais") or 0))
         if lucro_reais < 0:
             current_loss_streak += 1
@@ -607,25 +717,37 @@ def _coletar_runtime_observed_state(*, session, decision, df, trades_abertos, pr
     except Exception:
         if isinstance(decision.phase5_manifest, dict):
             costs = dict(decision.phase5_manifest.get("execution_contract", {}) or {})
-    persisted_cost_source = next(
-        (
-            trade
-            for trade in reversed(paper_trades + closed_trades)
-            if any(
-                trade.get(chave) is not None
-                for chave in (
-                    "entry_fee",
-                    "exit_fee",
-                    "spread_cost",
-                    "slippage_cost",
-                    "pnl_bruto",
-                    "custos_totais",
-                    "pnl_liquido",
+    candidatos_custo = sorted(paper_trades + closed_trades, key=_trade_timestamp_key, reverse=True)
+
+    def _tem_custos_completos(trade: dict) -> bool:
+        return trade.get("resultado") is not None or trade.get("saida") is not None or trade.get("fechado_em") is not None or (
+            trade.get("exit_fee") is not None
+            or trade.get("exit_spread_cost") is not None
+            or trade.get("exit_slippage_cost") is not None
+            or trade.get("custos_totais") is not None
+            or trade.get("pnl_liquido") is not None
+        )
+
+    persisted_cost_source = next((trade for trade in candidatos_custo if _tem_custos_completos(trade)), None)
+    if persisted_cost_source is None:
+        persisted_cost_source = next(
+            (
+                trade
+                for trade in candidatos_custo
+                if any(
+                    trade.get(chave) is not None
+                    for chave in (
+                        "entry_fee",
+                        "entry_spread_cost",
+                        "entry_slippage_cost",
+                        "spread_cost",
+                        "slippage_cost",
+                        "pnl_bruto",
+                    )
                 )
-            )
-        ),
-        None,
-    )
+            ),
+            None,
+        )
     if persisted_cost_source is not None:
         try:
             quantidade_persistida = Decimal(str(persisted_cost_source.get("quantidade") or 0))
@@ -648,10 +770,14 @@ def _coletar_runtime_observed_state(*, session, decision, df, trades_abertos, pr
             saida_persistida = Decimal(str(persisted_cost_source.get("saida") or fill_price_persistido))
             entry_fee = Decimal(str(persisted_cost_source.get("entry_fee") or 0))
             exit_fee = Decimal(str(persisted_cost_source.get("exit_fee") or 0))
-            spread_cost = Decimal(str(persisted_cost_source.get("spread_cost") or 0))
-            slippage_cost = Decimal(str(persisted_cost_source.get("slippage_cost") or 0))
+            entry_spread_cost = Decimal(str(persisted_cost_source.get("entry_spread_cost") or 0))
+            entry_slippage_cost = Decimal(str(persisted_cost_source.get("entry_slippage_cost") or 0))
+            exit_spread_cost = Decimal(str(persisted_cost_source.get("exit_spread_cost") or 0))
+            exit_slippage_cost = Decimal(str(persisted_cost_source.get("exit_slippage_cost") or 0))
+            spread_cost = Decimal(str(persisted_cost_source.get("spread_cost") or (entry_spread_cost + exit_spread_cost)))
+            slippage_cost = Decimal(str(persisted_cost_source.get("slippage_cost") or (entry_slippage_cost + exit_slippage_cost)))
             entry_notional = abs(quantidade_persistida * (fill_price_persistido or preco_base_persistido or Decimal("0")))
-            exit_notional = abs(quantidade_persistida * (saida_persistida or preco_base_persistido or Decimal("0"))) if exit_fee > 0 else Decimal("0")
+            exit_notional = abs(quantidade_persistida * (saida_persistida or preco_base_persistido or Decimal("0")))
             total_notional = entry_notional + exit_notional if exit_notional > 0 else entry_notional
             observed_costs = {
                 "entry_fee_rate": (entry_fee / entry_notional) if entry_notional > 0 else Decimal(str(costs.get("entry_fee_rate", "0.0004"))),
@@ -679,6 +805,10 @@ def _coletar_runtime_observed_state(*, session, decision, df, trades_abertos, pr
         }
     if not isinstance(regime_info, dict):
         regime_info = {}
+    session_state_raw = getattr(session.record.state, "value", session.record.state)
+    session_state = str(session_state_raw).strip().upper()
+    if session_state not in {"RUNNING", "COMPLETED"}:
+        session_state = "RUNNING"
     return {
         "data_fresh": data_fresh,
         "session_drawdown_percent": session_drawdown_percent,
@@ -686,7 +816,7 @@ def _coletar_runtime_observed_state(*, session, decision, df, trades_abertos, pr
         "open_positions": open_positions,
         "executed_trades": executed_trades,
         "observed_costs": observed_costs,
-        "session_state": session.record.state.value,
+        "session_state": session_state,
         "paper_capital_used": paper_capital_used,
         "risk_per_trade_percent": risk_per_trade_percent,
         "internal_error": None,
@@ -813,6 +943,10 @@ async def _processar_trades_paper_abertos(context, chat_id, trades, candle, df, 
                     custos_totais=float(trade_costs["custos_totais"]),
                     pnl_liquido=float(trade_costs["pnl_liquido"]),
                     exit_fee=float(trade_costs["exit_fee"]),
+                    entry_spread_cost=float(trade_costs["entry_spread_cost"]),
+                    entry_slippage_cost=float(trade_costs["entry_slippage_cost"]),
+                    exit_spread_cost=float(trade_costs["exit_spread_cost"]),
+                    exit_slippage_cost=float(trade_costs["exit_slippage_cost"]),
                     spread_cost=float(trade_costs["spread_cost"]),
                     slippage_cost=float(trade_costs["slippage_cost"]),
                     close_idempotency_key=close_idempotency_key,
@@ -947,6 +1081,10 @@ async def _processar_trades_paper_abertos(context, chat_id, trades, candle, df, 
                     custos_totais=float(trade_costs["custos_totais"]),
                     pnl_liquido=float(trade_costs["pnl_liquido"]),
                     exit_fee=float(trade_costs["exit_fee"]),
+                    entry_spread_cost=float(trade_costs["entry_spread_cost"]),
+                    entry_slippage_cost=float(trade_costs["entry_slippage_cost"]),
+                    exit_spread_cost=float(trade_costs["exit_spread_cost"]),
+                    exit_slippage_cost=float(trade_costs["exit_slippage_cost"]),
                     spread_cost=float(trade_costs["spread_cost"]),
                     slippage_cost=float(trade_costs["slippage_cost"]),
                     close_idempotency_key=close_idempotency_key,
@@ -1386,8 +1524,10 @@ async def monitorar_paper_sol(context):
             preco_base=entrada,
             fill_price=float(trade_costs_entry["fill_price"]),
             entry_fee=float(trade_costs_entry["entry_fee"]),
-            spread_cost=float(trade_costs_entry["spread_cost"]),
-            slippage_cost=float(trade_costs_entry["slippage_cost"]),
+            entry_spread_cost=float(trade_costs_entry["entry_spread_cost"]),
+            entry_slippage_cost=float(trade_costs_entry["entry_slippage_cost"]),
+            spread_cost=float(trade_costs_entry["entry_spread_cost"]),
+            slippage_cost=float(trade_costs_entry["entry_slippage_cost"]),
             outbox_event_factory=_outbox_factory_open if runtime_session is not None else None,
         )
         mensagem_abertura = (

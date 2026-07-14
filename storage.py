@@ -58,9 +58,9 @@ def _trade_cost_helpers(direcao, entrada, quantidade, trade_costs):
     else:
         fill_price = entrada_val - entry_spread - entry_slippage
     entry_fee = abs(quantidade_val * fill_price * float(trade_costs["entry_fee_rate"]))
-    spread_cost = abs(quantidade_val * entry_spread)
-    slippage_cost = abs(quantidade_val * entry_slippage)
-    return fill_price, entry_fee, spread_cost, slippage_cost
+    entry_spread_cost = abs(quantidade_val * entry_spread)
+    entry_slippage_cost = abs(quantidade_val * entry_slippage)
+    return fill_price, entry_fee, entry_spread_cost, entry_slippage_cost
 
 
 def _calcular_fill_price_paper(direcao, entrada, quantidade, trade_costs):
@@ -156,6 +156,10 @@ def inicializar_banco(db_name=DB_NAME):
                 "fill_price": "REAL",
                 "entry_fee": "REAL",
                 "exit_fee": "REAL",
+                "entry_spread_cost": "REAL",
+                "exit_spread_cost": "REAL",
+                "entry_slippage_cost": "REAL",
+                "exit_slippage_cost": "REAL",
                 "spread_cost": "REAL",
                 "slippage_cost": "REAL",
                 "pnl_bruto": "REAL",
@@ -653,7 +657,8 @@ def obter_trades_paper_abertos(symbol="SOLUSDT", session_id=None):
             cursor = conn.cursor()
             query = """
                 SELECT id, timestamp, simbolo, session_id, direcao, entrada, stop_loss, take_profit, quantidade, valor_arriscado,
-                       preco_base, fill_price, entry_fee, exit_fee, spread_cost, slippage_cost, pnl_bruto, custos_totais, pnl_liquido,
+                       preco_base, fill_price, entry_fee, exit_fee, entry_spread_cost, entry_slippage_cost, exit_spread_cost, exit_slippage_cost,
+                       spread_cost, slippage_cost, pnl_bruto, custos_totais, pnl_liquido,
                        aberto_em
                 FROM trades
                 WHERE tipo = 'paper' AND simbolo = ? AND status = 'open'
@@ -682,12 +687,16 @@ def obter_trades_paper_abertos(symbol="SOLUSDT", session_id=None):
                     "fill_price": float(linha[11]) if linha[11] is not None else None,
                     "entry_fee": float(linha[12]) if linha[12] is not None else None,
                     "exit_fee": float(linha[13]) if linha[13] is not None else None,
-                    "spread_cost": float(linha[14]) if linha[14] is not None else None,
-                    "slippage_cost": float(linha[15]) if linha[15] is not None else None,
-                    "pnl_bruto": float(linha[16]) if linha[16] is not None else None,
-                    "custos_totais": float(linha[17]) if linha[17] is not None else None,
-                    "pnl_liquido": float(linha[18]) if linha[18] is not None else None,
-                    "aberto_em": linha[19],
+                    "entry_spread_cost": float(linha[14]) if linha[14] is not None else None,
+                    "entry_slippage_cost": float(linha[15]) if linha[15] is not None else None,
+                    "exit_spread_cost": float(linha[16]) if linha[16] is not None else None,
+                    "exit_slippage_cost": float(linha[17]) if linha[17] is not None else None,
+                    "spread_cost": float(linha[18]) if linha[18] is not None else None,
+                    "slippage_cost": float(linha[19]) if linha[19] is not None else None,
+                    "pnl_bruto": float(linha[20]) if linha[20] is not None else None,
+                    "custos_totais": float(linha[21]) if linha[21] is not None else None,
+                    "pnl_liquido": float(linha[22]) if linha[22] is not None else None,
+                    "aberto_em": linha[23],
                 }
             )
         return trades
@@ -713,6 +722,8 @@ def registrar_trade_paper(
     preco_base=None,
     fill_price=None,
     entry_fee=None,
+    entry_spread_cost=None,
+    entry_slippage_cost=None,
     spread_cost=None,
     slippage_cost=None,
     outbox_event_factory=None,
@@ -731,7 +742,14 @@ def registrar_trade_paper(
                 "spread_bps": 5.0,
                 "slippage_bps": 5.0,
             }
-            if fill_price is None or entry_fee is None or spread_cost is None or slippage_cost is None:
+            if (
+                fill_price is None
+                or entry_fee is None
+                or entry_spread_cost is None
+                or entry_slippage_cost is None
+                or spread_cost is None
+                or slippage_cost is None
+            ):
                 try:
                     from decimal import Decimal
 
@@ -744,16 +762,20 @@ def registrar_trade_paper(
                     calculado = {
                         "fill_price": float(_calcular_fill_price_paper(direcao, entrada, quantidade, trade_costs)),
                         "entry_fee": float(_calcular_entry_fee_paper(direcao, entrada, quantidade, trade_costs)),
-                        "spread_cost": float(_calcular_spread_cost_paper(direcao, entrada, quantidade, trade_costs)),
-                        "slippage_cost": float(_calcular_slippage_cost_paper(direcao, entrada, quantidade, trade_costs)),
+                        "entry_spread_cost": float(_calcular_spread_cost_paper(direcao, entrada, quantidade, trade_costs)),
+                        "entry_slippage_cost": float(_calcular_slippage_cost_paper(direcao, entrada, quantidade, trade_costs)),
                     }
                     fill_price = calculado["fill_price"] if fill_price is None else fill_price
                     entry_fee = calculado["entry_fee"] if entry_fee is None else entry_fee
-                    spread_cost = calculado["spread_cost"] if spread_cost is None else spread_cost
-                    slippage_cost = calculado["slippage_cost"] if slippage_cost is None else slippage_cost
+                    entry_spread_cost = calculado["entry_spread_cost"] if entry_spread_cost is None else entry_spread_cost
+                    entry_slippage_cost = calculado["entry_slippage_cost"] if entry_slippage_cost is None else entry_slippage_cost
+                    spread_cost = entry_spread_cost if spread_cost is None else spread_cost
+                    slippage_cost = entry_slippage_cost if slippage_cost is None else slippage_cost
                 except Exception:
                     fill_price = fill_price if fill_price is not None else entrada
                     entry_fee = entry_fee if entry_fee is not None else 0.0
+                    entry_spread_cost = entry_spread_cost if entry_spread_cost is not None else 0.0
+                    entry_slippage_cost = entry_slippage_cost if entry_slippage_cost is not None else 0.0
                     spread_cost = spread_cost if spread_cost is not None else 0.0
                     slippage_cost = slippage_cost if slippage_cost is not None else 0.0
             request_hash = None
@@ -776,6 +798,8 @@ def registrar_trade_paper(
                         "preco_base": preco_base if preco_base is not None else entrada,
                         "fill_price": fill_price if fill_price is not None else entrada,
                         "entry_fee": entry_fee,
+                        "entry_spread_cost": entry_spread_cost,
+                        "entry_slippage_cost": entry_slippage_cost,
                         "spread_cost": spread_cost,
                         "slippage_cost": slippage_cost,
                     }
@@ -793,12 +817,12 @@ def registrar_trade_paper(
                 INSERT INTO trades (
                     timestamp, tipo, simbolo, session_id, status, direcao, resultado, score,
                     lucro_percent, rr_planejado, entrada, stop_loss, take_profit,
-                    quantidade, valor_arriscado, preco_base, fill_price, entry_fee, spread_cost, slippage_cost,
+                    quantidade, valor_arriscado, preco_base, fill_price, entry_fee, entry_spread_cost, entry_slippage_cost, spread_cost, slippage_cost,
                     aberto_em, filtros_aplicados, idempotency_key, idempotency_hash
                 )
                 VALUES (:timestamp, 'paper', :symbol, :session_id, 'open', :direcao, 'PENDENTE', 0, 0.0,
                         :rr_planejado, :entrada, :stop_loss, :take_profit, :quantidade, :valor_arriscado,
-                        :preco_base, :fill_price, :entry_fee, :spread_cost, :slippage_cost,
+                        :preco_base, :fill_price, :entry_fee, :entry_spread_cost, :entry_slippage_cost, :spread_cost, :slippage_cost,
                         :aberto_em, :filtros_aplicados, :idempotency_key, :idempotency_hash)
                 """,
                 {
@@ -815,6 +839,8 @@ def registrar_trade_paper(
                     "preco_base": preco_base if preco_base is not None else entrada,
                     "fill_price": fill_price if fill_price is not None else entrada,
                     "entry_fee": entry_fee,
+                    "entry_spread_cost": entry_spread_cost,
+                    "entry_slippage_cost": entry_slippage_cost,
                     "spread_cost": spread_cost,
                     "slippage_cost": slippage_cost,
                     "aberto_em": timestamp,
@@ -866,6 +892,10 @@ def finalizar_trade_paper(
     custos_totais=None,
     pnl_liquido=None,
     exit_fee=None,
+    entry_spread_cost=None,
+    entry_slippage_cost=None,
+    exit_spread_cost=None,
+    exit_slippage_cost=None,
     spread_cost=None,
     slippage_cost=None,
     close_idempotency_key=None,
@@ -889,6 +919,14 @@ def finalizar_trade_paper(
                 pnl_liquido = lucro_reais
             if exit_fee is None:
                 exit_fee = 0.0
+            if entry_spread_cost is None:
+                entry_spread_cost = 0.0
+            if entry_slippage_cost is None:
+                entry_slippage_cost = 0.0
+            if exit_spread_cost is None:
+                exit_spread_cost = 0.0
+            if exit_slippage_cost is None:
+                exit_slippage_cost = 0.0
             if spread_cost is None:
                 spread_cost = 0.0
             if slippage_cost is None:
@@ -921,6 +959,10 @@ def finalizar_trade_paper(
                     "custos_totais": custos_totais,
                     "pnl_liquido": pnl_liquido,
                     "exit_fee": exit_fee,
+                    "entry_spread_cost": entry_spread_cost,
+                    "entry_slippage_cost": entry_slippage_cost,
+                    "exit_spread_cost": exit_spread_cost,
+                    "exit_slippage_cost": exit_slippage_cost,
                     "spread_cost": spread_cost,
                     "slippage_cost": slippage_cost,
                     "close_idempotency_key": close_idempotency_key or idempotency_key,
@@ -950,6 +992,10 @@ def finalizar_trade_paper(
                     custos_totais = COALESCE(?, custos_totais),
                     pnl_liquido = COALESCE(?, pnl_liquido),
                     exit_fee = COALESCE(?, exit_fee),
+                    entry_spread_cost = COALESCE(?, entry_spread_cost),
+                    entry_slippage_cost = COALESCE(?, entry_slippage_cost),
+                    exit_spread_cost = COALESCE(?, exit_spread_cost),
+                    exit_slippage_cost = COALESCE(?, exit_slippage_cost),
                     spread_cost = COALESCE(?, spread_cost),
                     slippage_cost = COALESCE(?, slippage_cost),
                     close_idempotency_key = COALESCE(?, close_idempotency_key),
@@ -967,6 +1013,10 @@ def finalizar_trade_paper(
                     custos_totais,
                     pnl_liquido,
                     exit_fee,
+                    entry_spread_cost,
+                    entry_slippage_cost,
+                    exit_spread_cost,
+                    exit_slippage_cost,
                     spread_cost,
                     slippage_cost,
                     close_idempotency_key or idempotency_key,
@@ -1156,7 +1206,8 @@ def obter_ultimos_trades_paper(symbol="SOLUSDT", limite=30, db_name=DB_NAME, ses
             query = """
                 SELECT timestamp, resultado, lucro_percent, lucro_reais, filtros_aplicados,
                        direcao, entrada, saida, quantidade, preco_base, fill_price, entry_fee,
-                       exit_fee, spread_cost, slippage_cost, pnl_bruto, custos_totais, pnl_liquido, session_id
+                       exit_fee, entry_spread_cost, entry_slippage_cost, exit_spread_cost, exit_slippage_cost,
+                       spread_cost, slippage_cost, pnl_bruto, custos_totais, pnl_liquido, session_id
                 FROM trades
                 WHERE tipo = 'paper' AND simbolo = ? AND status = 'closed'
             """
@@ -1187,12 +1238,16 @@ def obter_ultimos_trades_paper(symbol="SOLUSDT", limite=30, db_name=DB_NAME, ses
                     "fill_price": float(linha[10]) if linha[10] is not None else None,
                     "entry_fee": float(linha[11]) if linha[11] is not None else None,
                     "exit_fee": float(linha[12]) if linha[12] is not None else None,
-                    "spread_cost": float(linha[13]) if linha[13] is not None else None,
-                    "slippage_cost": float(linha[14]) if linha[14] is not None else None,
-                    "pnl_bruto": float(linha[15]) if linha[15] is not None else None,
-                    "custos_totais": float(linha[16]) if linha[16] is not None else None,
-                    "pnl_liquido": float(linha[17]) if linha[17] is not None else None,
-                    "session_id": linha[18],
+                    "entry_spread_cost": float(linha[13]) if linha[13] is not None else None,
+                    "entry_slippage_cost": float(linha[14]) if linha[14] is not None else None,
+                    "exit_spread_cost": float(linha[15]) if linha[15] is not None else None,
+                    "exit_slippage_cost": float(linha[16]) if linha[16] is not None else None,
+                    "spread_cost": float(linha[17]) if linha[17] is not None else None,
+                    "slippage_cost": float(linha[18]) if linha[18] is not None else None,
+                    "pnl_bruto": float(linha[19]) if linha[19] is not None else None,
+                    "custos_totais": float(linha[20]) if linha[20] is not None else None,
+                    "pnl_liquido": float(linha[21]) if linha[21] is not None else None,
+                    "session_id": linha[22],
                 }
             )
         return list(reversed(trades))

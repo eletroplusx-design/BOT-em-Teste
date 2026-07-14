@@ -720,9 +720,22 @@ def test_outbox_real_transita_abertura_fechamento_e_notificacao(monkeypatch, tmp
     import sqlite3
 
     contexto = _DummyContext({"chat_id": 123, "user_id": 123, "chat_type": "private", "session_id": session.record.session_id})
+    def _fake_evaluate_snapshot(snapshot, decision=None, idempotency_key=None, limits=None):
+        session._store.append_snapshot(
+            session.record.session_id,
+            snapshot=getattr(snapshot, "as_dict", lambda: snapshot)(),
+            decision_hash=session.decision.decision_hash,
+            evidence_hash=session.decision.evidence_hash,
+            result_status="APPROVED",
+            idempotency_key=idempotency_key,
+        )
+        return SimpleNamespace(monitoring_decision=SimpleNamespace(status="APPROVED"), session=session.record, approved=True)
 
-    open_time = datetime(2026, 7, 11, 12, 0, tzinfo=timezone.utc)
-    close_time = datetime(2026, 7, 11, 13, 0, tzinfo=timezone.utc)
+    session.evaluate_snapshot = _fake_evaluate_snapshot
+
+    agora = datetime.now(timezone.utc)
+    open_time = agora - timedelta(minutes=30)
+    close_time = agora - timedelta(minutes=5)
 
     def _open_outbox_factory(trade_id, timestamp):
         return paper_engine._paper_runtime_outbox_record(
@@ -766,12 +779,25 @@ def test_outbox_real_transita_abertura_fechamento_e_notificacao(monkeypatch, tmp
         preco_base=100.0,
         fill_price=100.0,
         entry_fee=0.0,
-        spread_cost=0.0,
-        slippage_cost=0.0,
+        entry_spread_cost=0.25,
+        entry_slippage_cost=0.15,
+        spread_cost=0.25,
+        slippage_cost=0.15,
         outbox_event_factory=_open_outbox_factory,
         db_name=str(trades_db),
     )
     assert trade_id is not None
+
+    with sqlite3.connect(trades_db) as conn:
+        row = conn.execute(
+            """
+            SELECT entry_spread_cost, entry_slippage_cost, exit_spread_cost, exit_slippage_cost, spread_cost, slippage_cost
+            FROM trades
+            WHERE id = ?
+            """,
+            (trade_id,),
+        ).fetchone()
+    assert row == (0.25, 0.15, None, None, 0.25, 0.15)
 
     import asyncio
 
@@ -876,6 +902,84 @@ def test_outbox_real_transita_abertura_fechamento_e_notificacao(monkeypatch, tmp
     assert event_count >= 1
 
 
+def test_outbox_json_tampered_bloqueia_reconciliacao(monkeypatch, tmp_path):
+    store = _store(tmp_path)
+    session = _session(store, session_id="outbox-json")
+    contexto = _DummyContext({"chat_id": 123, "user_id": 123, "chat_type": "private", "session_id": session.record.session_id})
+    outbox = paper_engine._paper_runtime_outbox_record(
+        paper_engine._paper_runtime_outbox_payload(
+            operation_type="OPEN",
+            trade_id=1,
+            session_id=session.record.session_id,
+            candle_close_time=datetime(2026, 7, 11, 12, 0, tzinfo=timezone.utc),
+            idempotency_key="idem-json",
+            runtime_events=[],
+            snapshot_context={
+                "preco_atual": 100.0,
+                "regime_info": {"regime": "BULL", "adx": 30, "volatilidade": "NORMAL"},
+                "data_fresh": True,
+            },
+            telegram_text="Paper SOL aberto",
+            telegram_chat_id=123,
+        )
+    )
+    outbox["payload_json"] = "{"
+    monkeypatch.setattr(paper_engine, "obter_outbox_paper_pendentes", lambda session_id=None: [outbox])
+    monkeypatch.setattr(paper_engine, "atualizar_outbox_paper_trade", lambda *args, **kwargs: True)
+
+    import asyncio
+
+    with pytest.raises(PaperRuntimeSessionError):
+        asyncio.run(
+            paper_engine._reconciliar_paper_runtime_outbox(
+                contexto,
+                session,
+                session_scope_id=session.record.session_id,
+                chat_id=123,
+            )
+        )
+    assert contexto.bot.sent == []
+
+
+def test_outbox_hash_tampered_bloqueia_reconciliacao(monkeypatch, tmp_path):
+    store = _store(tmp_path)
+    session = _session(store, session_id="outbox-hash")
+    contexto = _DummyContext({"chat_id": 123, "user_id": 123, "chat_type": "private", "session_id": session.record.session_id})
+    outbox = paper_engine._paper_runtime_outbox_record(
+        paper_engine._paper_runtime_outbox_payload(
+            operation_type="OPEN",
+            trade_id=1,
+            session_id=session.record.session_id,
+            candle_close_time=datetime(2026, 7, 11, 12, 0, tzinfo=timezone.utc),
+            idempotency_key="idem-hash",
+            runtime_events=[],
+            snapshot_context={
+                "preco_atual": 100.0,
+                "regime_info": {"regime": "BULL", "adx": 30, "volatilidade": "NORMAL"},
+                "data_fresh": True,
+            },
+            telegram_text="Paper SOL aberto",
+            telegram_chat_id=123,
+        )
+    )
+    outbox["request_hash"] = "bad-hash"
+    monkeypatch.setattr(paper_engine, "obter_outbox_paper_pendentes", lambda session_id=None: [outbox])
+    monkeypatch.setattr(paper_engine, "atualizar_outbox_paper_trade", lambda *args, **kwargs: True)
+
+    import asyncio
+
+    with pytest.raises(PaperRuntimeSessionError):
+        asyncio.run(
+            paper_engine._reconciliar_paper_runtime_outbox(
+                contexto,
+                session,
+                session_scope_id=session.record.session_id,
+                chat_id=123,
+            )
+        )
+    assert contexto.bot.sent == []
+
+
 @pytest.mark.parametrize(
     "missing_field",
     [
@@ -948,6 +1052,56 @@ def test_coleta_runtime_falha_ao_buscar_trades(tmp_path, monkeypatch):
             preco_atual=102.0,
             regime_info={"regime": "BULL", "adx": 30, "volatilidade": "NORMAL"},
         )
+
+
+def test_coleta_runtime_prefere_trade_fechado_para_custos(tmp_path, monkeypatch):
+    store = _store(tmp_path)
+    session = _session(store, session_id="cost-source")
+    import storage
+
+    monkeypatch.setattr(
+        storage,
+        "obter_ultimos_trades_paper",
+        lambda *args, **kwargs: [
+            {
+                "timestamp": "2026-07-11T12:00:00+00:00",
+                "status": "open",
+                "session_id": session.record.session_id,
+                "entry_fee": 0.4,
+                "entry_spread_cost": 0.25,
+                "entry_slippage_cost": 0.15,
+                "spread_cost": 0.25,
+                "slippage_cost": 0.15,
+            },
+            {
+                "timestamp": "2026-07-11T11:00:00+00:00",
+                "status": "closed",
+                "session_id": session.record.session_id,
+                "resultado": "GANHO",
+                "saida": 110.0,
+                "entry_fee": 0.4,
+                "exit_fee": 0.4,
+                "entry_spread_cost": 0.25,
+                "entry_slippage_cost": 0.15,
+                "exit_spread_cost": 0.22,
+                "exit_slippage_cost": 0.12,
+                "spread_cost": 0.47,
+                "slippage_cost": 0.27,
+                "pnl_bruto": 10.0,
+                "custos_totais": 1.0,
+                "pnl_liquido": 9.0,
+            },
+        ],
+    )
+    observed = paper_engine._coletar_runtime_observed_state(
+        session=session,
+        decision=session.decision,
+        df=_paper_df(),
+        trades_abertos=[],
+        preco_atual=102.0,
+        regime_info={"regime": "BULL", "adx": 30, "volatilidade": "NORMAL"},
+    )
+    assert observed["observed_costs"]["exit_fee_rate"] > 0
 
 
 def test_primeira_perda_gera_drawdown_positivo(tmp_path, monkeypatch):

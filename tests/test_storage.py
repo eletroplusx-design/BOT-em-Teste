@@ -127,8 +127,23 @@ def test_trade_paper_workflow(monkeypatch, temp_db_path):
         valor_arriscado=100,
         rr_planejado=2.0,
         filtros_aplicados=True,
+        entry_spread_cost=0.25,
+        entry_slippage_cost=0.15,
+        spread_cost=0.25,
+        slippage_cost=0.15,
     )
     assert trade_id is not None
+
+    with sqlite3.connect(temp_db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT entry_spread_cost, entry_slippage_cost, exit_spread_cost, exit_slippage_cost, spread_cost, slippage_cost
+            FROM trades
+            WHERE id = ?
+            """,
+            (trade_id,),
+        ).fetchone()
+    assert row == (0.25, 0.15, None, None, 0.25, 0.15)
 
     abertos = storage.obter_trades_paper_abertos("SOLUSDT")
     assert len(abertos) == 1
@@ -170,15 +185,19 @@ def test_trade_paper_workflow(monkeypatch, temp_db_path):
     assert trade_list[0]["status"] == "closed"
     with sqlite3.connect(temp_db_path) as conn:
         row = conn.execute(
-            "SELECT preco_base, fill_price, entry_fee, close_idempotency_key, close_idempotency_hash, pnl_liquido FROM trades WHERE id = ?",
+            "SELECT preco_base, fill_price, entry_fee, entry_spread_cost, entry_slippage_cost, exit_spread_cost, exit_slippage_cost, close_idempotency_key, close_idempotency_hash, pnl_liquido FROM trades WHERE id = ?",
             (trade_id,),
         ).fetchone()
     assert row[0] == 100.0
     assert row[1] is not None
     assert row[2] is not None
-    assert row[3] == "idem-close"
+    assert row[3] is not None
     assert row[4] is not None
     assert row[5] is not None
+    assert row[6] is not None
+    assert row[7] == "idem-close"
+    assert row[8] is not None
+    assert row[9] is not None
 
 
 def test_contar_fechados_hoje_e_paper_stats_sem_filtrado(monkeypatch, temp_db_path):
