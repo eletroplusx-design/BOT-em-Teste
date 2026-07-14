@@ -227,6 +227,7 @@ def test_monitorar_paper_sol_sem_dados(monkeypatch):
     fake_backtester = MagicMock()
     fake_backtester.baixar_dados_historicos.return_value = pd.DataFrame()
     monkeypatch.setattr(paper_engine, "backtester", fake_backtester)
+    monkeypatch.setattr(paper_engine, "obter_trades_paper_abertos", lambda symbol=None, session_id=None, **kwargs: [])
     decisao_mock = MagicMock()
     monkeypatch.setattr(paper_engine, "registrar_decisao_observabilidade", decisao_mock)
     contexto = FakeContext()
