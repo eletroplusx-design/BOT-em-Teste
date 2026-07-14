@@ -444,12 +444,16 @@ class PaperSessionMetrics:
     regime_coverage: tuple[str, ...]
     trade_ids: tuple[int, ...] = ()
     fill_count: int = 0
+    gross_profit: Decimal = Decimal("0")
+    gross_loss: Decimal = Decimal("0")
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "session_id", _require_str(self.session_id, "session_id"))
         object.__setattr__(self, "capital_initial", _require_decimal(self.capital_initial, "capital_initial"))
         object.__setattr__(self, "capital_final", _require_decimal(self.capital_final, "capital_final"))
         object.__setattr__(self, "gross_pnl", _require_decimal(self.gross_pnl, "gross_pnl", allow_negative=True))
+        object.__setattr__(self, "gross_profit", _require_decimal(self.gross_profit, "gross_profit"))
+        object.__setattr__(self, "gross_loss", _require_decimal(self.gross_loss, "gross_loss"))
         object.__setattr__(self, "total_costs", _require_decimal(self.total_costs, "total_costs"))
         object.__setattr__(self, "net_pnl", _require_decimal(self.net_pnl, "net_pnl", allow_negative=True))
         object.__setattr__(self, "net_return_percent", _require_decimal(self.net_return_percent, "net_return_percent", allow_negative=True))
@@ -486,6 +490,10 @@ class PaperSessionMetrics:
             raise PaperEvaluationMetricsError("capital_final must equal capital_initial plus net_pnl.")
         if self.total_trades != self.winning_trades + self.losing_trades + self.breakeven_trades:
             raise PaperEvaluationMetricsError("trade counts are contradictory.")
+        if self.gross_profit < 0 or self.gross_loss < 0:
+            raise PaperEvaluationMetricsError("gross profit and loss must be non-negative.")
+        if self.gross_pnl != self.gross_profit - self.gross_loss:
+            raise PaperEvaluationMetricsError("gross_pnl must equal gross_profit minus gross_loss.")
         if self.total_trades == 0:
             if self.profit_factor is not None:
                 raise PaperEvaluationMetricsError("profit_factor must be None when there are no trades.")
@@ -500,6 +508,8 @@ class PaperSessionMetrics:
             "capital_initial": self.capital_initial,
             "capital_final": self.capital_final,
             "gross_pnl": self.gross_pnl,
+            "gross_profit": self.gross_profit,
+            "gross_loss": self.gross_loss,
             "total_costs": self.total_costs,
             "net_pnl": self.net_pnl,
             "net_return_percent": self.net_return_percent,

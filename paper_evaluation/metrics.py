@@ -99,6 +99,8 @@ def compute_paper_session_metrics(session: PaperSessionEvidence) -> PaperSession
             capital_initial=capital_initial,
             capital_final=capital_final,
             gross_pnl=Decimal("0"),
+            gross_profit=Decimal("0"),
+            gross_loss=Decimal("0"),
             total_costs=Decimal("0"),
             net_pnl=Decimal("0"),
             net_return_percent=Decimal("0"),
@@ -199,6 +201,8 @@ def compute_paper_session_metrics(session: PaperSessionEvidence) -> PaperSession
         capital_initial=capital_initial,
         capital_final=capital_final,
         gross_pnl=gross_profit - gross_loss,
+        gross_profit=gross_profit,
+        gross_loss=gross_loss,
         total_costs=total_costs,
         net_pnl=net_pnl,
         net_return_percent=net_return_percent,
@@ -248,8 +252,8 @@ def aggregate_paper_session_metrics(metrics: Iterable[PaperSessionMetrics]) -> P
     breakeven = sum(item.breakeven_trades for item in items)
     win_rate = (Decimal(winning) / Decimal(total_trades) * Decimal("100")) if total_trades else Decimal("0")
     expectancy = (net_pnl / Decimal(total_trades)) if total_trades else Decimal("0")
-    gross_profit = sum((item.gross_pnl for item in items if item.gross_pnl > 0), Decimal("0"))
-    gross_loss = sum((abs(item.gross_pnl) for item in items if item.gross_pnl < 0), Decimal("0"))
+    gross_profit = sum((item.gross_profit for item in items), Decimal("0"))
+    gross_loss = sum((item.gross_loss for item in items), Decimal("0"))
     profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else None
     drawdown = max((item.drawdown_max_percent for item in items), default=Decimal("0"))
     exposure_percent = max((item.exposure_percent for item in items), default=Decimal("0"))
@@ -275,6 +279,8 @@ def aggregate_paper_session_metrics(metrics: Iterable[PaperSessionMetrics]) -> P
         capital_initial=capital_initial,
         capital_final=capital_final,
         gross_pnl=gross_pnl,
+        gross_profit=gross_profit,
+        gross_loss=gross_loss,
         total_costs=total_costs,
         net_pnl=net_pnl,
         net_return_percent=(net_pnl / capital_initial * Decimal("100")) if capital_initial > 0 else Decimal("0"),

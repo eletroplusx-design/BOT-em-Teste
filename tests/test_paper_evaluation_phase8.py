@@ -396,13 +396,13 @@ def test_paper_evaluation_synthetic_fixture_not_operational_evidence():
         synthetic_test_data=True,
         operational_evidence=False,
     )
-    assert report.decision.status is PaperEvaluationStatus.APPROVED_FOR_EXTENDED_PAPER
+    assert report.decision.status is PaperEvaluationStatus.INSUFFICIENT_EVIDENCE
     assert report.synthetic_test_data is True
     assert report.operational_evidence is False
     assert report.manifest.synthetic_test_data is True
     assert report.manifest.operational_evidence is False
     assert report.aggregate_metrics.total_trades == 1
-    assert report.aggregate_metrics.profit_factor is None
+    assert any("operational evidence required" in reason for reason in report.decision.reasons)
 
 
 def test_paper_evaluation_order_does_not_change_hash():
@@ -547,6 +547,73 @@ def test_paper_evaluation_live_attempt_expired_data_and_suspended_sessions_rejec
     assert any("live attempts are not allowed" in reason for reason in report.decision.reasons)
     assert any("stale data detected" in reason for reason in report.decision.reasons)
     assert any("session state SUSPENDED not eligible" in rejection.reason for rejection in report.rejected_sessions if rejection.session_id == "suspended")
+
+
+def test_aggregate_metrics_use_whole_cohort_for_profit_factor_and_cost_percent():
+    started = datetime(2026, 7, 11, 9, 0, tzinfo=timezone.utc)
+    low_limits = dict(BASE_LIMITS)
+    low_limits["paper_capital_max"] = Decimal("100")
+    good_session = _session_evidence(
+        "cohort-good",
+        (
+            _trade(
+                1,
+                "cohort-good",
+                started + timedelta(minutes=5),
+                started + timedelta(minutes=35),
+                lucro_reais=Decimal("40"),
+                entry_price=Decimal("100"),
+                exit_price=Decimal("140"),
+            ),
+        ),
+        (_snapshot("cohort-good", started, started + timedelta(hours=1), executed_trades=1, paper_capital_used=Decimal("40")),),
+        paper_limits=low_limits,
+    )
+    bad_session = _session_evidence(
+        "cohort-bad",
+        (
+            _trade(
+                1,
+                "cohort-bad",
+                started + timedelta(days=1, minutes=5),
+                started + timedelta(days=1, minutes=35),
+                lucro_reais=Decimal("-30"),
+                entry_price=Decimal("100"),
+                exit_price=Decimal("70"),
+                direction="VENDA",
+            ),
+        ),
+        (_snapshot("cohort-bad", started + timedelta(days=1), started + timedelta(days=1, hours=1), executed_trades=1, paper_capital_used=Decimal("40")),),
+        paper_limits=low_limits,
+    )
+    policy = PaperEvaluationPolicy(
+        min_sessions_completed=2,
+        min_distinct_days=1,
+        min_trades=2,
+        min_duration_hours=Decimal("0"),
+        max_drawdown_percent=Decimal("100"),
+        min_profit_factor=Decimal("2"),
+        min_expectancy=Decimal("-100"),
+        min_net_return_percent=Decimal("-100"),
+        max_total_costs_percent=Decimal("1"),
+        max_suspended_sessions=0,
+        require_zero_live_attempts=True,
+        require_audit_chain=True,
+        require_fresh_data=True,
+        required_regimes=(),
+        min_regime_coverage=0,
+        evaluator_version="v8_paper_evaluation",
+    )
+    report = evaluate_paper_sessions(
+        [good_session, bad_session],
+        policy=policy,
+        evaluation_id="cohort-aggregate",
+        synthetic_test_data=False,
+        operational_evidence=True,
+    )
+    assert report.decision.status is PaperEvaluationStatus.REJECTED
+    assert any("profit factor below minimum" in reason for reason in report.decision.reasons)
+    assert any("costs above maximum" in reason for reason in report.decision.reasons)
 
 
 @pytest.mark.parametrize(
@@ -728,7 +795,6 @@ def test_operational_evidence_from_sqlite_and_phase5_reference(tmp_path):
         evaluation_id="operational-eval",
         synthetic_test_data=False,
         operational_evidence=True,
-        session_ids=("operational-1",),
     )
     assert report.manifest.session_count == 1
     assert report.manifest.operational_evidence is True
@@ -736,6 +802,75 @@ def test_operational_evidence_from_sqlite_and_phase5_reference(tmp_path):
     assert report.decision.status is PaperEvaluationStatus.APPROVED_FOR_EXTENDED_PAPER
     assert report.walk_forward_comparison["reference_manifest_hash"] == reference.manifest["manifest_hash"]
     assert report.walk_forward_comparison["reference_profit_factor"] is not None
+
+
+def test_explicit_operational_session_selection_and_mapping_reference_are_rejected(tmp_path):
+    runtime_db, trades_db = _seed_runtime_and_trades(tmp_path, session_id="operational-explicit", trade_result=Decimal("20"))
+    reference = _promotion_result()
+    with pytest.raises(PaperEvaluationReadError):
+        evaluate_paper_sessions_from_storage(
+            runtime_db_path=runtime_db,
+            trades_db_path=trades_db,
+            policy=_lenient_policy(),
+            reference_walk_forward=reference,
+            evaluation_id="operational-empty",
+            synthetic_test_data=False,
+            operational_evidence=True,
+            session_ids=(),
+        )
+    with pytest.raises(PaperEvaluationReadError):
+        evaluate_paper_sessions_from_storage(
+            runtime_db_path=runtime_db,
+            trades_db_path=trades_db,
+            policy=_lenient_policy(),
+            reference_walk_forward=reference,
+            evaluation_id="operational-duplicate",
+            synthetic_test_data=False,
+            operational_evidence=False,
+            session_ids=("operational-explicit", "operational-explicit"),
+        )
+    with pytest.raises(PaperEvaluationReadError):
+        evaluate_paper_sessions_from_storage(
+            runtime_db_path=runtime_db,
+            trades_db_path=trades_db,
+            policy=_lenient_policy(),
+            reference_walk_forward=reference,
+            evaluation_id="operational-unknown",
+            synthetic_test_data=False,
+            operational_evidence=False,
+            session_ids=("missing-session",),
+        )
+    with pytest.raises(PaperEvaluationReadError):
+        evaluate_paper_sessions_from_storage(
+            runtime_db_path=runtime_db,
+            trades_db_path=trades_db,
+            policy=_lenient_policy(),
+            reference_walk_forward=reference,
+            evaluation_id="operational-blank",
+            synthetic_test_data=False,
+            operational_evidence=False,
+            session_ids=("   ",),
+        )
+    with pytest.raises(PaperEvaluationDecisionError):
+        evaluate_paper_sessions_from_storage(
+            runtime_db_path=runtime_db,
+            trades_db_path=trades_db,
+            policy=_lenient_policy(),
+            reference_walk_forward=reference,
+            evaluation_id="operational-explicit",
+            synthetic_test_data=False,
+            operational_evidence=True,
+            session_ids=("operational-explicit",),
+        )
+    with pytest.raises(PaperEvaluationDecisionError):
+        evaluate_paper_sessions(
+            [ _make_trade_session("mapping-session", trade_results=(Decimal("25"),), started_at=datetime(2026, 7, 11, 9, 0, tzinfo=timezone.utc)) ],
+            policy=_lenient_policy(),
+            evaluation_id="mapping-ref",
+            reference_walk_forward=reference.as_dict(),
+            synthetic_test_data=False,
+            operational_evidence=False,
+        )
 
 
 def test_tampered_audit_chain_blocks(tmp_path):
@@ -748,10 +883,58 @@ def test_tampered_audit_chain_blocks(tmp_path):
         trades_db_path=trades_db,
         policy=_lenient_policy(),
         evaluation_id="tampered-eval",
-        session_ids=("tampered-1",),
     )
     assert report.decision.status is PaperEvaluationStatus.REJECTED
     assert any("audit chain diverged" in rejection.reason for rejection in report.rejected_sessions)
+
+
+def test_runtime_snapshot_and_session_hash_mismatches_block(tmp_path):
+    runtime_db, trades_db = _seed_runtime_and_trades(tmp_path, session_id="tampered-snapshot", trade_result=Decimal("10"))
+    with sqlite3.connect(runtime_db) as conn:
+        conn.execute("UPDATE paper_runtime_sessions SET last_snapshot_hash = 'broken-snapshot' WHERE session_id = ?", ("tampered-snapshot",))
+        conn.commit()
+    report = evaluate_paper_sessions_from_storage(
+        runtime_db_path=runtime_db,
+        trades_db_path=trades_db,
+        policy=_lenient_policy(),
+        evaluation_id="tampered-snapshot",
+    )
+    assert report.decision.status is PaperEvaluationStatus.REJECTED
+    assert any("runtime last snapshot hash mismatch" in rejection.reason for rejection in report.rejected_sessions)
+
+
+def test_runtime_snapshot_hash_column_mismatch_blocks(tmp_path):
+    runtime_db, trades_db = _seed_runtime_and_trades(tmp_path, session_id="tampered-snapshot-hash", trade_result=Decimal("10"))
+    with sqlite3.connect(runtime_db) as conn:
+        conn.execute("UPDATE paper_runtime_snapshots SET snapshot_hash = 'broken-snapshot' WHERE session_id = ?", ("tampered-snapshot-hash",))
+        conn.commit()
+    report = evaluate_paper_sessions_from_storage(
+        runtime_db_path=runtime_db,
+        trades_db_path=trades_db,
+        policy=_lenient_policy(),
+        evaluation_id="tampered-snapshot-hash",
+    )
+    assert report.decision.status is PaperEvaluationStatus.REJECTED
+    assert any("runtime snapshot hash mismatch" in rejection.reason for rejection in report.rejected_sessions)
+
+
+def test_runtime_event_gap_and_last_hash_mismatches_block(tmp_path):
+    runtime_db, trades_db = _seed_runtime_and_trades(tmp_path, session_id="tampered-event", trade_result=Decimal("10"))
+    with sqlite3.connect(runtime_db) as conn:
+        conn.execute(
+            "UPDATE paper_runtime_events SET sequence = 99 WHERE session_id = ? AND sequence = (SELECT MIN(sequence) FROM paper_runtime_events WHERE session_id = ? AND sequence > 1)",
+            ("tampered-event", "tampered-event"),
+        )
+        conn.execute("UPDATE paper_runtime_sessions SET last_event_hash = 'broken-event-hash' WHERE session_id = ?", ("tampered-event",))
+        conn.commit()
+    report = evaluate_paper_sessions_from_storage(
+        runtime_db_path=runtime_db,
+        trades_db_path=trades_db,
+        policy=_lenient_policy(),
+        evaluation_id="tampered-event",
+    )
+    assert report.decision.status is PaperEvaluationStatus.REJECTED
+    assert any("runtime event sequence is not continuous" in rejection.reason or "runtime last event hash mismatch" in rejection.reason for rejection in report.rejected_sessions)
 
 
 def test_missing_database_blocks(tmp_path):

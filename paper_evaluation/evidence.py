@@ -12,8 +12,15 @@ from typing import Any, Iterable, Mapping
 from domain.serialization import serialize_value
 from paper_runtime import PaperRuntimeEventType, PaperRuntimeSessionError, PaperRuntimeState
 from paper_runtime.audit import chain_hash, event_content_hash
-from paper_runtime.models import PaperRuntimeEvent, PaperRuntimeSessionRecord
-from promotion import PaperMonitoringSnapshot, promotion_hash
+from paper_runtime.models import PaperRuntimeContract, PaperRuntimeEvent, PaperRuntimeSessionRecord
+from promotion import (
+    PaperMonitoringSnapshot,
+    PromotionCriterionResult,
+    PromotionDecision,
+    PromotionStatus,
+    promotion_hash,
+)
+from validation.models import CandidateConfig, FrozenSelection
 
 from .errors import PaperEvaluationEvidenceError, PaperEvaluationReadError
 from .models import (
@@ -118,6 +125,71 @@ def _strict_int(value: Any, field_name: str, *, allow_zero: bool = True) -> int:
     return int(value)
 
 
+def _strict_bool(value: Any, field_name: str) -> bool:
+    if type(value) is not bool:
+        raise PaperEvaluationEvidenceError(f"{field_name} must be boolean.")
+    return value
+
+
+def _validate_continuous_sequence(rows: list[sqlite3.Row], *, entity_name: str) -> None:
+    previous_sequence: int | None = None
+    for row in rows:
+        sequence = _strict_int(row["sequence"], f"{entity_name}.sequence", allow_zero=False)
+        if previous_sequence is not None and sequence != previous_sequence + 1:
+            raise PaperEvaluationEvidenceError(f"{entity_name} sequence is not continuous.")
+        previous_sequence = sequence
+
+
+def _rehydrate_promotion_decision(decision_data: Mapping[str, Any], session_row: sqlite3.Row) -> PromotionDecision:
+    frozen_selection_data = decision_data.get("frozen_selection") or {}
+    candidate_data = frozen_selection_data.get("candidate") or {}
+    candidate = CandidateConfig.from_mapping(
+        candidate_data.get("name", "runtime"),
+        candidate_data.get("parameters", {}),
+    )
+    frozen_selection = FrozenSelection(
+        candidate=candidate,
+        strategy_version=frozen_selection_data.get("strategy_version", session_row["strategy_version"]),
+        costs=tuple(sorted((frozen_selection_data.get("costs", {}) or {}).items())),
+        execution_contract=tuple(sorted((frozen_selection_data.get("execution_contract", {}) or {}).items())),
+        symbol=frozen_selection_data.get("symbol", session_row["symbol"]),
+        interval=frozen_selection_data.get("interval", session_row["interval"]),
+        frozen_at=datetime.fromisoformat(str(frozen_selection_data.get("frozen_at", session_row["created_at_utc"])).replace("Z", "+00:00")),
+        manifest_hash=frozen_selection_data.get("manifest_hash", session_row["contract_hash"]),
+        window_id=frozen_selection_data.get("window_id", session_row["session_id"]),
+    )
+    criteria = tuple(
+        PromotionCriterionResult(
+            name=item.get("name", "criterion"),
+            passed=_strict_bool(item.get("passed"), "criteria_evaluated.passed"),
+            expected=item.get("expected"),
+            actual=item.get("actual"),
+            reason=item.get("reason", ""),
+        )
+        for item in decision_data.get("criteria_evaluated", [])
+    )
+    decision = PromotionDecision(
+        status=PromotionStatus(decision_data.get("status", PromotionStatus.APPROVED_FOR_MONITORED_PAPER.value)),
+        frozen_selection=frozen_selection,
+        strategy_version=decision_data.get("strategy_version", session_row["strategy_version"]),
+        symbol=decision_data.get("symbol", session_row["symbol"]),
+        interval=decision_data.get("interval", session_row["interval"]),
+        phase5_manifest=decision_data.get("phase5_manifest", {}),
+        evidence_hash=decision_data.get("evidence_hash", session_row["evidence_hash"]),
+        policy_hash=decision_data.get("policy_hash", session_row["contract_hash"]),
+        decision_hash=decision_data.get("decision_hash", session_row["decision_hash"]),
+        criteria_evaluated=criteria,
+        reasons=tuple(decision_data.get("reasons", ())),
+        recalculated_metrics=decision_data.get("recalculated_metrics", {}),
+        paper_limits=decision_data.get("paper_limits", {}),
+        timestamp_utc=datetime.fromisoformat(str(decision_data.get("timestamp_utc", session_row["updated_at_utc"])).replace("Z", "+00:00")),
+        paper_limits_hash=decision_data.get("paper_limits_hash", session_row["paper_limits_hash"]),
+    )
+    if decision.status is not PromotionStatus.APPROVED_FOR_MONITORED_PAPER:
+        raise PaperEvaluationEvidenceError("runtime decision must be approved for monitored paper.")
+    return decision
+
+
 @contextmanager
 def _connect_readonly(db_path: str | Path):
     path = Path(db_path)
@@ -155,10 +227,15 @@ def _load_runtime_session_row(conn: sqlite3.Connection, session_id: str) -> sqli
 
 
 def _load_runtime_snapshots(conn: sqlite3.Connection, session_id: str) -> list[PaperSessionSnapshotEvidence]:
+    session_row = conn.execute(
+        "SELECT last_snapshot_hash FROM paper_runtime_sessions WHERE session_id = ?",
+        (session_id,),
+    ).fetchone()
     rows = conn.execute(
         "SELECT * FROM paper_runtime_snapshots WHERE session_id = ? ORDER BY sequence ASC",
         (session_id,),
     ).fetchall()
+    _validate_continuous_sequence(rows, entity_name="runtime snapshot")
     snapshots: list[PaperSessionSnapshotEvidence] = []
     for row in rows:
         payload = json.loads(row["payload_json"])
@@ -183,6 +260,12 @@ def _load_runtime_snapshots(conn: sqlite3.Connection, session_id: str) -> list[P
             internal_error=payload.get("internal_error"),
             attempted_live=payload["attempted_live"],
         )
+        if row["snapshot_hash"] != snapshot.snapshot_hash:
+            raise PaperEvaluationEvidenceError("runtime snapshot hash mismatch.")
+        if row["decision_hash"] != snapshot.decision_hash or row["evidence_hash"] != snapshot.evidence_hash:
+            raise PaperEvaluationEvidenceError("runtime snapshot hash divergence.")
+        if row["timestamp_utc"] != snapshot.timestamp_utc.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"):
+            raise PaperEvaluationEvidenceError("runtime snapshot timestamp mismatch.")
         snapshots.append(
             PaperSessionSnapshotEvidence(
                 snapshot_hash=row["snapshot_hash"],
@@ -204,14 +287,26 @@ def _load_runtime_snapshots(conn: sqlite3.Connection, session_id: str) -> list[P
                 result_status=row["result_status"],
             )
         )
+    if session_row is None:
+        raise PaperEvaluationEvidenceError("runtime session not found while loading snapshots.")
+    if rows:
+        if session_row["last_snapshot_hash"] != rows[-1]["snapshot_hash"]:
+            raise PaperEvaluationEvidenceError("runtime last snapshot hash mismatch.")
+    elif session_row["last_snapshot_hash"] is not None:
+        raise PaperEvaluationEvidenceError("runtime last snapshot hash mismatch.")
     return snapshots
 
 
 def _load_runtime_events(conn: sqlite3.Connection, session_id: str) -> list[PaperSessionEventEvidence]:
+    session_row = conn.execute(
+        "SELECT last_event_hash FROM paper_runtime_sessions WHERE session_id = ?",
+        (session_id,),
+    ).fetchone()
     rows = conn.execute(
         "SELECT * FROM paper_runtime_events WHERE session_id = ? ORDER BY sequence ASC",
         (session_id,),
     ).fetchall()
+    _validate_continuous_sequence(rows, entity_name="runtime event")
     events: list[PaperSessionEventEvidence] = []
     previous_hash = ""
     for row in rows:
@@ -266,6 +361,13 @@ def _load_runtime_events(conn: sqlite3.Connection, session_id: str) -> list[Pape
             )
         )
         previous_hash = event.event_hash
+    if session_row is None:
+        raise PaperEvaluationEvidenceError("runtime session not found while loading events.")
+    if rows:
+        if session_row["last_event_hash"] != previous_hash:
+            raise PaperEvaluationEvidenceError("runtime last event hash mismatch.")
+    elif session_row["last_event_hash"] is not None:
+        raise PaperEvaluationEvidenceError("runtime last event hash mismatch.")
     return events
 
 
@@ -427,6 +529,7 @@ def load_paper_session_evidence(
             _validate_trade_schema(trades_conn)
             session_row = _load_runtime_session_row(runtime_conn, session_id)
             decision_data = json.loads(session_row["decision_json"])
+            decision = _rehydrate_promotion_decision(decision_data, session_row)
             snapshots = _load_runtime_snapshots(runtime_conn, session_id)
             events = _load_runtime_events(runtime_conn, session_id)
             trades = _load_trades(trades_conn, session_id)
@@ -441,23 +544,47 @@ def load_paper_session_evidence(
             if session_row["state"] in {"SUSPENDED", "COMPLETED", "FAILED"} and session_row["updated_at_utc"]:
                 session_finished_utc = session_updated_utc
             configuration = json.loads(session_row["configuration_json"])
+            contract = PaperRuntimeContract(
+                session_id=session_row["session_id"],
+                session_started_utc=session_started_utc,
+                decision_hash=decision.decision_hash,
+                evidence_hash=decision.evidence_hash,
+                paper_limits_hash=decision.paper_limits_hash,
+                paper_limits=decision.paper_limits,
+                configuration=decision.frozen_selection.as_dict(),
+                strategy_version=decision.strategy_version,
+                symbol=decision.symbol,
+                interval=decision.interval,
+                execution_contract=decision.phase5_manifest.get("execution_contract", {}),
+                paper_only=True,
+            )
+            if contract.contract_hash != session_row["contract_hash"]:
+                raise PaperEvaluationEvidenceError("runtime contract hash mismatch.")
+            if session_row["configuration_hash"] != promotion_hash({"configuration": contract.configuration}):
+                raise PaperEvaluationEvidenceError("runtime configuration hash mismatch.")
+            if session_row["execution_contract_hash"] != promotion_hash({"execution_contract": contract.execution_contract}):
+                raise PaperEvaluationEvidenceError("runtime execution contract hash mismatch.")
+            if json.loads(session_row["paper_limits_json"]) != serialize_value(contract.paper_limits):
+                raise PaperEvaluationEvidenceError("runtime paper limits divergence.")
+            if json.loads(session_row["configuration_json"]) != serialize_value(contract.configuration):
+                raise PaperEvaluationEvidenceError("runtime configuration divergence.")
+            if json.loads(session_row["execution_contract_json"]) != serialize_value(contract.execution_contract):
+                raise PaperEvaluationEvidenceError("runtime execution contract divergence.")
+            if contract.paper_only is not True or contract.execution_contract.get("paper_only") is not True:
+                raise PaperEvaluationEvidenceError("runtime must remain paper-only.")
+            if decision.paper_limits_hash != session_row["paper_limits_hash"]:
+                raise PaperEvaluationEvidenceError("decision paper limits hash mismatch.")
+            if decision.decision_hash != session_row["decision_hash"] or decision.evidence_hash != session_row["evidence_hash"]:
+                raise PaperEvaluationEvidenceError("decision hash mismatch.")
+            if decision.strategy_version != session_row["strategy_version"] or decision.symbol != session_row["symbol"] or decision.interval != session_row["interval"]:
+                raise PaperEvaluationEvidenceError("decision contract mismatch.")
+            if not isinstance(decision.phase5_manifest.get("execution_contract"), Mapping):
+                raise PaperEvaluationEvidenceError("decision execution contract is required.")
             observed_costs: dict[str, Decimal] = {}
             for snapshot in snapshots:
                 for key, value in snapshot.observed_costs.items():
                     if key not in observed_costs:
                         observed_costs[key] = _strict_decimal(value, key)
-            if decision_data.get("paper_limits_hash") != session_row["paper_limits_hash"]:
-                raise PaperEvaluationEvidenceError("decision paper limits hash mismatch.")
-            if decision_data.get("decision_hash") != session_row["decision_hash"]:
-                raise PaperEvaluationEvidenceError("decision hash mismatch.")
-            if decision_data.get("evidence_hash") != session_row["evidence_hash"]:
-                raise PaperEvaluationEvidenceError("evidence hash mismatch.")
-            if decision_data.get("strategy_version") != session_row["strategy_version"]:
-                raise PaperEvaluationEvidenceError("strategy version mismatch.")
-            if decision_data.get("symbol") != session_row["symbol"] or decision_data.get("interval") != session_row["interval"]:
-                raise PaperEvaluationEvidenceError("session symbol or interval mismatch.")
-            if decision_data.get("paper_limits", {}).get("paper_capital_max") is None:
-                raise PaperEvaluationEvidenceError("decision paper limits are required.")
             if not all(trade.is_real is False for trade in trades):
                 raise PaperEvaluationEvidenceError("real trades are not allowed.")
             if not all(fill.is_real is False for fill in fills):
@@ -476,9 +603,9 @@ def load_paper_session_evidence(
                 "interval": session_row["interval"],
                 "paper_only": bool(session_row["paper_only"]),
                 "contract_hash": session_row["contract_hash"],
-                "paper_limits": json.loads(session_row["paper_limits_json"]),
-                "configuration": configuration,
-                "execution_contract": json.loads(session_row["execution_contract_json"]),
+                "paper_limits": contract.paper_limits,
+                "configuration": contract.configuration,
+                "execution_contract": contract.execution_contract,
                 "snapshots": [snapshot.as_dict() for snapshot in snapshots],
                 "events": [event.as_dict() for event in events],
                 "trades": [trade.as_dict() for trade in trades],
@@ -513,9 +640,9 @@ def load_paper_session_evidence(
                 interval=session_row["interval"],
                 paper_only=bool(session_row["paper_only"]),
                 contract_hash=session_row["contract_hash"],
-                paper_limits=json.loads(session_row["paper_limits_json"]),
-                configuration=configuration,
-                execution_contract=json.loads(session_row["execution_contract_json"]),
+                paper_limits=contract.paper_limits,
+                configuration=contract.configuration,
+                execution_contract=contract.execution_contract,
                 snapshots=tuple(snapshots),
                 events=tuple(events),
                 trades=tuple(trades),
@@ -554,7 +681,14 @@ def load_paper_session_evidence_batch(
     runtime_db_path = Path(runtime_db_path)
     trades_db_path = Path(trades_db_path)
     if session_ids is not None:
-        ordered_ids = tuple(sorted({_strict_str(session_id, "session_id") for session_id in session_ids}))
+        normalized_ids = []
+        for session_id in session_ids:
+            normalized_ids.append(_strict_str(session_id, "session_id"))
+        if not normalized_ids:
+            raise PaperEvaluationReadError("explicit session selection is empty.")
+        if len(set(normalized_ids)) != len(normalized_ids):
+            raise PaperEvaluationReadError("duplicate session ids are not allowed.")
+        ordered_ids = tuple(sorted(normalized_ids))
     else:
         ordered_ids = ()
     evidences: list[PaperSessionEvidence] = []
@@ -579,6 +713,8 @@ def load_paper_session_evidence_batch(
                 query += " WHERE " + " AND ".join(filters)
             rows = conn.execute(query, params).fetchall()
             candidate_ids = [row["session_id"] for row in rows]
+            if ordered_ids and set(candidate_ids) != set(ordered_ids):
+                raise PaperEvaluationReadError("explicit session selection does not match runtime storage.")
     except Exception as exc:
         raise PaperEvaluationReadError("failed to enumerate paper sessions.") from exc
 

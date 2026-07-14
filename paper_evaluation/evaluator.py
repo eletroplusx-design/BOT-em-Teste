@@ -27,16 +27,38 @@ def _ensure_policy(policy: PaperEvaluationPolicy | None) -> PaperEvaluationPolic
     return policy or default_paper_evaluation_policy()
 
 
-def _ensure_walk_forward_reference(reference: WalkForwardResult | Mapping[str, Any] | None) -> tuple[dict[str, Any], str | None]:
+def _ensure_walk_forward_reference(reference: WalkForwardResult | None) -> tuple[dict[str, Any], str | None]:
     if reference is None:
         return {}, None
-    if isinstance(reference, WalkForwardResult):
-        payload = reference.as_dict()
-        return payload, paper_evaluation_hash(payload)
-    if isinstance(reference, Mapping):
-        payload = dict(reference)
-        return payload, paper_evaluation_hash(payload)
-    raise PaperEvaluationDecisionError("walk-forward reference must be a mapping or WalkForwardResult.")
+    if not isinstance(reference, WalkForwardResult):
+        raise PaperEvaluationDecisionError("walk-forward reference must be a trusted WalkForwardResult.")
+    payload = reference.as_dict()
+    manifest = payload.get("manifest")
+    summary = payload.get("summary")
+    windows = payload.get("windows")
+    if not isinstance(manifest, Mapping) or not isinstance(summary, Mapping) or not isinstance(windows, Sequence):
+        raise PaperEvaluationDecisionError("walk-forward reference payload is invalid.")
+    if manifest.get("runner_trusted") is not True or summary.get("runner_trusted") is not True:
+        raise PaperEvaluationDecisionError("walk-forward reference must be runner_trusted.")
+    if summary.get("manifest_hash") != manifest.get("manifest_hash"):
+        raise PaperEvaluationDecisionError("walk-forward summary hash mismatch.")
+    manifest_payload = dict(manifest)
+    manifest_hash_value = manifest_payload.pop("manifest_hash", None)
+    if not manifest_hash_value or paper_evaluation_hash(manifest_payload) != manifest_hash_value:
+        raise PaperEvaluationDecisionError("walk-forward manifest hash mismatch.")
+    for window in windows:
+        if not isinstance(window, Mapping):
+            raise PaperEvaluationDecisionError("walk-forward window payload is invalid.")
+        if window.get("approved") is True:
+            frozen_selection = window.get("frozen_selection")
+            selected_candidate = window.get("selected_candidate")
+            if not isinstance(frozen_selection, Mapping) or not isinstance(selected_candidate, Mapping):
+                raise PaperEvaluationDecisionError("trusted walk-forward windows require frozen selections.")
+            if frozen_selection.get("candidate") != selected_candidate:
+                raise PaperEvaluationDecisionError("walk-forward candidate mismatch.")
+            if frozen_selection.get("manifest_hash") != window.get("manifest_hash"):
+                raise PaperEvaluationDecisionError("walk-forward window hash mismatch.")
+    return payload, paper_evaluation_hash(payload)
 
 
 def _compare_against_walk_forward(actual: PaperSessionMetrics, reference: dict[str, Any]) -> dict[str, Any]:
@@ -72,7 +94,11 @@ def _session_is_completed(evidence: PaperSessionEvidence) -> bool:
     return evidence.session_state == "COMPLETED"
 
 
-def _collect_reasons(policy: PaperEvaluationPolicy, session_metrics: Sequence[PaperSessionMetrics], evidence: Sequence[PaperSessionEvidence]) -> list[str]:
+def _collect_reasons(
+    policy: PaperEvaluationPolicy,
+    aggregate_metrics: PaperSessionMetrics,
+    evidence: Sequence[PaperSessionEvidence],
+) -> list[str]:
     reasons: list[str] = []
     if not evidence:
         reasons.append("no paper sessions found.")
@@ -86,27 +112,28 @@ def _collect_reasons(policy: PaperEvaluationPolicy, session_metrics: Sequence[Pa
     }
     if len(distinct_days) < policy.min_distinct_days:
         reasons.append("insufficient distinct trading days.")
-    total_trades = sum(metric.total_trades for metric in session_metrics)
-    if total_trades < policy.min_trades:
+    if aggregate_metrics.total_trades < policy.min_trades:
         reasons.append("insufficient trades.")
-    duration_hours = sum((metric.duration_hours for metric in session_metrics), Decimal("0"))
-    if duration_hours < policy.min_duration_hours:
+    if aggregate_metrics.duration_hours < policy.min_duration_hours:
         reasons.append("insufficient session duration.")
-    total_drawdown = max((metric.drawdown_max_percent for metric in session_metrics), default=Decimal("0"))
-    if total_drawdown > policy.max_drawdown_percent:
+    if aggregate_metrics.drawdown_max_percent > policy.max_drawdown_percent:
         reasons.append("drawdown above maximum.")
-    total_profit_factor_candidates = [metric.profit_factor for metric in session_metrics if metric.profit_factor is not None]
-    if policy.min_profit_factor is not None and total_profit_factor_candidates:
-        if max(total_profit_factor_candidates) < policy.min_profit_factor:
+    if policy.min_profit_factor is not None:
+        if aggregate_metrics.profit_factor is None:
+            if policy.min_profit_factor > 0:
+                reasons.append("profit factor below minimum.")
+        elif aggregate_metrics.profit_factor < policy.min_profit_factor:
             reasons.append("profit factor below minimum.")
-    total_expectancy = sum((metric.expectancy for metric in session_metrics), Decimal("0"))
-    if session_metrics and (total_expectancy / Decimal(len(session_metrics))) < policy.min_expectancy:
+    if aggregate_metrics.expectancy < policy.min_expectancy:
         reasons.append("expectancy below minimum.")
-    total_net_return = sum((metric.net_return_percent for metric in session_metrics), Decimal("0"))
-    if total_net_return < policy.min_net_return_percent:
+    if aggregate_metrics.net_return_percent < policy.min_net_return_percent:
         reasons.append("net return below minimum.")
-    total_costs = sum((metric.total_costs for metric in session_metrics), Decimal("0"))
-    if policy.max_total_costs_percent >= 0 and total_costs > policy.max_total_costs_percent:
+    total_cost_percent = (
+        aggregate_metrics.total_costs / aggregate_metrics.capital_initial * Decimal("100")
+        if aggregate_metrics.capital_initial > 0
+        else Decimal("0")
+    )
+    if policy.max_total_costs_percent >= 0 and total_cost_percent > policy.max_total_costs_percent:
         reasons.append("costs above maximum.")
     suspended_sessions = sum(1 for session in evidence if session.session_state == "SUSPENDED")
     if suspended_sessions > policy.max_suspended_sessions:
@@ -150,11 +177,11 @@ def evaluate_paper_sessions(
     evidences: Sequence[PaperSessionEvidence],
     *,
     policy: PaperEvaluationPolicy | None = None,
-    reference_walk_forward: WalkForwardResult | Mapping[str, Any] | None = None,
+    reference_walk_forward: WalkForwardResult | None = None,
     evaluation_id: str | None = None,
     inclusion_rule: str = "explicit_session_ids",
     synthetic_test_data: bool = False,
-    operational_evidence: bool = True,
+    operational_evidence: bool = False,
     expected_session_ids: Sequence[str] | None = None,
     load_rejections: Sequence[PaperSessionRejection] | None = None,
 ) -> PaperEvaluationReport:
@@ -168,7 +195,7 @@ def evaluate_paper_sessions(
         loaded_ids = tuple(sorted(session.session_id for session in ordered_evidence))
         rejected_ids = {rejection.session_id for rejection in (load_rejections or ())}
         seen_ids = set(loaded_ids) | rejected_ids
-        if not set(expected_ids).issubset(seen_ids):
+        if not expected_ids or seen_ids != set(expected_ids):
             raise PaperEvaluationDecisionError("expected session ids diverge from loaded evidence.")
     accepted = tuple(session for session in ordered_evidence if _session_is_completed(session))
     rejected = tuple(load_rejections or ()) + tuple(PaperSessionRejection(session_id=session.session_id, reason=f"session state {session.session_state} not eligible") for session in ordered_evidence if not _session_is_completed(session))
@@ -182,6 +209,8 @@ def evaluate_paper_sessions(
             capital_initial=Decimal("0"),
             capital_final=Decimal("0"),
             gross_pnl=Decimal("0"),
+            gross_profit=Decimal("0"),
+            gross_loss=Decimal("0"),
             total_costs=Decimal("0"),
             net_pnl=Decimal("0"),
             net_return_percent=Decimal("0"),
@@ -213,12 +242,15 @@ def evaluate_paper_sessions(
             trade_ids=tuple(),
             fill_count=0,
         )
-    reasons = _collect_reasons(policy, accepted_metrics, accepted)
+    reasons = _collect_reasons(policy, aggregate_metrics, accepted)
     if load_rejections:
         reasons.extend(f"evidence rejected: {rejection.reason}" for rejection in load_rejections)
     status = _status_from_reasons(reasons, evidence=ordered_evidence)
     if load_rejections:
         status = PaperEvaluationStatus.REJECTED
+    if status is PaperEvaluationStatus.APPROVED_FOR_EXTENDED_PAPER and (synthetic_test_data or not operational_evidence):
+        reasons = tuple((*reasons, "operational evidence required."))
+        status = PaperEvaluationStatus.INSUFFICIENT_EVIDENCE
     now = datetime.now(timezone.utc)
     evaluated_at_utc = accepted[-1].session_updated_utc if accepted else ordered_evidence[-1].session_updated_utc if ordered_evidence else now
     evaluation_identity = evaluation_id or paper_evaluation_hash(

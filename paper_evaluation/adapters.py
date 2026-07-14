@@ -36,6 +36,8 @@ class PaperEvaluationAdapter:
 
     def load(self) -> tuple[list[PaperSessionEvidence], list[PaperSessionRejection]]:
         normalized_session_ids = _normalize_session_ids(self.session_ids)
+        if normalized_session_ids is not None and not normalized_session_ids:
+            raise PaperEvaluationReadError("explicit session selection is empty.")
         return load_paper_session_evidence_batch(
             runtime_db_path=self.runtime_db_path,
             trades_db_path=self.trades_db_path,
@@ -50,8 +52,11 @@ class PaperEvaluationAdapter:
         if normalized_session_ids is not None:
             expected_ids = set(normalized_session_ids)
             loaded_ids = {e.session_id for e in evidences}
-            if not loaded_ids.issubset(expected_ids):
+            seen_ids = loaded_ids | {rejection.session_id for rejection in rejections}
+            if seen_ids != expected_ids:
                 raise PaperEvaluationDecisionError("loaded evidence does not match the expected session set.")
+            if self.operational_evidence:
+                raise PaperEvaluationDecisionError("operational evidence must enumerate sessions directly from storage.")
         return evaluate_paper_sessions(
             evidences,
             policy=self.policy,
