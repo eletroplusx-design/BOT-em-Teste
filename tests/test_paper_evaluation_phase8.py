@@ -10,6 +10,8 @@ from pathlib import Path
 import pytest
 
 from paper_evaluation import (
+    OperationalEvidenceBatch,
+    PaperEvaluationCohort,
     PaperEvaluationAdapter,
     PaperEvaluationDecisionError,
     PaperEvaluationEvidenceError,
@@ -29,6 +31,7 @@ from paper_evaluation import (
 from promotion import PaperMonitoringSnapshot, adapt_walk_forward_result, evaluate_promotion
 from promotion.errors import PromotionPolicyError
 from paper_runtime import PaperRuntimeSession, PaperRuntimeStore
+from paper_evaluation.evidence import load_operational_evidence_batch
 
 from storage import finalizar_trade_paper, registrar_trade_paper
 from tests.test_promotion_phase6 import _promotion_result
@@ -376,7 +379,6 @@ def test_paper_evaluation_empty_set_insufficient_evidence():
         policy=_lenient_policy(),
         evaluation_id="eval-empty",
         synthetic_test_data=True,
-        operational_evidence=False,
     )
     assert report.decision.status is PaperEvaluationStatus.INSUFFICIENT_EVIDENCE
     assert report.manifest.session_count == 0
@@ -394,7 +396,6 @@ def test_paper_evaluation_synthetic_fixture_not_operational_evidence():
         policy=_lenient_policy(),
         evaluation_id="eval-synthetic",
         synthetic_test_data=True,
-        operational_evidence=False,
     )
     assert report.decision.status is PaperEvaluationStatus.INSUFFICIENT_EVIDENCE
     assert report.synthetic_test_data is True
@@ -402,6 +403,20 @@ def test_paper_evaluation_synthetic_fixture_not_operational_evidence():
     assert report.manifest.synthetic_test_data is True
     assert report.manifest.operational_evidence is False
     assert report.aggregate_metrics.total_trades == 1
+    assert any("operational evidence required" in reason for reason in report.decision.reasons)
+
+
+def test_paper_evaluation_memory_only_cannot_approve_operational():
+    started = datetime(2026, 7, 11, 9, 0, tzinfo=timezone.utc)
+    session = _make_trade_session("memory-only", trade_results=(Decimal("40"),), started_at=started)
+    report = evaluate_paper_sessions(
+        [session],
+        policy=_lenient_policy(),
+        evaluation_id="eval-memory-only",
+    )
+    assert report.decision.status is PaperEvaluationStatus.INSUFFICIENT_EVIDENCE
+    assert report.operational_evidence is False
+    assert report.manifest.operational_evidence is False
     assert any("operational evidence required" in reason for reason in report.decision.reasons)
 
 
@@ -604,16 +619,81 @@ def test_aggregate_metrics_use_whole_cohort_for_profit_factor_and_cost_percent()
         min_regime_coverage=0,
         evaluator_version="v8_paper_evaluation",
     )
+    cohort = PaperEvaluationCohort(
+        strategy_version="v8_paper_evaluation",
+        period_start_utc=started,
+        period_end_utc=started + timedelta(days=1, hours=1),
+        inclusion_rule="cohort_aggregate",
+        created_at_utc=started + timedelta(days=1, hours=1),
+        session_ids=("cohort-good", "cohort-bad"),
+    )
+    batch = OperationalEvidenceBatch(cohort=cohort, evidences=(good_session, bad_session), rejections=tuple())
     report = evaluate_paper_sessions(
         [good_session, bad_session],
         policy=policy,
+        reference_walk_forward=_promotion_result(),
         evaluation_id="cohort-aggregate",
         synthetic_test_data=False,
-        operational_evidence=True,
+        operational_batch=batch,
     )
     assert report.decision.status is PaperEvaluationStatus.REJECTED
     assert any("profit factor below minimum" in reason for reason in report.decision.reasons)
     assert any("costs above maximum" in reason for reason in report.decision.reasons)
+
+
+def test_operational_evaluation_requires_walk_forward_reference(tmp_path):
+    runtime_db, trades_db = _seed_runtime_and_trades(tmp_path, session_id="operational-no-reference", trade_result=Decimal("25"))
+    batch = load_operational_evidence_batch(runtime_db_path=runtime_db, trades_db_path=trades_db)
+    report = evaluate_paper_sessions(
+        list(batch.evidences),
+        policy=_lenient_policy(),
+        evaluation_id="operational-no-reference",
+        operational_batch=batch,
+    )
+    assert report.decision.status is PaperEvaluationStatus.INSUFFICIENT_EVIDENCE
+    assert any("walk-forward reference required" in reason for reason in report.decision.reasons)
+
+
+def test_operational_period_filters_are_rejected(tmp_path):
+    runtime_db, trades_db = _seed_runtime_and_trades(tmp_path, session_id="operational-period", trade_result=Decimal("25"))
+    with pytest.raises(PaperEvaluationDecisionError):
+        evaluate_paper_sessions_from_storage(
+            runtime_db_path=runtime_db,
+            trades_db_path=trades_db,
+            policy=_lenient_policy(),
+            reference_walk_forward=_decision(),
+            evaluation_id="operational-period",
+            synthetic_test_data=False,
+            operational_evidence=True,
+            period_start_utc=datetime(2026, 7, 11, 0, 0, tzinfo=timezone.utc),
+            period_end_utc=datetime(2026, 7, 12, 0, 0, tzinfo=timezone.utc),
+        )
+
+
+def test_operational_cohort_hash_mutation_is_blocked():
+    started = datetime(2026, 7, 11, 9, 0, tzinfo=timezone.utc)
+    cohort = PaperEvaluationCohort(
+        strategy_version="v8_paper_evaluation",
+        period_start_utc=started,
+        period_end_utc=started + timedelta(hours=2),
+        inclusion_rule="sqlite_all_sessions",
+        created_at_utc=started + timedelta(hours=2),
+        session_ids=("a", "b"),
+    )
+    with pytest.raises(PaperEvaluationManifestError):
+        replace(cohort, inclusion_rule="manual")
+
+
+def test_costs_are_read_from_execution_contract_not_defaults():
+    started = datetime(2026, 7, 11, 9, 0, tzinfo=timezone.utc)
+    session = _make_trade_session("contract-costs", trade_results=(Decimal("15"),), started_at=started)
+    updated_contract = dict(session.execution_contract)
+    updated_contract.update({"entry_fee_rate": "0.0012", "exit_fee_rate": "0.0015", "spread_bps": "12", "slippage_bps": "18"})
+    session = replace(session, session_hash="", execution_contract=updated_contract, observed_costs={"entry_fee_rate": Decimal("0.0012"), "exit_fee_rate": Decimal("0.0015"), "spread_bps": Decimal("12"), "slippage_bps": Decimal("18")})
+    metrics = compute_paper_session_metrics(session)
+    assert metrics.fee_deviation_percent == Decimal("0")
+    assert metrics.spread_deviation_bps == Decimal("0")
+    assert metrics.slippage_deviation_bps == Decimal("0")
 
 
 @pytest.mark.parametrize(
@@ -787,6 +867,7 @@ def test_policy_and_report_reject_invalid_boolean_fields():
 def test_operational_evidence_from_sqlite_and_phase5_reference(tmp_path):
     runtime_db, trades_db = _seed_runtime_and_trades(tmp_path, session_id="operational-1", trade_result=Decimal("35"))
     reference = _promotion_result()
+    batch = load_operational_evidence_batch(runtime_db_path=runtime_db, trades_db_path=trades_db)
     report = evaluate_paper_sessions_from_storage(
         runtime_db_path=runtime_db,
         trades_db_path=trades_db,
@@ -798,6 +879,7 @@ def test_operational_evidence_from_sqlite_and_phase5_reference(tmp_path):
     )
     assert report.manifest.session_count == 1
     assert report.manifest.operational_evidence is True
+    assert report.manifest.cohort_hash == batch.cohort.cohort_hash
     assert report.synthetic_test_data is False
     assert report.decision.status is PaperEvaluationStatus.APPROVED_FOR_EXTENDED_PAPER
     assert report.walk_forward_comparison["reference_manifest_hash"] == reference.manifest["manifest_hash"]
@@ -869,7 +951,6 @@ def test_explicit_operational_session_selection_and_mapping_reference_are_reject
             evaluation_id="mapping-ref",
             reference_walk_forward=reference.as_dict(),
             synthetic_test_data=False,
-            operational_evidence=False,
         )
 
 
@@ -944,6 +1025,7 @@ def test_missing_database_blocks(tmp_path):
             trades_db_path=tmp_path / "missing-trades.db",
             policy=_lenient_policy(),
             evaluation_id="missing-db",
+            operational_evidence=False,
             session_ids=("missing",),
         )
 
@@ -959,6 +1041,7 @@ def test_invalid_schema_blocks(tmp_path):
             trades_db_path=trades_db,
             policy=_lenient_policy(),
             evaluation_id="invalid-schema",
+            operational_evidence=False,
             session_ids=("missing",),
         )
 

@@ -622,6 +622,52 @@ class PaperEvaluationPolicy:
 
 
 @dataclass(frozen=True, slots=True)
+class PaperEvaluationCohort:
+    strategy_version: str
+    period_start_utc: datetime
+    period_end_utc: datetime
+    inclusion_rule: str
+    created_at_utc: datetime
+    session_ids: tuple[str, ...]
+    cohort_hash: str = field(default="", compare=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "strategy_version", _require_str(self.strategy_version, "strategy_version"))
+        object.__setattr__(self, "period_start_utc", _require_timezone_aware(self.period_start_utc, "period_start_utc"))
+        object.__setattr__(self, "period_end_utc", _require_timezone_aware(self.period_end_utc, "period_end_utc"))
+        object.__setattr__(self, "created_at_utc", _require_timezone_aware(self.created_at_utc, "created_at_utc"))
+        if self.period_end_utc < self.period_start_utc:
+            raise PaperEvaluationManifestError("period_end_utc cannot be earlier than period_start_utc.")
+        if self.created_at_utc < self.period_start_utc:
+            raise PaperEvaluationManifestError("created_at_utc cannot be earlier than period_start_utc.")
+        object.__setattr__(self, "inclusion_rule", _require_str(self.inclusion_rule, "inclusion_rule"))
+        object.__setattr__(self, "session_ids", tuple(_require_str(session_id, "session_id") for session_id in self.session_ids))
+        if len({session_id for session_id in self.session_ids}) != len(self.session_ids):
+            raise PaperEvaluationManifestError("session_ids must not contain duplicates.")
+        payload = self.as_hash_payload(include_hash=False)
+        cohort_hash = self.cohort_hash or paper_evaluation_hash(payload)
+        object.__setattr__(self, "cohort_hash", _require_hash(cohort_hash, "cohort_hash"))
+        if self.cohort_hash != paper_evaluation_hash(payload):
+            raise PaperEvaluationManifestError("cohort hash mismatch.")
+
+    def as_hash_payload(self, *, include_hash: bool = True) -> dict[str, Any]:
+        payload = {
+            "strategy_version": self.strategy_version,
+            "period_start_utc": self.period_start_utc.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "period_end_utc": self.period_end_utc.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "inclusion_rule": self.inclusion_rule,
+            "created_at_utc": self.created_at_utc.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "session_ids": self.session_ids,
+        }
+        if include_hash:
+            payload["cohort_hash"] = self.cohort_hash
+        return payload
+
+    def as_dict(self) -> dict[str, Any]:
+        return serialize_value(self.as_hash_payload())
+
+
+@dataclass(frozen=True, slots=True)
 class PaperSessionRejection:
     session_id: str
     reason: str
@@ -655,6 +701,7 @@ class PaperEvaluationManifest:
     evaluator_version: str
     walk_forward_hash: str | None = None
     session_count: int = 0
+    cohort_hash: str | None = None
     manifest_hash: str = field(default="", compare=False)
 
     def __post_init__(self) -> None:
@@ -673,6 +720,8 @@ class PaperEvaluationManifest:
             raise PaperEvaluationManifestError("operational_evidence must be a boolean.")
         object.__setattr__(self, "synthetic_test_data", self.synthetic_test_data)
         object.__setattr__(self, "operational_evidence", self.operational_evidence)
+        if self.cohort_hash is not None:
+            object.__setattr__(self, "cohort_hash", _require_hash(self.cohort_hash, "cohort_hash"))
         object.__setattr__(self, "session_ids", tuple(_require_str(session_id, "session_id") for session_id in self.session_ids))
         object.__setattr__(self, "session_hashes", tuple(( _require_str(session_id, "session_id"), _require_hash(session_hash, "session_hash")) for session_id, session_hash in self.session_hashes))
         object.__setattr__(self, "rejected_sessions", tuple(self.rejected_sessions))
@@ -699,6 +748,7 @@ class PaperEvaluationManifest:
             "inclusion_rule": self.inclusion_rule,
             "synthetic_test_data": self.synthetic_test_data,
             "operational_evidence": self.operational_evidence,
+            "cohort_hash": self.cohort_hash,
             "session_ids": self.session_ids,
             "session_hashes": self.session_hashes,
             "rejected_sessions": [rejection.as_dict() for rejection in self.rejected_sessions],
@@ -877,6 +927,55 @@ class PaperSessionEvidence:
         }
         if include_hash:
             payload["session_hash"] = self.session_hash
+        return payload
+
+    def as_dict(self) -> dict[str, Any]:
+        return serialize_value(self.as_hash_payload())
+
+
+@dataclass(frozen=True, slots=True)
+class OperationalEvidenceBatch:
+    cohort: PaperEvaluationCohort
+    evidences: tuple[PaperSessionEvidence, ...]
+    rejections: tuple[PaperSessionRejection, ...]
+    source: str = "sqlite"
+    trusted: bool = True
+    batch_hash: str = field(default="", compare=False)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.cohort, PaperEvaluationCohort):
+            raise PaperEvaluationEvidenceError("cohort must be a PaperEvaluationCohort instance.")
+        object.__setattr__(self, "evidences", tuple(self.evidences))
+        object.__setattr__(self, "rejections", tuple(self.rejections))
+        object.__setattr__(self, "source", _require_str(self.source, "source"))
+        if type(self.trusted) is not bool:
+            raise PaperEvaluationEvidenceError("trusted must be a boolean.")
+        object.__setattr__(self, "trusted", self.trusted)
+        if any(not isinstance(evidence, PaperSessionEvidence) for evidence in self.evidences):
+            raise PaperEvaluationEvidenceError("evidences must contain PaperSessionEvidence instances.")
+        if any(not isinstance(rejection, PaperSessionRejection) for rejection in self.rejections):
+            raise PaperEvaluationEvidenceError("rejections must contain PaperSessionRejection instances.")
+        if len({evidence.session_id for evidence in self.evidences}) != len(self.evidences):
+            raise PaperEvaluationEvidenceError("evidences must not contain duplicate session ids.")
+        observed_ids = {evidence.session_id for evidence in self.evidences} | {rejection.session_id for rejection in self.rejections}
+        if self.cohort.session_ids and observed_ids != set(self.cohort.session_ids):
+            raise PaperEvaluationEvidenceError("batch session ids must match the cohort.")
+        payload = self.as_hash_payload(include_hash=False)
+        batch_hash = self.batch_hash or paper_evaluation_hash(payload)
+        object.__setattr__(self, "batch_hash", _require_hash(batch_hash, "batch_hash"))
+        if self.batch_hash != paper_evaluation_hash(payload):
+            raise PaperEvaluationEvidenceError("operational batch hash mismatch.")
+
+    def as_hash_payload(self, *, include_hash: bool = True) -> dict[str, Any]:
+        payload = {
+            "cohort": self.cohort.as_dict(),
+            "evidences": [evidence.as_dict() for evidence in self.evidences],
+            "rejections": [rejection.as_dict() for rejection in self.rejections],
+            "source": self.source,
+            "trusted": self.trusted,
+        }
+        if include_hash:
+            payload["batch_hash"] = self.batch_hash
         return payload
 
     def as_dict(self) -> dict[str, Any]:

@@ -11,6 +11,7 @@ from .artifacts import paper_evaluation_hash
 from .errors import PaperEvaluationDecisionError
 from .metrics import aggregate_paper_session_metrics, compute_paper_session_metrics
 from .models import (
+    OperationalEvidenceBatch,
     PaperEvaluationDecision,
     PaperEvaluationManifest,
     PaperEvaluationPolicy,
@@ -59,6 +60,16 @@ def _ensure_walk_forward_reference(reference: WalkForwardResult | None) -> tuple
             if frozen_selection.get("manifest_hash") != window.get("manifest_hash"):
                 raise PaperEvaluationDecisionError("walk-forward window hash mismatch.")
     return payload, paper_evaluation_hash(payload)
+
+
+def _ensure_operational_batch(batch: OperationalEvidenceBatch | None) -> OperationalEvidenceBatch | None:
+    if batch is None:
+        return None
+    if not isinstance(batch, OperationalEvidenceBatch):
+        raise PaperEvaluationDecisionError("operational evidence must be a trusted OperationalEvidenceBatch.")
+    if batch.source != "sqlite" or batch.trusted is not True:
+        raise PaperEvaluationDecisionError("operational evidence batch must be produced by strict sqlite loading.")
+    return batch
 
 
 def _compare_against_walk_forward(actual: PaperSessionMetrics, reference: dict[str, Any]) -> dict[str, Any]:
@@ -181,13 +192,22 @@ def evaluate_paper_sessions(
     evaluation_id: str | None = None,
     inclusion_rule: str = "explicit_session_ids",
     synthetic_test_data: bool = False,
-    operational_evidence: bool = False,
+    operational_batch: OperationalEvidenceBatch | None = None,
     expected_session_ids: Sequence[str] | None = None,
     load_rejections: Sequence[PaperSessionRejection] | None = None,
 ) -> PaperEvaluationReport:
     policy = _ensure_policy(policy)
     reference_payload, reference_hash = _ensure_walk_forward_reference(reference_walk_forward)
-    ordered_evidence = tuple(sorted(evidences, key=lambda item: (item.session_started_utc, item.session_id)))
+    operational_batch = _ensure_operational_batch(operational_batch)
+    source_evidences = tuple(operational_batch.evidences) if operational_batch is not None else tuple(evidences)
+    if operational_batch is not None:
+        evidence_signature = {(item.session_id, item.session_hash) for item in source_evidences}
+        incoming_signature = {(item.session_id, item.session_hash) for item in evidences}
+        if incoming_signature and incoming_signature != evidence_signature:
+            raise PaperEvaluationDecisionError("operational evidence batch does not match the supplied evidence.")
+        if expected_session_ids is not None:
+            raise PaperEvaluationDecisionError("explicit session selection is not allowed for operational evidence.")
+    ordered_evidence = tuple(sorted(source_evidences, key=lambda item: (item.session_started_utc, item.session_id)))
     if len({item.session_id for item in ordered_evidence}) != len(ordered_evidence):
         raise PaperEvaluationDecisionError("duplicate session_id detected.")
     if expected_session_ids is not None:
@@ -198,7 +218,8 @@ def evaluate_paper_sessions(
         if not expected_ids or seen_ids != set(expected_ids):
             raise PaperEvaluationDecisionError("expected session ids diverge from loaded evidence.")
     accepted = tuple(session for session in ordered_evidence if _session_is_completed(session))
-    rejected = tuple(load_rejections or ()) + tuple(PaperSessionRejection(session_id=session.session_id, reason=f"session state {session.session_state} not eligible") for session in ordered_evidence if not _session_is_completed(session))
+    batch_rejections = tuple(operational_batch.rejections) if operational_batch is not None else tuple()
+    rejected = batch_rejections + tuple(load_rejections or ()) + tuple(PaperSessionRejection(session_id=session.session_id, reason=f"session state {session.session_state} not eligible") for session in ordered_evidence if not _session_is_completed(session))
     session_metrics = tuple(compute_paper_session_metrics(session) for session in ordered_evidence)
     accepted_metrics = tuple(compute_paper_session_metrics(session) for session in accepted)
     if accepted_metrics:
@@ -245,11 +266,16 @@ def evaluate_paper_sessions(
     reasons = _collect_reasons(policy, aggregate_metrics, accepted)
     if load_rejections:
         reasons.extend(f"evidence rejected: {rejection.reason}" for rejection in load_rejections)
+    if batch_rejections:
+        reasons.extend(f"evidence rejected: {rejection.reason}" for rejection in batch_rejections)
     status = _status_from_reasons(reasons, evidence=ordered_evidence)
-    if load_rejections:
+    if load_rejections or batch_rejections:
         status = PaperEvaluationStatus.REJECTED
-    if status is PaperEvaluationStatus.APPROVED_FOR_EXTENDED_PAPER and (synthetic_test_data or not operational_evidence):
+    if status is PaperEvaluationStatus.APPROVED_FOR_EXTENDED_PAPER and (synthetic_test_data or operational_batch is None):
         reasons = tuple((*reasons, "operational evidence required."))
+        status = PaperEvaluationStatus.INSUFFICIENT_EVIDENCE
+    if status is PaperEvaluationStatus.APPROVED_FOR_EXTENDED_PAPER and operational_batch is not None and reference_payload == {}:
+        reasons = tuple((*reasons, "walk-forward reference required for operational approval."))
         status = PaperEvaluationStatus.INSUFFICIENT_EVIDENCE
     now = datetime.now(timezone.utc)
     evaluated_at_utc = accepted[-1].session_updated_utc if accepted else ordered_evidence[-1].session_updated_utc if ordered_evidence else now
@@ -261,20 +287,22 @@ def evaluate_paper_sessions(
             "period_start_utc": ordered_evidence[0].session_started_utc if ordered_evidence else now,
             "period_end_utc": ordered_evidence[-1].session_updated_utc if ordered_evidence else now,
             "strategy_version": ordered_evidence[0].strategy_version if ordered_evidence else "v8_paper_evaluation",
+            "cohort_hash": operational_batch.cohort.cohort_hash if operational_batch is not None else None,
         }
     )
     manifest = PaperEvaluationManifest(
         evaluation_id=evaluation_identity,
-        period_start_utc=accepted[0].session_started_utc if accepted else ordered_evidence[0].session_started_utc if ordered_evidence else now,
-        period_end_utc=accepted[-1].session_updated_utc if accepted else ordered_evidence[-1].session_updated_utc if ordered_evidence else now,
-        inclusion_rule=inclusion_rule,
+        period_start_utc=operational_batch.cohort.period_start_utc if operational_batch is not None else accepted[0].session_started_utc if accepted else ordered_evidence[0].session_started_utc if ordered_evidence else now,
+        period_end_utc=operational_batch.cohort.period_end_utc if operational_batch is not None else accepted[-1].session_updated_utc if accepted else ordered_evidence[-1].session_updated_utc if ordered_evidence else now,
+        inclusion_rule=operational_batch.cohort.inclusion_rule if operational_batch is not None else inclusion_rule,
         synthetic_test_data=synthetic_test_data,
-        operational_evidence=operational_evidence,
+        operational_evidence=operational_batch is not None,
+        cohort_hash=operational_batch.cohort.cohort_hash if operational_batch is not None else None,
         session_ids=tuple(session.session_id for session in ordered_evidence),
         session_hashes=tuple((session.session_id, session.session_hash) for session in ordered_evidence),
         rejected_sessions=rejected,
         policy_hash=policy.policy_hash,
-        strategy_version=accepted[0].strategy_version if accepted else ordered_evidence[0].strategy_version if ordered_evidence else "v8_paper_evaluation",
+        strategy_version=operational_batch.cohort.strategy_version if operational_batch is not None else accepted[0].strategy_version if accepted else ordered_evidence[0].strategy_version if ordered_evidence else "v8_paper_evaluation",
         evaluator_version=policy.evaluator_version,
         walk_forward_hash=reference_hash,
         session_count=len(ordered_evidence),
@@ -302,7 +330,7 @@ def evaluate_paper_sessions(
         evaluation_id=evaluation_identity,
         inclusion_rule=inclusion_rule,
         synthetic_test_data=synthetic_test_data,
-        operational_evidence=operational_evidence,
+        operational_evidence=operational_batch is not None,
         accepted_sessions=accepted,
         rejected_sessions=rejected,
         session_metrics=session_metrics,

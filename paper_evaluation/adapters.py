@@ -3,14 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Sequence
 
 from validation import WalkForwardResult
 
 from .evaluator import evaluate_paper_sessions
-from .evidence import load_paper_session_evidence_batch
+from .evidence import load_operational_evidence_batch, load_paper_session_evidence_batch
 from .errors import PaperEvaluationDecisionError, PaperEvaluationReadError
-from .models import PaperEvaluationPolicy, PaperEvaluationReport, PaperSessionEvidence, PaperSessionRejection
+from .models import OperationalEvidenceBatch, PaperEvaluationPolicy, PaperEvaluationReport, PaperSessionEvidence, PaperSessionRejection
 
 
 def _normalize_session_ids(session_ids: Sequence[str] | None) -> tuple[str, ...] | None:
@@ -25,7 +25,7 @@ class PaperEvaluationAdapter:
     runtime_db_path: str | Path = "paper_runtime.db"
     trades_db_path: str | Path = "trades.db"
     policy: PaperEvaluationPolicy | None = None
-    reference_walk_forward: WalkForwardResult | Mapping[str, Any] | None = None
+    reference_walk_forward: WalkForwardResult | None = None
     evaluation_id: str | None = None
     inclusion_rule: str = "explicit_session_ids"
     synthetic_test_data: bool = False
@@ -34,20 +34,30 @@ class PaperEvaluationAdapter:
     period_end_utc: datetime | None = None
     session_ids: Sequence[str] | None = None
 
-    def load(self) -> tuple[list[PaperSessionEvidence], list[PaperSessionRejection]]:
+    def load(self) -> tuple[list[PaperSessionEvidence], list[PaperSessionRejection], OperationalEvidenceBatch | None]:
         normalized_session_ids = _normalize_session_ids(self.session_ids)
         if normalized_session_ids is not None and not normalized_session_ids:
             raise PaperEvaluationReadError("explicit session selection is empty.")
+        if self.operational_evidence:
+            if normalized_session_ids is not None:
+                raise PaperEvaluationDecisionError("operational evidence must enumerate sessions directly from storage.")
+            if self.period_start_utc is not None or self.period_end_utc is not None:
+                raise PaperEvaluationDecisionError("operational evidence must use the frozen cohort period.")
+            batch = load_operational_evidence_batch(
+                runtime_db_path=self.runtime_db_path,
+                trades_db_path=self.trades_db_path,
+            )
+            return list(batch.evidences), list(batch.rejections), batch
         return load_paper_session_evidence_batch(
             runtime_db_path=self.runtime_db_path,
             trades_db_path=self.trades_db_path,
             period_start_utc=self.period_start_utc,
             period_end_utc=self.period_end_utc,
             session_ids=normalized_session_ids,
-        )
+        ) + (None,)
 
     def evaluate(self) -> PaperEvaluationReport:
-        evidences, rejections = self.load()
+        evidences, rejections, operational_batch = self.load()
         normalized_session_ids = _normalize_session_ids(self.session_ids)
         if normalized_session_ids is not None:
             expected_ids = set(normalized_session_ids)
@@ -64,8 +74,8 @@ class PaperEvaluationAdapter:
             evaluation_id=self.evaluation_id,
             inclusion_rule=self.inclusion_rule,
             synthetic_test_data=self.synthetic_test_data,
-            operational_evidence=self.operational_evidence,
-            expected_session_ids=normalized_session_ids,
+            operational_batch=operational_batch,
+            expected_session_ids=normalized_session_ids if not self.operational_evidence else None,
             load_rejections=tuple(rejections),
         )
 
@@ -75,7 +85,7 @@ def evaluate_paper_sessions_from_storage(
     runtime_db_path: str | Path = "paper_runtime.db",
     trades_db_path: str | Path = "trades.db",
     policy: PaperEvaluationPolicy | None = None,
-    reference_walk_forward: WalkForwardResult | Mapping[str, Any] | None = None,
+    reference_walk_forward: WalkForwardResult | None = None,
     evaluation_id: str | None = None,
     inclusion_rule: str = "explicit_session_ids",
     synthetic_test_data: bool = False,

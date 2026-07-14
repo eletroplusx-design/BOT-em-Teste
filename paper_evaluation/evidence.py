@@ -24,7 +24,9 @@ from validation.models import CandidateConfig, FrozenSelection
 
 from .errors import PaperEvaluationEvidenceError, PaperEvaluationReadError
 from .models import (
+    OperationalEvidenceBatch,
     PaperFillEvidence,
+    PaperEvaluationCohort,
     PaperSessionEvidence,
     PaperSessionEventEvidence,
     PaperSessionRejection,
@@ -224,6 +226,36 @@ def _load_runtime_session_row(conn: sqlite3.Connection, session_id: str) -> sqli
     if row is None:
         raise PaperEvaluationEvidenceError("runtime session not found.")
     return row
+
+
+def _load_runtime_session_rows(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    rows = conn.execute(
+        "SELECT session_id, session_started_utc, updated_at_utc, strategy_version, symbol, interval FROM paper_runtime_sessions ORDER BY session_started_utc ASC, session_id ASC",
+    ).fetchall()
+    if not rows:
+        raise PaperEvaluationReadError("no paper sessions found.")
+    return rows
+
+
+def _build_operational_cohort(rows: list[sqlite3.Row], *, inclusion_rule: str = "sqlite_all_sessions") -> PaperEvaluationCohort:
+    session_ids = tuple(str(row["session_id"]).strip() for row in rows if str(row["session_id"]).strip())
+    if not session_ids:
+        raise PaperEvaluationReadError("no paper sessions found.")
+    strategy_versions = {str(row["strategy_version"]).strip() for row in rows}
+    symbols = {str(row["symbol"]).strip() for row in rows}
+    intervals = {str(row["interval"]).strip() for row in rows}
+    if len(strategy_versions) != 1 or len(symbols) != 1 or len(intervals) != 1:
+        raise PaperEvaluationEvidenceError("operational cohort must be homogeneous.")
+    started_values = [datetime.fromisoformat(str(row["session_started_utc"]).replace("Z", "+00:00")) for row in rows]
+    updated_values = [datetime.fromisoformat(str(row["updated_at_utc"]).replace("Z", "+00:00")) for row in rows]
+    return PaperEvaluationCohort(
+        strategy_version=next(iter(strategy_versions)),
+        period_start_utc=min(started_values),
+        period_end_utc=max(updated_values),
+        inclusion_rule=inclusion_rule,
+        created_at_utc=max(updated_values),
+        session_ids=session_ids,
+    )
 
 
 def _load_runtime_snapshots(conn: sqlite3.Connection, session_id: str) -> list[PaperSessionSnapshotEvidence]:
@@ -668,6 +700,30 @@ def load_paper_session_evidence(
     except Exception as exc:
         logging.warning("Paper evaluation evidence load failed: %s", exc.__class__.__name__)
         raise PaperEvaluationReadError("paper evaluation evidence load failed.") from exc
+
+
+def load_operational_evidence_batch(
+    *,
+    runtime_db_path: str | Path = "paper_runtime.db",
+    trades_db_path: str | Path = "trades.db",
+) -> OperationalEvidenceBatch:
+    runtime_db_path = Path(runtime_db_path)
+    trades_db_path = Path(trades_db_path)
+    with _connect_readonly(runtime_db_path) as runtime_conn, _connect_readonly(trades_db_path) as trades_conn:
+        _validate_runtime_schema(runtime_conn)
+        _validate_trade_schema(trades_conn)
+        session_rows = _load_runtime_session_rows(runtime_conn)
+        cohort = _build_operational_cohort(session_rows)
+        evidences: list[PaperSessionEvidence] = []
+        rejections: list[PaperSessionRejection] = []
+        for row in session_rows:
+            session_id = str(row["session_id"]).strip()
+            try:
+                evidence = load_paper_session_evidence(session_id, runtime_db_path=runtime_db_path, trades_db_path=trades_db_path)
+                evidences.append(evidence)
+            except PaperEvaluationEvidenceError as exc:
+                rejections.append(PaperSessionRejection(session_id=session_id, reason=str(exc)))
+        return OperationalEvidenceBatch(cohort=cohort, evidences=tuple(evidences), rejections=tuple(rejections))
 
 
 def load_paper_session_evidence_batch(

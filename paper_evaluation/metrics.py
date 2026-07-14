@@ -39,6 +39,13 @@ def _trade_cost(trade: PaperSessionTradeEvidence) -> Decimal:
     return total
 
 
+def _contract_decimal(session: PaperSessionEvidence, field_name: str) -> Decimal:
+    value = session.execution_contract.get(field_name)
+    if value is None:
+        raise PaperEvaluationMetricsError(f"{field_name} is required in execution contract.")
+    return _as_decimal(value)
+
+
 def _close_time(trade: PaperSessionTradeEvidence) -> datetime:
     return trade.fechado_em or trade.aberto_em
 
@@ -192,9 +199,17 @@ def compute_paper_session_metrics(session: PaperSessionEvidence) -> PaperSession
     slippage_deviation = Decimal("0")
     fee_deviation = Decimal("0")
     if session.observed_costs:
-        spread_deviation = abs(_as_decimal(session.observed_costs.get("spread_bps", 0)) - Decimal("5"))
-        slippage_deviation = abs(_as_decimal(session.observed_costs.get("slippage_bps", 0)) - Decimal("5"))
-        fee_deviation = abs(_as_decimal(session.observed_costs.get("entry_fee_rate", 0)) - Decimal("0.0004"))
+        expected_entry_fee = _contract_decimal(session, "entry_fee_rate")
+        expected_exit_fee = _contract_decimal(session, "exit_fee_rate")
+        expected_spread_bps = _contract_decimal(session, "spread_bps")
+        expected_slippage_bps = _contract_decimal(session, "slippage_bps")
+        observed_entry_fee = _as_decimal(session.observed_costs.get("entry_fee_rate", expected_entry_fee))
+        observed_exit_fee = _as_decimal(session.observed_costs.get("exit_fee_rate", expected_exit_fee))
+        observed_spread_bps = _as_decimal(session.observed_costs.get("spread_bps", expected_spread_bps))
+        observed_slippage_bps = _as_decimal(session.observed_costs.get("slippage_bps", expected_slippage_bps))
+        spread_deviation = max(abs(observed_spread_bps - expected_spread_bps), Decimal("0"))
+        slippage_deviation = max(abs(observed_slippage_bps - expected_slippage_bps), Decimal("0"))
+        fee_deviation = max(abs(observed_entry_fee - expected_entry_fee), abs(observed_exit_fee - expected_exit_fee)) * Decimal("100")
 
     return PaperSessionMetrics(
         session_id=session.session_id,
