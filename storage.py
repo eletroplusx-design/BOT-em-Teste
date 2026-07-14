@@ -711,15 +711,17 @@ def obter_trades_paper_abertos(symbol="SOLUSDT", session_id=None):
         trades = []
         for linha in rows:
             trades.append(
-                {
-                    "id": linha[0],
-                    "timestamp": linha[1],
-                    "symbol": linha[2],
-                    "session_id": linha[3],
-                    "direcao": linha[4],
-                    "entrada": float(linha[5]) if linha[5] is not None else None,
-                    "stop_loss": float(linha[6]) if linha[6] is not None else None,
-                    "take_profit": float(linha[7]) if linha[7] is not None else None,
+            {
+                "id": linha[0],
+                "timestamp": linha[1],
+                "symbol": linha[2],
+                "session_id": linha[3],
+                "tipo": "paper",
+                "status": "open",
+                "direcao": linha[4],
+                "entrada": float(linha[5]) if linha[5] is not None else None,
+                "stop_loss": float(linha[6]) if linha[6] is not None else None,
+                "take_profit": float(linha[7]) if linha[7] is not None else None,
                     "quantidade": float(linha[8] or 0.0),
                     "valor_arriscado": float(linha[9] or 0.0),
                     "preco_base": float(linha[10]) if linha[10] is not None else None,
@@ -1246,7 +1248,7 @@ def obter_ultimos_trades_paper(symbol="SOLUSDT", limite=30, db_name=DB_NAME, ses
                 SELECT timestamp, resultado, lucro_percent, lucro_reais, filtros_aplicados,
                        direcao, entrada, saida, quantidade, preco_base, fill_price, entry_fee,
                        exit_fee, entry_spread_cost, entry_slippage_cost, exit_spread_cost, exit_slippage_cost,
-                       spread_cost, slippage_cost, pnl_bruto, custos_totais, pnl_liquido, session_id
+                       spread_cost, slippage_cost, pnl_bruto, custos_totais, pnl_liquido, session_id, fechado_em
                 FROM trades
                 WHERE tipo = 'paper' AND simbolo = ? AND status = 'closed'
             """
@@ -1287,6 +1289,7 @@ def obter_ultimos_trades_paper(symbol="SOLUSDT", limite=30, db_name=DB_NAME, ses
                     "custos_totais": float(linha[20]) if linha[20] is not None else None,
                     "pnl_liquido": float(linha[21]) if linha[21] is not None else None,
                     "session_id": linha[22],
+                    "fechado_em": linha[23] if len(linha) > 23 else None,
                 }
             )
         return list(reversed(trades))

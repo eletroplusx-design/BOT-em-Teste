@@ -930,16 +930,29 @@ def test_monitorar_paper_sol_costs_abertura_e_fechamento_5bps(monkeypatch, tmp_p
 
     original_registrar = paper_engine.registrar_trade_paper
     captured = {}
+    call_count = {"n": 0}
+
+    open_df = _paper_df()
+    close_df = _paper_df().copy()
+    close_df.loc[:, "high"] = [120.0, 121.0, 122.0]
 
     def _captura_trade_paper(*args, **kwargs):
         captured.update(kwargs)
         return original_registrar(*args, **kwargs)
 
     monkeypatch.setattr(paper_engine, "registrar_trade_paper", _captura_trade_paper)
+    monkeypatch.setattr(
+        paper_engine,
+        "backtester",
+        SimpleNamespace(
+            baixar_dados_historicos=lambda symbol=None: (open_df if call_count["n"] == 0 else close_df)
+        ),
+    )
 
     import asyncio
 
     asyncio.run(paper_engine.monitorar_paper_sol(ctx))
+    call_count["n"] += 1
     assert captured["entry_spread_cost"] == pytest.approx(0.05, rel=1e-9)
     assert captured["entry_slippage_cost"] == pytest.approx(0.05, rel=1e-9)
 
@@ -952,18 +965,20 @@ def test_monitorar_paper_sol_costs_abertura_e_fechamento_5bps(monkeypatch, tmp_p
     observed_open = paper_engine._coletar_runtime_observed_state(
         session=session,
         decision=session.decision,
-        df=_paper_df(),
+        df=open_df,
         trades_abertos=storage.obter_trades_paper_abertos(symbol="SOLUSDT", session_id=session.record.session_id),
         preco_atual=100.0,
         regime_info={"regime": "BULL", "adx": 30, "volatilidade": "NORMAL"},
     )
+    assert observed_open["open_positions"] == 1
+    assert observed_open["paper_capital_used"] == Decimal("5")
+    assert observed_open["risk_per_trade_percent"] == Decimal("0.05")
+    assert len(observed_open["observed_costs"]) == 4
     assert Decimal(str(observed_open["observed_costs"]["spread_bps"])) == Decimal("5")
     assert Decimal(str(observed_open["observed_costs"]["slippage_bps"])) == Decimal("5")
 
-    closing_df = _paper_df().copy()
-    closing_df.loc[:, "high"] = [120.0, 121.0, 122.0]
-    monkeypatch.setattr(paper_engine, "backtester", SimpleNamespace(baixar_dados_historicos=lambda symbol=None: closing_df))
     asyncio.run(paper_engine.monitorar_paper_sol(ctx))
+    call_count["n"] += 1
 
     with sqlite3.connect(trades_db) as conn:
         row = conn.execute(
@@ -1320,6 +1335,88 @@ def test_timestamp_futuro_bloqueia_freshness(monkeypatch, tmp_path):
         regime_info={"regime": "BULL", "adx": 30, "volatilidade": "NORMAL"},
     )
     assert snapshot_observed["data_fresh"] is False
+
+
+def test_trade_aberto_persistido_expoe_tipo_status_e_limites_reais(monkeypatch, tmp_path):
+    import storage
+
+    trades_db = tmp_path / "paper_trades_open_contract.db"
+    monkeypatch.setattr(storage, "DB_NAME", str(trades_db))
+    storage.inicializar_banco(str(trades_db))
+
+    store = _store(tmp_path)
+    session = _session(store, session_id="open-contract")
+
+    storage.registrar_trade_paper(
+        "SOLUSDT",
+        "COMPRA",
+        100.0,
+        95.0,
+        110.0,
+        1.0,
+        6000.0,
+        2.0,
+        session_id=session.record.session_id,
+        idempotency_key="open-contract-1",
+        candle_close_time="2026-07-11T12:00:00+00:00",
+        signal_identity="open-contract-1",
+        preco_base=100.0,
+        fill_price=100.0,
+        entry_fee=0.4,
+        entry_spread_cost=0.05,
+        entry_slippage_cost=0.05,
+        spread_cost=0.05,
+        slippage_cost=0.05,
+        db_name=str(trades_db),
+    )
+    storage.registrar_trade_paper(
+        "SOLUSDT",
+        "COMPRA",
+        100.0,
+        95.0,
+        110.0,
+        1.0,
+        5000.0,
+        2.0,
+        session_id=session.record.session_id,
+        idempotency_key="open-contract-2",
+        candle_close_time="2026-07-11T12:05:00+00:00",
+        signal_identity="open-contract-2",
+        preco_base=100.0,
+        fill_price=100.0,
+        entry_fee=0.4,
+        entry_spread_cost=0.05,
+        entry_slippage_cost=0.05,
+        spread_cost=0.05,
+        slippage_cost=0.05,
+        db_name=str(trades_db),
+    )
+
+    trades_abertos = storage.obter_trades_paper_abertos("SOLUSDT")
+    assert all(trade["tipo"] == "paper" for trade in trades_abertos)
+    assert all(trade["status"] == "open" for trade in trades_abertos)
+
+    observed = paper_engine._coletar_runtime_observed_state(
+        session=session,
+        decision=session.decision,
+        df=_paper_df(),
+        trades_abertos=trades_abertos,
+        preco_atual=102.0,
+        regime_info={"regime": "BULL", "adx": 30, "volatilidade": "NORMAL"},
+    )
+
+    assert observed["open_positions"] == 2
+    assert observed["paper_capital_used"] == Decimal("11000")
+    assert observed["risk_per_trade_percent"] == Decimal("60")
+
+    snapshot = build_snapshot_from_observed_state(
+        session=session.record,
+        decision=session.decision,
+        observed=observed,
+        timestamp_utc=datetime(2026, 7, 11, 12, 30, tzinfo=timezone.utc),
+    )
+    result = session.evaluate_snapshot(snapshot, decision=session.decision)
+    assert result.monitoring_decision.status is PromotionStatus.PAPER_SUSPENDED
 
 
 def test_outbox_json_tampered_bloqueia_reconciliacao(monkeypatch, tmp_path):

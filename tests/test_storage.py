@@ -264,6 +264,55 @@ def test_trade_paper_workflow(monkeypatch, temp_db_path):
     assert row[9] is not None
 
 
+def test_obter_trades_paper_abertos_e_ultimos_trades_expoem_contracto_temporal(monkeypatch, temp_db_path):
+    _setup_db(monkeypatch, temp_db_path)
+    trade_id = storage.registrar_trade_paper(
+        symbol="SOLUSDT",
+        direcao="COMPRA",
+        entrada=100,
+        stop_loss=95,
+        take_profit=110,
+        quantidade=1.0,
+        valor_arriscado=100,
+        rr_planejado=2.0,
+        filtros_aplicados=True,
+        session_id="sess-contract",
+        idempotency_key="idem-open-contract",
+        candle_close_time="2026-01-01T00:00:00+00:00",
+        signal_identity="signal-contract",
+        preco_base=100.0,
+        fill_price=100.0,
+        entry_fee=0.4,
+        entry_spread_cost=0.05,
+        entry_slippage_cost=0.05,
+        spread_cost=0.05,
+        slippage_cost=0.05,
+        db_name=temp_db_path,
+    )
+    assert trade_id is not None
+
+    abertos = storage.obter_trades_paper_abertos("SOLUSDT")
+    assert len(abertos) == 1
+    assert abertos[0]["tipo"] == "paper"
+    assert abertos[0]["status"] == "open"
+    assert abertos[0]["session_id"] == "sess-contract"
+
+    storage.finalizar_trade_paper(
+        trade_id,
+        110,
+        10.0,
+        10.0,
+        "GANHO",
+        "TAKE_PROFIT",
+        idempotency_key="idem-close-contract",
+        db_name=temp_db_path,
+    )
+    ultimos = storage.obter_ultimos_trades_paper("SOLUSDT", limite=5, db_name=temp_db_path, session_id="sess-contract")
+    assert len(ultimos) == 1
+    assert "fechado_em" in ultimos[0]
+    assert ultimos[0]["fechado_em"] is not None
+
+
 def test_contar_fechados_hoje_e_paper_stats_sem_filtrado(monkeypatch, temp_db_path):
     _setup_db(monkeypatch, temp_db_path)
     hoje_iso = storage._agora_iso()

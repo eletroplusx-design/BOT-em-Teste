@@ -811,14 +811,21 @@ def _coletar_runtime_observed_state(*, session, decision, df, trades_abertos, pr
                     or 0
                 )
             )
-            saida_persistida = Decimal(str(persisted_cost_source.get("saida") or fill_price_persistido))
+            saida_persistida = Decimal(
+                str(
+                    persisted_cost_source.get("saida")
+                    or persisted_cost_source.get("preco_base")
+                    or persisted_cost_source.get("entrada")
+                    or fill_price_persistido
+                )
+            )
             entry_fee = Decimal(str(persisted_cost_source.get("entry_fee") or 0))
             exit_fee = Decimal(str(persisted_cost_source.get("exit_fee") or 0))
             entry_spread_cost = Decimal(str(persisted_cost_source.get("entry_spread_cost") or 0))
             entry_slippage_cost = Decimal(str(persisted_cost_source.get("entry_slippage_cost") or 0))
             exit_spread_cost = Decimal(str(persisted_cost_source.get("exit_spread_cost") or 0))
             exit_slippage_cost = Decimal(str(persisted_cost_source.get("exit_slippage_cost") or 0))
-            entry_notional = abs(quantidade_persistida * (fill_price_persistido or preco_base_persistido or Decimal("0")))
+            entry_notional = abs(quantidade_persistida * (preco_base_persistido or fill_price_persistido or Decimal("0")))
             trade_closed = any(
                 persisted_cost_source.get(chave) is not None
                 for chave in ("fechado_em", "saida", "pnl_liquido", "resultado")
