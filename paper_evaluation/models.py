@@ -638,8 +638,8 @@ class PaperEvaluationCohort:
         object.__setattr__(self, "created_at_utc", _require_timezone_aware(self.created_at_utc, "created_at_utc"))
         if self.period_end_utc < self.period_start_utc:
             raise PaperEvaluationManifestError("period_end_utc cannot be earlier than period_start_utc.")
-        if self.created_at_utc < self.period_start_utc:
-            raise PaperEvaluationManifestError("created_at_utc cannot be earlier than period_start_utc.")
+        if self.created_at_utc > self.period_start_utc:
+            raise PaperEvaluationManifestError("created_at_utc cannot be later than period_start_utc.")
         object.__setattr__(self, "inclusion_rule", _require_str(self.inclusion_rule, "inclusion_rule"))
         object.__setattr__(self, "session_ids", tuple(_require_str(session_id, "session_id") for session_id in self.session_ids))
         if len({session_id for session_id in self.session_ids}) != len(self.session_ids):
@@ -933,24 +933,28 @@ class PaperSessionEvidence:
         return serialize_value(self.as_hash_payload())
 
 
+class _OperationalBatchToken:
+    __slots__ = ()
+
+
+_OPERATIONAL_BATCH_TOKEN = _OperationalBatchToken()
+
+
 @dataclass(frozen=True, slots=True)
-class OperationalEvidenceBatch:
+class _OperationalEvidenceBatch:
     cohort: PaperEvaluationCohort
     evidences: tuple[PaperSessionEvidence, ...]
     rejections: tuple[PaperSessionRejection, ...]
-    source: str = "sqlite"
-    trusted: bool = True
     batch_hash: str = field(default="", compare=False)
+    _token: _OperationalBatchToken = field(default=_OPERATIONAL_BATCH_TOKEN, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.cohort, PaperEvaluationCohort):
             raise PaperEvaluationEvidenceError("cohort must be a PaperEvaluationCohort instance.")
+        if self._token is not _OPERATIONAL_BATCH_TOKEN:
+            raise PaperEvaluationEvidenceError("operational evidence batch token is invalid.")
         object.__setattr__(self, "evidences", tuple(self.evidences))
         object.__setattr__(self, "rejections", tuple(self.rejections))
-        object.__setattr__(self, "source", _require_str(self.source, "source"))
-        if type(self.trusted) is not bool:
-            raise PaperEvaluationEvidenceError("trusted must be a boolean.")
-        object.__setattr__(self, "trusted", self.trusted)
         if any(not isinstance(evidence, PaperSessionEvidence) for evidence in self.evidences):
             raise PaperEvaluationEvidenceError("evidences must contain PaperSessionEvidence instances.")
         if any(not isinstance(rejection, PaperSessionRejection) for rejection in self.rejections):
@@ -971,8 +975,6 @@ class OperationalEvidenceBatch:
             "cohort": self.cohort.as_dict(),
             "evidences": [evidence.as_dict() for evidence in self.evidences],
             "rejections": [rejection.as_dict() for rejection in self.rejections],
-            "source": self.source,
-            "trusted": self.trusted,
         }
         if include_hash:
             payload["batch_hash"] = self.batch_hash

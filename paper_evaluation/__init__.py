@@ -11,7 +11,6 @@ from .errors import (
 )
 from .evaluator import evaluate_paper_sessions
 from .metrics import aggregate_paper_session_metrics, compute_paper_session_metrics
-from .evidence import load_operational_evidence_batch
 from .models import (
     PaperEvaluationDecision,
     PaperEvaluationCohort,
@@ -19,7 +18,6 @@ from .models import (
     PaperEvaluationPolicy,
     PaperEvaluationReport,
     PaperEvaluationStatus,
-    OperationalEvidenceBatch,
     PaperFillEvidence,
     PaperSessionEvidence,
     PaperSessionEventEvidence,
@@ -37,7 +35,6 @@ __all__ = [
     "default_paper_evaluation_policy",
     "evaluate_paper_sessions",
     "evaluate_paper_sessions_from_storage",
-    "load_operational_evidence_batch",
     "load_paper_session_evidence",
     "load_paper_session_evidence_batch",
     "PaperEvaluationAdapter",
@@ -55,7 +52,6 @@ __all__ = [
     "PaperEvaluationReadError",
     "PaperEvaluationReport",
     "PaperEvaluationStatus",
-    "OperationalEvidenceBatch",
     "PaperFillEvidence",
     "PaperSessionEvidence",
     "PaperSessionEventEvidence",

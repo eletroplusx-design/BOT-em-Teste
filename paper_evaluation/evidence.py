@@ -24,7 +24,8 @@ from validation.models import CandidateConfig, FrozenSelection
 
 from .errors import PaperEvaluationEvidenceError, PaperEvaluationReadError
 from .models import (
-    OperationalEvidenceBatch,
+    _OperationalEvidenceBatch,
+    _OPERATIONAL_BATCH_TOKEN,
     PaperFillEvidence,
     PaperEvaluationCohort,
     PaperSessionEvidence,
@@ -230,7 +231,7 @@ def _load_runtime_session_row(conn: sqlite3.Connection, session_id: str) -> sqli
 
 def _load_runtime_session_rows(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     rows = conn.execute(
-        "SELECT session_id, session_started_utc, updated_at_utc, strategy_version, symbol, interval FROM paper_runtime_sessions ORDER BY session_started_utc ASC, session_id ASC",
+        "SELECT session_id, created_at_utc, session_started_utc, updated_at_utc, strategy_version, symbol, interval FROM paper_runtime_sessions ORDER BY session_started_utc ASC, session_id ASC",
     ).fetchall()
     if not rows:
         raise PaperEvaluationReadError("no paper sessions found.")
@@ -253,7 +254,7 @@ def _build_operational_cohort(rows: list[sqlite3.Row], *, inclusion_rule: str = 
         period_start_utc=min(started_values),
         period_end_utc=max(updated_values),
         inclusion_rule=inclusion_rule,
-        created_at_utc=max(updated_values),
+        created_at_utc=min(started_values),
         session_ids=session_ids,
     )
 
@@ -706,7 +707,7 @@ def load_operational_evidence_batch(
     *,
     runtime_db_path: str | Path = "paper_runtime.db",
     trades_db_path: str | Path = "trades.db",
-) -> OperationalEvidenceBatch:
+) -> _OperationalEvidenceBatch:
     runtime_db_path = Path(runtime_db_path)
     trades_db_path = Path(trades_db_path)
     with _connect_readonly(runtime_db_path) as runtime_conn, _connect_readonly(trades_db_path) as trades_conn:
@@ -723,7 +724,7 @@ def load_operational_evidence_batch(
                 evidences.append(evidence)
             except PaperEvaluationEvidenceError as exc:
                 rejections.append(PaperSessionRejection(session_id=session_id, reason=str(exc)))
-        return OperationalEvidenceBatch(cohort=cohort, evidences=tuple(evidences), rejections=tuple(rejections))
+        return _OperationalEvidenceBatch(cohort=cohort, evidences=tuple(evidences), rejections=tuple(rejections), _token=_OPERATIONAL_BATCH_TOKEN)
 
 
 def load_paper_session_evidence_batch(

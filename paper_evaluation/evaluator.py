@@ -11,7 +11,7 @@ from .artifacts import paper_evaluation_hash
 from .errors import PaperEvaluationDecisionError
 from .metrics import aggregate_paper_session_metrics, compute_paper_session_metrics
 from .models import (
-    OperationalEvidenceBatch,
+    _OperationalEvidenceBatch,
     PaperEvaluationDecision,
     PaperEvaluationManifest,
     PaperEvaluationPolicy,
@@ -62,13 +62,11 @@ def _ensure_walk_forward_reference(reference: WalkForwardResult | None) -> tuple
     return payload, paper_evaluation_hash(payload)
 
 
-def _ensure_operational_batch(batch: OperationalEvidenceBatch | None) -> OperationalEvidenceBatch | None:
+def _ensure_operational_batch(batch: _OperationalEvidenceBatch | None) -> _OperationalEvidenceBatch | None:
     if batch is None:
         return None
-    if not isinstance(batch, OperationalEvidenceBatch):
-        raise PaperEvaluationDecisionError("operational evidence must be a trusted OperationalEvidenceBatch.")
-    if batch.source != "sqlite" or batch.trusted is not True:
-        raise PaperEvaluationDecisionError("operational evidence batch must be produced by strict sqlite loading.")
+    if type(batch) is not _OperationalEvidenceBatch:
+        raise PaperEvaluationDecisionError("operational evidence must be produced by the strict sqlite loader.")
     return batch
 
 
@@ -184,7 +182,7 @@ def _status_from_reasons(reasons: Sequence[str], *, evidence: Sequence[PaperSess
     return PaperEvaluationStatus.APPROVED_FOR_EXTENDED_PAPER
 
 
-def evaluate_paper_sessions(
+def _evaluate_paper_sessions_internal(
     evidences: Sequence[PaperSessionEvidence],
     *,
     policy: PaperEvaluationPolicy | None = None,
@@ -192,9 +190,10 @@ def evaluate_paper_sessions(
     evaluation_id: str | None = None,
     inclusion_rule: str = "explicit_session_ids",
     synthetic_test_data: bool = False,
-    operational_batch: OperationalEvidenceBatch | None = None,
+    operational_batch: _OperationalEvidenceBatch | None = None,
     expected_session_ids: Sequence[str] | None = None,
     load_rejections: Sequence[PaperSessionRejection] | None = None,
+    allow_operational_approval: bool = False,
 ) -> PaperEvaluationReport:
     policy = _ensure_policy(policy)
     reference_payload, reference_hash = _ensure_walk_forward_reference(reference_walk_forward)
@@ -271,7 +270,7 @@ def evaluate_paper_sessions(
     status = _status_from_reasons(reasons, evidence=ordered_evidence)
     if load_rejections or batch_rejections:
         status = PaperEvaluationStatus.REJECTED
-    if status is PaperEvaluationStatus.APPROVED_FOR_EXTENDED_PAPER and (synthetic_test_data or operational_batch is None):
+    if status is PaperEvaluationStatus.APPROVED_FOR_EXTENDED_PAPER and (synthetic_test_data or operational_batch is None or not allow_operational_approval):
         reasons = tuple((*reasons, "operational evidence required."))
         status = PaperEvaluationStatus.INSUFFICIENT_EVIDENCE
     if status is PaperEvaluationStatus.APPROVED_FOR_EXTENDED_PAPER and operational_batch is not None and reference_payload == {}:
@@ -338,4 +337,54 @@ def evaluate_paper_sessions(
         walk_forward_comparison=walk_forward_comparison,
         residual_risks=residual_risks,
         created_at_utc=now,
+    )
+
+
+def evaluate_paper_sessions(
+    evidences: Sequence[PaperSessionEvidence],
+    *,
+    policy: PaperEvaluationPolicy | None = None,
+    reference_walk_forward: WalkForwardResult | None = None,
+    evaluation_id: str | None = None,
+    inclusion_rule: str = "explicit_session_ids",
+    synthetic_test_data: bool = False,
+    expected_session_ids: Sequence[str] | None = None,
+    load_rejections: Sequence[PaperSessionRejection] | None = None,
+) -> PaperEvaluationReport:
+    return _evaluate_paper_sessions_internal(
+        evidences,
+        policy=policy,
+        reference_walk_forward=reference_walk_forward,
+        evaluation_id=evaluation_id,
+        inclusion_rule=inclusion_rule,
+        synthetic_test_data=synthetic_test_data,
+        expected_session_ids=expected_session_ids,
+        load_rejections=load_rejections,
+        allow_operational_approval=False,
+    )
+
+
+def _evaluate_paper_sessions_from_operational_batch(
+    evidences: Sequence[PaperSessionEvidence],
+    *,
+    policy: PaperEvaluationPolicy | None = None,
+    reference_walk_forward: WalkForwardResult | None = None,
+    evaluation_id: str | None = None,
+    inclusion_rule: str = "explicit_session_ids",
+    synthetic_test_data: bool = False,
+    operational_batch: _OperationalEvidenceBatch,
+    expected_session_ids: Sequence[str] | None = None,
+    load_rejections: Sequence[PaperSessionRejection] | None = None,
+) -> PaperEvaluationReport:
+    return _evaluate_paper_sessions_internal(
+        evidences,
+        policy=policy,
+        reference_walk_forward=reference_walk_forward,
+        evaluation_id=evaluation_id,
+        inclusion_rule=inclusion_rule,
+        synthetic_test_data=synthetic_test_data,
+        operational_batch=operational_batch,
+        expected_session_ids=expected_session_ids,
+        load_rejections=load_rejections,
+        allow_operational_approval=True,
     )

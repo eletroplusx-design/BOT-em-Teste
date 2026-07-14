@@ -10,7 +10,6 @@ from pathlib import Path
 import pytest
 
 from paper_evaluation import (
-    OperationalEvidenceBatch,
     PaperEvaluationCohort,
     PaperEvaluationAdapter,
     PaperEvaluationDecisionError,
@@ -28,6 +27,7 @@ from paper_evaluation import (
     evaluate_paper_sessions,
     evaluate_paper_sessions_from_storage,
 )
+from paper_evaluation.models import _OperationalEvidenceBatch
 from promotion import PaperMonitoringSnapshot, adapt_walk_forward_result, evaluate_promotion
 from promotion.errors import PromotionPolicyError
 from paper_runtime import PaperRuntimeSession, PaperRuntimeStore
@@ -564,43 +564,12 @@ def test_paper_evaluation_live_attempt_expired_data_and_suspended_sessions_rejec
     assert any("session state SUSPENDED not eligible" in rejection.reason for rejection in report.rejected_sessions if rejection.session_id == "suspended")
 
 
-def test_aggregate_metrics_use_whole_cohort_for_profit_factor_and_cost_percent():
+def test_aggregate_metrics_use_whole_cohort_for_profit_factor_and_cost_percent(tmp_path):
     started = datetime(2026, 7, 11, 9, 0, tzinfo=timezone.utc)
     low_limits = dict(BASE_LIMITS)
     low_limits["paper_capital_max"] = Decimal("100")
-    good_session = _session_evidence(
-        "cohort-good",
-        (
-            _trade(
-                1,
-                "cohort-good",
-                started + timedelta(minutes=5),
-                started + timedelta(minutes=35),
-                lucro_reais=Decimal("40"),
-                entry_price=Decimal("100"),
-                exit_price=Decimal("140"),
-            ),
-        ),
-        (_snapshot("cohort-good", started, started + timedelta(hours=1), executed_trades=1, paper_capital_used=Decimal("40")),),
-        paper_limits=low_limits,
-    )
-    bad_session = _session_evidence(
-        "cohort-bad",
-        (
-            _trade(
-                1,
-                "cohort-bad",
-                started + timedelta(days=1, minutes=5),
-                started + timedelta(days=1, minutes=35),
-                lucro_reais=Decimal("-30"),
-                entry_price=Decimal("100"),
-                exit_price=Decimal("70"),
-                direction="VENDA",
-            ),
-        ),
-        (_snapshot("cohort-bad", started + timedelta(days=1), started + timedelta(days=1, hours=1), executed_trades=1, paper_capital_used=Decimal("40")),),
-        paper_limits=low_limits,
-    )
+    runtime_db, trades_db = _seed_runtime_and_trades(tmp_path, session_id="cohort-good", trade_result=Decimal("40"))
+    _seed_runtime_and_trades(tmp_path, session_id="cohort-bad", trade_result=Decimal("-30"))
     policy = PaperEvaluationPolicy(
         min_sessions_completed=2,
         min_distinct_days=1,
@@ -610,7 +579,7 @@ def test_aggregate_metrics_use_whole_cohort_for_profit_factor_and_cost_percent()
         min_profit_factor=Decimal("2"),
         min_expectancy=Decimal("-100"),
         min_net_return_percent=Decimal("-100"),
-        max_total_costs_percent=Decimal("1"),
+        max_total_costs_percent=Decimal("0"),
         max_suspended_sessions=0,
         require_zero_live_attempts=True,
         require_audit_chain=True,
@@ -619,22 +588,14 @@ def test_aggregate_metrics_use_whole_cohort_for_profit_factor_and_cost_percent()
         min_regime_coverage=0,
         evaluator_version="v8_paper_evaluation",
     )
-    cohort = PaperEvaluationCohort(
-        strategy_version="v8_paper_evaluation",
-        period_start_utc=started,
-        period_end_utc=started + timedelta(days=1, hours=1),
-        inclusion_rule="cohort_aggregate",
-        created_at_utc=started + timedelta(days=1, hours=1),
-        session_ids=("cohort-good", "cohort-bad"),
-    )
-    batch = OperationalEvidenceBatch(cohort=cohort, evidences=(good_session, bad_session), rejections=tuple())
-    report = evaluate_paper_sessions(
-        [good_session, bad_session],
+    report = evaluate_paper_sessions_from_storage(
+        runtime_db_path=runtime_db,
+        trades_db_path=trades_db,
         policy=policy,
         reference_walk_forward=_promotion_result(),
         evaluation_id="cohort-aggregate",
         synthetic_test_data=False,
-        operational_batch=batch,
+        operational_evidence=True,
     )
     assert report.decision.status is PaperEvaluationStatus.REJECTED
     assert any("profit factor below minimum" in reason for reason in report.decision.reasons)
@@ -643,12 +604,12 @@ def test_aggregate_metrics_use_whole_cohort_for_profit_factor_and_cost_percent()
 
 def test_operational_evaluation_requires_walk_forward_reference(tmp_path):
     runtime_db, trades_db = _seed_runtime_and_trades(tmp_path, session_id="operational-no-reference", trade_result=Decimal("25"))
-    batch = load_operational_evidence_batch(runtime_db_path=runtime_db, trades_db_path=trades_db)
-    report = evaluate_paper_sessions(
-        list(batch.evidences),
+    report = evaluate_paper_sessions_from_storage(
+        runtime_db_path=runtime_db,
+        trades_db_path=trades_db,
         policy=_lenient_policy(),
         evaluation_id="operational-no-reference",
-        operational_batch=batch,
+        operational_evidence=True,
     )
     assert report.decision.status is PaperEvaluationStatus.INSUFFICIENT_EVIDENCE
     assert any("walk-forward reference required" in reason for reason in report.decision.reasons)
@@ -677,11 +638,31 @@ def test_operational_cohort_hash_mutation_is_blocked():
         period_start_utc=started,
         period_end_utc=started + timedelta(hours=2),
         inclusion_rule="sqlite_all_sessions",
-        created_at_utc=started + timedelta(hours=2),
+        created_at_utc=started,
         session_ids=("a", "b"),
     )
     with pytest.raises(PaperEvaluationManifestError):
         replace(cohort, inclusion_rule="manual")
+
+
+def test_manual_operational_batch_without_loader_token_is_rejected():
+    started = datetime(2026, 7, 11, 9, 0, tzinfo=timezone.utc)
+    session = _make_trade_session("manual-batch", trade_results=(Decimal("25"),), started_at=started)
+    cohort = PaperEvaluationCohort(
+        strategy_version="v8_paper_evaluation",
+        period_start_utc=started,
+        period_end_utc=started + timedelta(hours=1),
+        inclusion_rule="sqlite_all_sessions",
+        created_at_utc=started,
+        session_ids=("manual-batch",),
+    )
+    with pytest.raises(PaperEvaluationEvidenceError):
+        _OperationalEvidenceBatch(
+            cohort=cohort,
+            evidences=(session,),
+            rejections=tuple(),
+            _token=object(),
+        )
 
 
 def test_costs_are_read_from_execution_contract_not_defaults():
