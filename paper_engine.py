@@ -1239,7 +1239,6 @@ async def monitorar_paper_sol(context):
 
         try:
             aberto_preflight = obter_trades_paper_abertos(PAPER_SYMBOL, session_id=session_scope_id, strict=True)
-            closed_trades_preflight = obter_ultimos_trades_paper(symbol=PAPER_SYMBOL, limite=500, session_id=session_scope_id, strict=True)
         except Exception as exc:
             _bloquear_runtime_monitorado(
                 "Falha na leitura critica do storage antes da coleta de mercado.",
@@ -1298,7 +1297,6 @@ async def monitorar_paper_sol(context):
                 trades_abertos=aberto,
                 preco_atual=preco_atual,
                 regime_info=regime_info,
-                closed_trades=closed_trades_preflight,
             )
             try:
                 runtime_snapshot_pre = build_snapshot_from_observed_state(
@@ -1368,7 +1366,6 @@ async def monitorar_paper_sol(context):
                     trades_abertos=aberto_pos,
                     preco_atual=preco_atual,
                     regime_info=regime_info,
-                    closed_trades=closed_trades_preflight,
                 )
                 runtime_snapshot_post = build_snapshot_from_observed_state(
                     session=runtime_session.record,
