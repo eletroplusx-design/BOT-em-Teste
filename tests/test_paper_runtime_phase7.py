@@ -433,8 +433,92 @@ def test_job_suspensa_nao_busca_rede(monkeypatch, tmp_path):
 
     monkeypatch.setattr(paper_engine, "backtester", _BacktesterStub())
     monkeypatch.setattr(paper_engine, "can_execute_sensitive_telegram_action", lambda *args, **kwargs: True)
-    monkeypatch.setattr(paper_engine, "get_monitored_session", lambda session_id=None, decision_hash=None: None)
+    monkeypatch.setattr(paper_engine, "get_monitored_session", lambda session_id=None, decision_hash=None, **kwargs: None)
     ctx = _DummyContext({"chat_id": 1, "user_id": 2, "chat_type": "private", "session_id": "missing"})
+
+    import asyncio
+
+    asyncio.run(paper_engine.monitorar_paper_sol(ctx))
+    assert called["data"] is False
+    assert ctx.bot.sent == []
+
+
+def test_monitorar_paper_sol_leitura_critica_falha_bloqueia_antes_da_coleta(monkeypatch, tmp_path):
+    import storage
+
+    store = _store(tmp_path)
+    session = _session(store, session_id="strict-open-fail")
+    ctx = _DummyContext({"chat_id": 1, "user_id": 2, "chat_type": "private", "session_id": session.record.session_id})
+    monkeypatch.setattr(paper_engine, "can_execute_sensitive_telegram_action", lambda *args, **kwargs: True)
+    monkeypatch.setattr(paper_engine, "get_monitored_session", lambda session_id=None, decision_hash=None, **kwargs: session if session_id == session.record.session_id else None)
+
+    called = {"data": False}
+
+    class _BacktesterStub:
+        def baixar_dados_historicos(self, *args, **kwargs):
+            called["data"] = True
+            raise AssertionError("nao deveria buscar dados")
+
+    monkeypatch.setattr(paper_engine, "backtester", _BacktesterStub())
+
+    def _falha_leitura(*args, **kwargs):
+        raise storage.PaperTradeStorageReadError("boom")
+
+    monkeypatch.setattr(paper_engine, "obter_trades_paper_abertos", _falha_leitura)
+    monkeypatch.setattr(paper_engine, "obter_outbox_paper_pendentes", lambda session_id=None, **kwargs: [])
+
+    import asyncio
+
+    asyncio.run(paper_engine.monitorar_paper_sol(ctx))
+    assert called["data"] is False
+    assert ctx.bot.sent == []
+
+
+def test_coletar_runtime_state_falha_se_trades_fechados_indisponiveis(monkeypatch, tmp_path):
+    import storage
+
+    store = _store(tmp_path)
+    session = _session(store, session_id="closed-strict-fail")
+
+    def _falha_leitura(*args, **kwargs):
+        raise storage.PaperTradeStorageReadError("boom")
+
+    monkeypatch.setattr(storage, "obter_ultimos_trades_paper", _falha_leitura)
+    with pytest.raises(PaperRuntimeSessionError):
+        paper_engine._coletar_runtime_observed_state(
+            session=session,
+            decision=session.decision,
+            df=_paper_df(),
+            trades_abertos=[],
+            preco_atual=100.0,
+            regime_info={"regime": "BULL", "adx": 30, "volatilidade": "NORMAL"},
+        )
+
+
+def test_monitorar_paper_sol_outbox_indisponivel_bloqueia_antes_da_coleta(monkeypatch, tmp_path):
+    import storage
+
+    store = _store(tmp_path)
+    session = _session(store, session_id="outbox-strict-fail")
+    ctx = _DummyContext({"chat_id": 1, "user_id": 2, "chat_type": "private", "session_id": session.record.session_id})
+    monkeypatch.setattr(paper_engine, "can_execute_sensitive_telegram_action", lambda *args, **kwargs: True)
+    monkeypatch.setattr(paper_engine, "get_monitored_session", lambda session_id=None, decision_hash=None, **kwargs: session if session_id == session.record.session_id else None)
+    monkeypatch.setattr(paper_engine, "_runtime_monitoring_enabled", lambda: True)
+
+    called = {"data": False}
+
+    class _BacktesterStub:
+        def baixar_dados_historicos(self, *args, **kwargs):
+            called["data"] = True
+            raise AssertionError("nao deveria buscar dados")
+
+    monkeypatch.setattr(paper_engine, "backtester", _BacktesterStub())
+
+    def _falha_outbox(*args, **kwargs):
+        raise storage.PaperTradeStorageReadError("boom")
+
+    monkeypatch.setattr(paper_engine, "obter_outbox_paper_pendentes", _falha_outbox)
+    monkeypatch.setattr(paper_engine, "obter_trades_paper_abertos", lambda symbol=None, session_id=None, **kwargs: [])
 
     import asyncio
 
@@ -447,9 +531,9 @@ def test_ordem_nao_ocorre_antes_da_validacao(monkeypatch, tmp_path):
     store = _store(tmp_path)
     session = _session(store, session_id="gate-order")
     monkeypatch.setattr(paper_engine, "can_execute_sensitive_telegram_action", lambda *args, **kwargs: True)
-    monkeypatch.setattr(paper_engine, "get_monitored_session", lambda session_id=None, decision_hash=None: session if session_id == session.record.session_id else None)
+    monkeypatch.setattr(paper_engine, "get_monitored_session", lambda session_id=None, decision_hash=None, **kwargs: session if session_id == session.record.session_id else None)
     monkeypatch.setattr(paper_engine, "backtester", SimpleNamespace(baixar_dados_historicos=lambda symbol=None: _paper_df()))
-    monkeypatch.setattr(paper_engine, "obter_trades_paper_abertos", lambda symbol=None, session_id=None: [])
+    monkeypatch.setattr(paper_engine, "obter_trades_paper_abertos", lambda symbol=None, session_id=None, **kwargs: [])
     monkeypatch.setattr(paper_engine, "classificar_regime", lambda df: {"regime": "BULL", "adx": 30, "volatilidade": "ALTA"})
     monkeypatch.setattr(paper_engine, "esta_em_killzone", lambda: True)
     monkeypatch.setattr(
@@ -476,12 +560,12 @@ def test_fechamento_nao_ocorre_antes_da_validacao(monkeypatch, tmp_path):
     store = _store(tmp_path)
     session = _session(store, session_id="close-gate-order")
     monkeypatch.setattr(paper_engine, "can_execute_sensitive_telegram_action", lambda *args, **kwargs: True)
-    monkeypatch.setattr(paper_engine, "get_monitored_session", lambda session_id=None, decision_hash=None: session if session_id == session.record.session_id else None)
+    monkeypatch.setattr(paper_engine, "get_monitored_session", lambda session_id=None, decision_hash=None, **kwargs: session if session_id == session.record.session_id else None)
     monkeypatch.setattr(paper_engine, "backtester", SimpleNamespace(baixar_dados_historicos=lambda symbol=None: _paper_df()))
     monkeypatch.setattr(
         paper_engine,
         "obter_trades_paper_abertos",
-        lambda symbol=None, session_id=None: [
+        lambda symbol=None, session_id=None, **kwargs: [
             {
                 "id": 10,
                 "timestamp": "2026-01-01T00:00:00+00:00",
@@ -526,9 +610,9 @@ def test_falha_de_persistencia_impede_ordem(monkeypatch, tmp_path):
     store = _store(tmp_path)
     session = _session(store, session_id="persist-fail")
     monkeypatch.setattr(paper_engine, "can_execute_sensitive_telegram_action", lambda *args, **kwargs: True)
-    monkeypatch.setattr(paper_engine, "get_monitored_session", lambda session_id=None, decision_hash=None: session if session_id == session.record.session_id else None)
+    monkeypatch.setattr(paper_engine, "get_monitored_session", lambda session_id=None, decision_hash=None, **kwargs: session if session_id == session.record.session_id else None)
     monkeypatch.setattr(paper_engine, "backtester", SimpleNamespace(baixar_dados_historicos=lambda symbol=None: _paper_df()))
-    monkeypatch.setattr(paper_engine, "obter_trades_paper_abertos", lambda symbol=None, session_id=None: [])
+    monkeypatch.setattr(paper_engine, "obter_trades_paper_abertos", lambda symbol=None, session_id=None, **kwargs: [])
     monkeypatch.setattr(paper_engine, "classificar_regime", lambda df: {"regime": "BULL", "adx": 30, "volatilidade": "ALTA"})
     monkeypatch.setattr(
         paper_engine,
@@ -637,9 +721,9 @@ def test_monitoracao_com_sessao_valida_revalida_e_permite_ordem(monkeypatch, tmp
     session = _session(store, session_id="valid-gate")
     calls = {"trade": 0}
     monkeypatch.setattr(paper_engine, "can_execute_sensitive_telegram_action", lambda *args, **kwargs: True)
-    monkeypatch.setattr(paper_engine, "get_monitored_session", lambda session_id=None, decision_hash=None: session if session_id == session.record.session_id else None)
+    monkeypatch.setattr(paper_engine, "get_monitored_session", lambda session_id=None, decision_hash=None, **kwargs: session if session_id == session.record.session_id else None)
     monkeypatch.setattr(paper_engine, "backtester", SimpleNamespace(baixar_dados_historicos=lambda symbol=None: _paper_df()))
-    monkeypatch.setattr(paper_engine, "obter_trades_paper_abertos", lambda symbol=None, session_id=None: [])
+    monkeypatch.setattr(paper_engine, "obter_trades_paper_abertos", lambda symbol=None, session_id=None, **kwargs: [])
     monkeypatch.setattr(paper_engine, "classificar_regime", lambda df: {"regime": "BULL", "adx": 30, "volatilidade": "ALTA"})
     monkeypatch.setattr(paper_engine, "esta_em_killzone", lambda: True)
     monkeypatch.setattr(
@@ -702,7 +786,7 @@ def test_outbox_real_transita_abertura_fechamento_e_notificacao(monkeypatch, tmp
     monkeypatch.setattr(
         paper_engine,
         "obter_outbox_paper_pendentes",
-        lambda session_id=None: storage.obter_outbox_paper_pendentes(session_id=session_id, db_name=str(trades_db)),
+        lambda session_id=None, **kwargs: storage.obter_outbox_paper_pendentes(session_id=session_id, db_name=str(trades_db), **kwargs),
     )
     monkeypatch.setattr(
         paper_engine,
@@ -712,7 +796,7 @@ def test_outbox_real_transita_abertura_fechamento_e_notificacao(monkeypatch, tmp
     monkeypatch.setattr(
         paper_engine,
         "obter_trades_paper_abertos",
-        lambda symbol=None, session_id=None: storage.obter_trades_paper_abertos(symbol=symbol, session_id=session_id),
+        lambda symbol=None, session_id=None, **kwargs: storage.obter_trades_paper_abertos(symbol=symbol, session_id=session_id, db_name=str(trades_db), **kwargs),
     )
 
     store = _store(tmp_path)
@@ -912,12 +996,12 @@ def test_monitorar_paper_sol_costs_abertura_e_fechamento_5bps(monkeypatch, tmp_p
     store = _store(tmp_path)
     session = _session(store, session_id="costs-5bps")
     ctx = _DummyContext({"chat_id": 123, "user_id": 123, "chat_type": "private", "session_id": session.record.session_id})
-    monkeypatch.setattr(paper_engine, "get_monitored_session", lambda session_id=None, decision_hash=None, store=None: session if session_id == session.record.session_id else None)
+    monkeypatch.setattr(paper_engine, "get_monitored_session", lambda session_id=None, decision_hash=None, store=None, **kwargs: session if session_id == session.record.session_id else None)
     monkeypatch.setattr(paper_engine, "_runtime_monitoring_enabled", lambda: False)
     monkeypatch.setattr(paper_engine, "can_execute_sensitive_telegram_action", lambda *args, **kwargs: True)
     monkeypatch.setattr(paper_engine, "backtester", SimpleNamespace(baixar_dados_historicos=lambda symbol=None: _paper_df()))
     monkeypatch.setattr(storage, "DB_NAME", str(trades_db))
-    monkeypatch.setattr(paper_engine, "obter_trades_paper_abertos", lambda symbol=None, session_id=None: storage.obter_trades_paper_abertos(symbol=symbol, session_id=session_id))
+    monkeypatch.setattr(paper_engine, "obter_trades_paper_abertos", lambda symbol=None, session_id=None, **kwargs: storage.obter_trades_paper_abertos(symbol=symbol, session_id=session_id, db_name=str(trades_db), **kwargs))
     monkeypatch.setattr(paper_engine, "classificar_regime", lambda df: {"regime": "BULL", "adx": 30, "volatilidade": "NORMAL"})
     monkeypatch.setattr(paper_engine, "esta_em_killzone", lambda: True)
     monkeypatch.setattr(
@@ -966,7 +1050,7 @@ def test_monitorar_paper_sol_costs_abertura_e_fechamento_5bps(monkeypatch, tmp_p
         session=session,
         decision=session.decision,
         df=open_df,
-        trades_abertos=storage.obter_trades_paper_abertos(symbol="SOLUSDT", session_id=session.record.session_id),
+        trades_abertos=storage.obter_trades_paper_abertos(symbol="SOLUSDT", session_id=session.record.session_id, db_name=str(trades_db)),
         preco_atual=100.0,
         regime_info={"regime": "BULL", "adx": 30, "volatilidade": "NORMAL"},
     )
@@ -1009,10 +1093,10 @@ def test_reconciliacao_retoma_apos_falha_entre_runtime_e_snapshot(monkeypatch, t
     store = _store(tmp_path)
     session = _session(store, session_id="resume-snapshot")
     contexto = _DummyContext({"chat_id": 123, "user_id": 123, "chat_type": "private", "session_id": session.record.session_id})
-    monkeypatch.setattr(paper_engine, "obter_outbox_paper_pendentes", lambda session_id=None: storage.obter_outbox_paper_pendentes(session_id=session_id, db_name=str(trades_db)))
+    monkeypatch.setattr(paper_engine, "obter_outbox_paper_pendentes", lambda session_id=None, **kwargs: storage.obter_outbox_paper_pendentes(session_id=session_id, db_name=str(trades_db), **kwargs))
     monkeypatch.setattr(paper_engine, "atualizar_outbox_paper_trade", lambda event_id, **kwargs: storage.atualizar_outbox_paper_trade(event_id, db_name=str(trades_db), **kwargs))
     monkeypatch.setattr(storage, "DB_NAME", str(trades_db))
-    monkeypatch.setattr(paper_engine, "obter_trades_paper_abertos", lambda symbol=None, session_id=None: storage.obter_trades_paper_abertos(symbol=symbol, session_id=session_id))
+    monkeypatch.setattr(paper_engine, "obter_trades_paper_abertos", lambda symbol=None, session_id=None, **kwargs: storage.obter_trades_paper_abertos(symbol=symbol, session_id=session_id, db_name=str(trades_db), **kwargs))
 
     def _fake_evaluate_snapshot(self, snapshot, decision=None, idempotency_key=None, limits=None):
         self._store.append_snapshot(
@@ -1107,10 +1191,10 @@ def test_reconciliacao_retoma_apos_falha_entre_snapshot_e_telegram(monkeypatch, 
     store = _store(tmp_path)
     session = _session(store, session_id="resume-telegram")
     contexto = _DummyContext({"chat_id": 123, "user_id": 123, "chat_type": "private", "session_id": session.record.session_id})
-    monkeypatch.setattr(paper_engine, "obter_outbox_paper_pendentes", lambda session_id=None: storage.obter_outbox_paper_pendentes(session_id=session_id, db_name=str(trades_db)))
+    monkeypatch.setattr(paper_engine, "obter_outbox_paper_pendentes", lambda session_id=None, **kwargs: storage.obter_outbox_paper_pendentes(session_id=session_id, db_name=str(trades_db), **kwargs))
     monkeypatch.setattr(paper_engine, "atualizar_outbox_paper_trade", lambda event_id, **kwargs: storage.atualizar_outbox_paper_trade(event_id, db_name=str(trades_db), **kwargs))
     monkeypatch.setattr(storage, "DB_NAME", str(trades_db))
-    monkeypatch.setattr(paper_engine, "obter_trades_paper_abertos", lambda symbol=None, session_id=None: storage.obter_trades_paper_abertos(symbol=symbol, session_id=session_id))
+    monkeypatch.setattr(paper_engine, "obter_trades_paper_abertos", lambda symbol=None, session_id=None, **kwargs: storage.obter_trades_paper_abertos(symbol=symbol, session_id=session_id, db_name=str(trades_db), **kwargs))
     monkeypatch.setattr(type(session), "evaluate_snapshot", lambda self, snapshot, decision=None, idempotency_key=None, limits=None: SimpleNamespace(monitoring_decision=SimpleNamespace(status="APPROVED"), session=self.record, approved=True), raising=False)
 
     agora = datetime.now(timezone.utc)
@@ -1197,7 +1281,7 @@ def test_reconciliacao_bloqueia_outbox_sem_evento_existente(monkeypatch, tmp_pat
     store = _store(tmp_path)
     session = _session(store, session_id=f"missing-{blocked_field}")
     contexto = _DummyContext({"chat_id": 123, "user_id": 123, "chat_type": "private", "session_id": session.record.session_id})
-    monkeypatch.setattr(paper_engine, "obter_outbox_paper_pendentes", lambda session_id=None: [
+    monkeypatch.setattr(paper_engine, "obter_outbox_paper_pendentes", lambda session_id=None, **kwargs: [
         paper_engine._paper_runtime_outbox_record(
             paper_engine._paper_runtime_outbox_payload(
                 operation_type="OPEN",
@@ -1286,11 +1370,11 @@ def test_timestamp_futuro_bloqueia_freshness(monkeypatch, tmp_path):
     store = _store(tmp_path)
     session = _session(store, session_id="future-candle")
     contexto = _DummyContext({"chat_id": 123, "user_id": 123, "chat_type": "private", "session_id": session.record.session_id})
-    monkeypatch.setattr(paper_engine, "get_monitored_session", lambda session_id=None, decision_hash=None, store=None: session if session_id == session.record.session_id else None)
+    monkeypatch.setattr(paper_engine, "get_monitored_session", lambda session_id=None, decision_hash=None, store=None, **kwargs: session if session_id == session.record.session_id else None)
     monkeypatch.setattr(paper_engine, "_runtime_monitoring_enabled", lambda: False)
     monkeypatch.setattr(paper_engine, "can_execute_sensitive_telegram_action", lambda *args, **kwargs: True)
     monkeypatch.setattr(paper_engine, "backtester", SimpleNamespace(baixar_dados_historicos=lambda symbol=None: _paper_df()))
-    monkeypatch.setattr(paper_engine, "obter_trades_paper_abertos", lambda symbol=None, session_id=None: storage.obter_trades_paper_abertos(symbol=symbol, session_id=session_id))
+    monkeypatch.setattr(paper_engine, "obter_trades_paper_abertos", lambda symbol=None, session_id=None, **kwargs: storage.obter_trades_paper_abertos(symbol=symbol, session_id=session_id, db_name=str(trades_db), **kwargs))
     monkeypatch.setattr(paper_engine, "classificar_regime", lambda df: {"regime": "BULL", "adx": 30, "volatilidade": "NORMAL"})
     monkeypatch.setattr(paper_engine, "esta_em_killzone", lambda: True)
     monkeypatch.setattr(paper_engine, "_obter_sinal_paper_sol", lambda: {"direcao": "COMPRA", "entrada": 100.0, "stop_loss": 95.0, "take_profit": 110.0, "rr": 2.0, "motivo": "ok"})
@@ -1392,7 +1476,7 @@ def test_trade_aberto_persistido_expoe_tipo_status_e_limites_reais(monkeypatch, 
         db_name=str(trades_db),
     )
 
-    trades_abertos = storage.obter_trades_paper_abertos("SOLUSDT")
+    trades_abertos = storage.obter_trades_paper_abertos("SOLUSDT", db_name=str(trades_db))
     assert all(trade["tipo"] == "paper" for trade in trades_abertos)
     assert all(trade["status"] == "open" for trade in trades_abertos)
 
@@ -1441,7 +1525,7 @@ def test_outbox_json_tampered_bloqueia_reconciliacao(monkeypatch, tmp_path):
         )
     )
     outbox["payload_json"] = "{"
-    monkeypatch.setattr(paper_engine, "obter_outbox_paper_pendentes", lambda session_id=None: [outbox])
+    monkeypatch.setattr(paper_engine, "obter_outbox_paper_pendentes", lambda session_id=None, **kwargs: [outbox])
     monkeypatch.setattr(paper_engine, "atualizar_outbox_paper_trade", lambda *args, **kwargs: True)
 
     import asyncio
@@ -1480,7 +1564,7 @@ def test_outbox_hash_tampered_bloqueia_reconciliacao(monkeypatch, tmp_path):
         )
     )
     outbox["request_hash"] = "bad-hash"
-    monkeypatch.setattr(paper_engine, "obter_outbox_paper_pendentes", lambda session_id=None: [outbox])
+    monkeypatch.setattr(paper_engine, "obter_outbox_paper_pendentes", lambda session_id=None, **kwargs: [outbox])
     monkeypatch.setattr(paper_engine, "atualizar_outbox_paper_trade", lambda *args, **kwargs: True)
 
     import asyncio

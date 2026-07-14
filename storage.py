@@ -18,6 +18,10 @@ class PaperTradeFinalizationError(Exception):
     pass
 
 
+class PaperTradeStorageReadError(Exception):
+    pass
+
+
 def _agora_iso():
     return datetime.now(timezone.utc).isoformat()
 
@@ -44,6 +48,13 @@ def _normalizar(valor, padrao="N/A"):
     if isinstance(valor, str) and not valor.strip():
         return padrao
     return valor
+
+
+def _tratar_falha_leitura_storage(contexto: str, exc: Exception, *, strict: bool):
+    logging.warning(f"{contexto} indisponivel: {exc.__class__.__name__}")
+    if strict:
+        raise PaperTradeStorageReadError(contexto) from exc
+    return []
 
 
 def _trade_cost_helpers(direcao, entrada, quantidade, trade_costs):
@@ -458,7 +469,7 @@ def registrar_paper_trade_outbox(
         return None
 
 
-def obter_outbox_paper_pendentes(session_id=None, db_name=DB_NAME):
+def obter_outbox_paper_pendentes(session_id=None, db_name=DB_NAME, strict=False):
     try:
         inicializar_banco(db_name)
         with sqlite3.connect(db_name) as conn:
@@ -501,8 +512,7 @@ def obter_outbox_paper_pendentes(session_id=None, db_name=DB_NAME):
             for row in rows
         ]
     except Exception as exc:
-        logging.warning(f"Falha ao buscar outbox paper trade: {exc}")
-        return []
+        return _tratar_falha_leitura_storage("Falha ao buscar outbox paper trade", exc, strict=strict)
 
 
 def atualizar_outbox_paper_trade(
@@ -690,9 +700,9 @@ def buscar_trades_paper(limite=10, symbol="SOLUSDT"):
         return []
 
 
-def obter_trades_paper_abertos(symbol="SOLUSDT", session_id=None):
+def obter_trades_paper_abertos(symbol="SOLUSDT", session_id=None, db_name=DB_NAME, strict=False):
     try:
-        with sqlite3.connect(DB_NAME) as conn:
+        with sqlite3.connect(db_name) as conn:
             cursor = conn.cursor()
             query = """
                 SELECT id, timestamp, simbolo, session_id, direcao, entrada, stop_loss, take_profit, quantidade, valor_arriscado,
@@ -742,8 +752,7 @@ def obter_trades_paper_abertos(symbol="SOLUSDT", session_id=None):
             )
         return trades
     except Exception as exc:
-        logging.warning(f"Falha ao buscar trades paper abertos: {exc}")
-        return []
+        return _tratar_falha_leitura_storage("Falha ao buscar trades paper abertos", exc, strict=strict)
 
 
 def registrar_trade_paper(
@@ -1240,7 +1249,7 @@ def reset_db(db_name=DB_NAME):
         return False
 
 
-def obter_ultimos_trades_paper(symbol="SOLUSDT", limite=30, db_name=DB_NAME, session_id=None):
+def obter_ultimos_trades_paper(symbol="SOLUSDT", limite=30, db_name=DB_NAME, session_id=None, strict=False):
     try:
         with sqlite3.connect(db_name) as conn:
             cursor = conn.cursor()
@@ -1294,8 +1303,7 @@ def obter_ultimos_trades_paper(symbol="SOLUSDT", limite=30, db_name=DB_NAME, ses
             )
         return list(reversed(trades))
     except Exception as exc:
-        logging.warning(f"Falha ao buscar ultimos trades paper: {exc}")
-        return []
+        return _tratar_falha_leitura_storage("Falha ao buscar ultimos trades paper", exc, strict=strict)
 
 
 def calcular_metricas_trade_history(trades):

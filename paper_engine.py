@@ -33,6 +33,7 @@ from storage import (
     obter_outbox_paper_pendentes,
     log_decisao,
     obter_trades_paper_abertos,
+    obter_ultimos_trades_paper,
     registrar_paper_trade_outbox,
     registrar_trade_paper,
     atualizar_outbox_paper_trade,
@@ -447,7 +448,7 @@ def _paper_runtime_outbox_state_allows_update(current_status: str, updates: dict
 
 
 async def _reconciliar_paper_runtime_outbox(context, runtime_session, *, session_scope_id, chat_id):
-    pendentes = obter_outbox_paper_pendentes(session_id=session_scope_id)
+    pendentes = obter_outbox_paper_pendentes(session_id=session_scope_id, strict=True)
     if not pendentes:
         return False
     if runtime_session is None:
@@ -476,7 +477,7 @@ async def _reconciliar_paper_runtime_outbox(context, runtime_session, *, session
 
             snapshot_context = payload.get("snapshot_context") or {}
             if outbox["snapshot_applied_at_utc"] is None and snapshot_context is not None:
-                current_trades = obter_trades_paper_abertos(PAPER_SYMBOL, session_id=session_scope_id)
+                current_trades = obter_trades_paper_abertos(PAPER_SYMBOL, session_id=session_scope_id, strict=True)
                 candle_close_time = datetime.fromisoformat(payload["candle_close_time"].replace("Z", "+00:00"))
                 delta_seconds = (datetime.now(timezone.utc) - candle_close_time.astimezone(timezone.utc)).total_seconds()
                 data_fresh = 0 <= delta_seconds <= 2 * 3600
@@ -681,7 +682,7 @@ def _remover_jobs_runtime_monitorado(context, session_id: str | None) -> None:
             job.schedule_removal()
 
 
-def _coletar_runtime_observed_state(*, session, decision, df, trades_abertos, preco_atual, regime_info, data_fresh_hint=None):
+def _coletar_runtime_observed_state(*, session, decision, df, trades_abertos, preco_atual, regime_info, data_fresh_hint=None, closed_trades=None):
     if df is None or getattr(df, "empty", True):
         data_fresh = bool(data_fresh_hint) if data_fresh_hint is not None else False
     elif "close_time" not in df.columns:
@@ -704,12 +705,13 @@ def _coletar_runtime_observed_state(*, session, decision, df, trades_abertos, pr
         for trade in trades_abertos
         if (trade.get("tipo") == "paper" or trade.get("status") == "open") and trade.get("session_id") == session_id
     ]
-    try:
-        from storage import obter_ultimos_trades_paper
+    if closed_trades is None:
+        try:
+            from storage import obter_ultimos_trades_paper
 
-        closed_trades = obter_ultimos_trades_paper(symbol=PAPER_SYMBOL, limite=500, session_id=session_id)
-    except Exception as exc:
-        raise PaperRuntimeSessionError("failed to load closed paper trades.") from exc
+            closed_trades = obter_ultimos_trades_paper(symbol=PAPER_SYMBOL, limite=500, session_id=session_id, strict=True)
+        except Exception as exc:
+            raise PaperRuntimeSessionError("failed to load closed paper trades.") from exc
 
     def _trade_timestamp_key(trade: dict):
         timestamp_value = trade.get("fechado_em") or trade.get("saida_em") or trade.get("timestamp") or trade.get("aberto_em")
@@ -1235,6 +1237,20 @@ async def monitorar_paper_sol(context):
             )
             return
 
+        try:
+            aberto_preflight = obter_trades_paper_abertos(PAPER_SYMBOL, session_id=session_scope_id, strict=True)
+            closed_trades_preflight = obter_ultimos_trades_paper(symbol=PAPER_SYMBOL, limite=500, session_id=session_scope_id, strict=True)
+        except Exception as exc:
+            _bloquear_runtime_monitorado(
+                "Falha na leitura critica do storage antes da coleta de mercado.",
+                chat_id=chat_id,
+                regime_info=None,
+                fonte_dados="N/D",
+                erro=exc.__class__.__name__,
+            )
+            logging.warning(f"Falha na leitura critica do storage: {exc.__class__.__name__}")
+            return
+
         df = backtester.baixar_dados_historicos(symbol=PAPER_SYMBOL)
         if df is None or df.empty:
             registrar_decisao_observabilidade(
@@ -1259,7 +1275,7 @@ async def monitorar_paper_sol(context):
         candle = df.iloc[-1]
         candle_close_time = _paper_runtime_close_timestamp(df)
         regime_info = classificar_regime(df)
-        aberto = obter_trades_paper_abertos(PAPER_SYMBOL, session_id=session_scope_id)
+        aberto = aberto_preflight
 
         runtime_costs = None
         if _runtime_monitoring_enabled():
@@ -1282,6 +1298,7 @@ async def monitorar_paper_sol(context):
                 trades_abertos=aberto,
                 preco_atual=preco_atual,
                 regime_info=regime_info,
+                closed_trades=closed_trades_preflight,
             )
             try:
                 runtime_snapshot_pre = build_snapshot_from_observed_state(
@@ -1343,7 +1360,7 @@ async def monitorar_paper_sol(context):
             close_time=candle_close_time,
         ):
             if _runtime_monitoring_enabled() and runtime_session is not None and runtime_costs is not None:
-                aberto_pos = obter_trades_paper_abertos(PAPER_SYMBOL, session_id=session_scope_id)
+                aberto_pos = obter_trades_paper_abertos(PAPER_SYMBOL, session_id=session_scope_id, strict=True)
                 runtime_observed_post = _coletar_runtime_observed_state(
                     session=runtime_session,
                     decision=runtime_session.decision,
@@ -1351,6 +1368,7 @@ async def monitorar_paper_sol(context):
                     trades_abertos=aberto_pos,
                     preco_atual=preco_atual,
                     regime_info=regime_info,
+                    closed_trades=closed_trades_preflight,
                 )
                 runtime_snapshot_post = build_snapshot_from_observed_state(
                     session=runtime_session.record,
