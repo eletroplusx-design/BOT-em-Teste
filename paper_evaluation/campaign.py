@@ -61,12 +61,6 @@ def _require_datetime(value: Any, field_name: str) -> datetime:
     return value.astimezone(timezone.utc)
 
 
-def _require_now_utc(value: datetime | None, field_name: str = "now") -> datetime:
-    if value is None:
-        return _utcnow()
-    return _require_datetime(value, field_name)
-
-
 def _require_decimal(value: Any, field_name: str, *, allow_negative: bool = False) -> Decimal:
     if isinstance(value, Decimal):
         result = value
@@ -983,6 +977,22 @@ def _parse_utc_datetime(value: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def _load_json_file(path_value: str, *, field_name: str) -> Any:
+    path = Path(path_value)
+    if not path.is_file():
+        raise PaperCampaignManifestError(f"{field_name} file not found.")
+    try:
+        content = path.read_text(encoding="utf-8").strip()
+    except Exception as exc:
+        raise PaperCampaignManifestError(f"failed to read {field_name} file.") from exc
+    if not content:
+        raise PaperCampaignManifestError(f"{field_name} file is empty.")
+    try:
+        return json.loads(content)
+    except Exception as exc:
+        raise PaperCampaignManifestError(f"{field_name} file is invalid JSON.") from exc
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m paper_evaluation.campaign", description="Paper campaign administration commands.")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -998,8 +1008,8 @@ def build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--inclusion-rule", required=True)
     prepare.add_argument("--period-start-utc", required=True)
     prepare.add_argument("--period-end-utc", required=True)
-    prepare.add_argument("--policy-json", required=True, help="JSON representation of PaperEvaluationPolicy.as_dict().")
-    prepare.add_argument("--reference-json", required=True, help="JSON representation of WalkForwardResult.as_dict().")
+    prepare.add_argument("--policy-file", required=True, help="Path to a UTF-8 JSON file containing PaperEvaluationPolicy.as_dict().")
+    prepare.add_argument("--reference-file", required=True, help="Path to a UTF-8 JSON file containing WalkForwardResult.as_dict().")
     prepare.add_argument("--evaluator-version", default="v8_paper_evaluation")
 
     status = subparsers.add_parser("status", help="Show a sanitized campaign status snapshot.")
@@ -1013,19 +1023,13 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--trades-db", default="trades.db")
 
     return parser
-
-
-def _load_json_argument(value: str) -> Any:
-    return json.loads(value)
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
         if args.command == "prepare":
-            policy_payload = _load_json_argument(args.policy_json)
-            reference_payload = _load_json_argument(args.reference_json)
+            policy_payload = _load_json_file(args.policy_file, field_name="policy")
+            reference_payload = _load_json_file(args.reference_file, field_name="reference")
             with _campaign_load_mode():
                 policy = PaperEvaluationPolicy(**policy_payload)
             reference = _walk_forward_from_payload(reference_payload)

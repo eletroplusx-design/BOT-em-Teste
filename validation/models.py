@@ -360,7 +360,7 @@ class FrozenSelection:
             raise ValidationSelectionError("window_id is required.")
 
     def as_dict(self) -> dict[str, Any]:
-        payload = {
+        return {
             "candidate": self.candidate.as_dict(),
             "strategy_version": self.strategy_version,
             "costs": {key: value for key, value in self.costs},
@@ -371,10 +371,6 @@ class FrozenSelection:
             "manifest_hash": self.manifest_hash,
             "window_id": self.window_id,
         }
-        execution_contract = payload.get("execution_contract")
-        if isinstance(execution_contract, dict) and execution_contract.get("regime") is not None:
-            payload["regime"] = execution_contract["regime"]
-        return payload
 
 
 @dataclass(frozen=True, slots=True)
