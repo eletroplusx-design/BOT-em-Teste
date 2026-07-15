@@ -5,6 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Sequence
 
+from config import resolve_paper_runtime_db_path, resolve_trades_db_path
 from validation import WalkForwardResult
 
 from .evaluator import _evaluate_paper_sessions_from_operational_batch, evaluate_paper_sessions
@@ -22,8 +23,8 @@ def _normalize_session_ids(session_ids: Sequence[str] | None) -> tuple[str, ...]
 
 @dataclass(frozen=True, slots=True)
 class PaperEvaluationAdapter:
-    runtime_db_path: str | Path = "paper_runtime.db"
-    trades_db_path: str | Path = "trades.db"
+    runtime_db_path: str | Path = resolve_paper_runtime_db_path()
+    trades_db_path: str | Path = resolve_trades_db_path()
     policy: PaperEvaluationPolicy | None = None
     reference_walk_forward: WalkForwardResult | None = None
     evaluation_id: str | None = None
@@ -107,8 +108,8 @@ class PaperEvaluationAdapter:
 
 def evaluate_paper_sessions_from_storage(
     *,
-    runtime_db_path: str | Path = "paper_runtime.db",
-    trades_db_path: str | Path = "trades.db",
+    runtime_db_path: str | Path = resolve_paper_runtime_db_path(),
+    trades_db_path: str | Path = resolve_trades_db_path(),
     policy: PaperEvaluationPolicy | None = None,
     reference_walk_forward: WalkForwardResult | None = None,
     evaluation_id: str | None = None,
@@ -138,8 +139,8 @@ def evaluate_paper_sessions_from_storage(
 def load_paper_session_evidence(
     session_id: str,
     *,
-    runtime_db_path: str | Path = "paper_runtime.db",
-    trades_db_path: str | Path = "trades.db",
+    runtime_db_path: str | Path = resolve_paper_runtime_db_path(),
+    trades_db_path: str | Path = resolve_trades_db_path(),
 ):
     evidences, rejections = load_paper_session_evidence_batch(
         runtime_db_path=runtime_db_path,

@@ -9,6 +9,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from config import resolve_paper_runtime_db_path, resolve_trades_db_path
 from domain.serialization import serialize_value
 from paper_runtime import PaperRuntimeEventType, PaperRuntimeSessionError, PaperRuntimeState
 from paper_runtime.audit import chain_hash, event_content_hash
@@ -591,8 +592,8 @@ def _validate_runtime_schema(conn: sqlite3.Connection) -> None:
 def load_paper_session_evidence(
     session_id: str,
     *,
-    runtime_db_path: str | Path = "paper_runtime.db",
-    trades_db_path: str | Path = "trades.db",
+    runtime_db_path: str | Path = resolve_paper_runtime_db_path(),
+    trades_db_path: str | Path = resolve_trades_db_path(),
 ) -> PaperSessionEvidence:
     session_id = _strict_str(session_id, "session_id")
     runtime_db_path = Path(runtime_db_path)
@@ -730,8 +731,8 @@ def load_paper_session_evidence(
 
 def load_operational_evidence_batch(
     *,
-    runtime_db_path: str | Path = "paper_runtime.db",
-    trades_db_path: str | Path = "trades.db",
+    runtime_db_path: str | Path = resolve_paper_runtime_db_path(),
+    trades_db_path: str | Path = resolve_trades_db_path(),
 ) -> _OperationalEvidenceBatch:
     runtime_db_path = Path(runtime_db_path)
     trades_db_path = Path(trades_db_path)
@@ -771,8 +772,8 @@ def load_operational_evidence_batch(
 
 def load_paper_session_evidence_batch(
     *,
-    runtime_db_path: str | Path = "paper_runtime.db",
-    trades_db_path: str | Path = "trades.db",
+    runtime_db_path: str | Path = resolve_paper_runtime_db_path(),
+    trades_db_path: str | Path = resolve_trades_db_path(),
     period_start_utc: datetime | None = None,
     period_end_utc: datetime | None = None,
     session_ids: Iterable[str] | None = None,

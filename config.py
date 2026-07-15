@@ -1,5 +1,7 @@
 import os
+import tempfile
 from typing import Set
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -54,6 +56,9 @@ TELEGRAM_GROUPS_ENABLED, TELEGRAM_GROUPS_ENABLED_INVALID = _parse_bool(
 # APIs
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
+# Diretório persistente local para a campanha paper monitorada
+PAPER_DATA_DIR = os.getenv("PAPER_DATA_DIR", "")
+
 # Trading switches
 TRADING_ENABLED, TRADING_ENABLED_INVALID = _parse_bool(os.getenv("TRADING_ENABLED"), False)
 LIVE_TRADING_ENABLED, LIVE_TRADING_ENABLED_INVALID = _parse_bool(os.getenv("LIVE_TRADING_ENABLED"), False)
@@ -87,6 +92,49 @@ DISTANCIA_MAX_PCT = 10.0
 
 # Versao
 STRATEGY_VERSION = "v2_risk_safe"
+
+_DEFAULT_PAPER_DATA_DIR = Path.cwd() / ".paper_data"
+
+
+def _is_temporary_path(path: Path) -> bool:
+    temp_root = Path(tempfile.gettempdir()).resolve()
+    try:
+        resolved = path.resolve()
+    except Exception:
+        resolved = path
+    return resolved == temp_root or temp_root in resolved.parents
+
+
+def resolve_paper_data_dir(value: str | Path | None = None, *, allow_temporary: bool = False) -> Path:
+    raw_value = value if value is not None else (PAPER_DATA_DIR or _DEFAULT_PAPER_DATA_DIR)
+    path = Path(raw_value).expanduser()
+    if not path.is_absolute():
+        path = (Path.cwd() / path).resolve()
+    else:
+        path = path.resolve()
+    if not allow_temporary and _is_temporary_path(path):
+        raise ValueError("PAPER_DATA_DIR cannot point to a temporary directory.")
+    return path
+
+
+def resolve_paper_db_path(filename: str, *, paper_data_dir: str | Path | None = None) -> Path:
+    return resolve_paper_data_dir(paper_data_dir) / filename
+
+
+def resolve_trades_db_path(*, paper_data_dir: str | Path | None = None) -> Path:
+    return resolve_paper_db_path("trades.db", paper_data_dir=paper_data_dir)
+
+
+def resolve_paper_runtime_db_path(*, paper_data_dir: str | Path | None = None) -> Path:
+    return resolve_paper_db_path("paper_runtime.db", paper_data_dir=paper_data_dir)
+
+
+def resolve_paper_campaign_db_path(*, paper_data_dir: str | Path | None = None) -> Path:
+    return resolve_paper_db_path("paper_evaluation_campaign.db", paper_data_dir=paper_data_dir)
+
+
+def resolve_paper_backup_dir(*, paper_data_dir: str | Path | None = None) -> Path:
+    return resolve_paper_data_dir(paper_data_dir) / "backups"
 
 
 def is_telegram_authorized(chat_id: int | None) -> bool:

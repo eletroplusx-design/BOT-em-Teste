@@ -15,6 +15,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
+from config import resolve_paper_campaign_db_path, resolve_paper_runtime_db_path, resolve_trades_db_path
 from domain.serialization import serialize_value
 from validation import WalkForwardResult
 from validation.artifacts import manifest_hash as validation_manifest_hash
@@ -770,8 +771,8 @@ def create_operational_paper_campaign(
     policy: PaperEvaluationPolicy,
     reference_walk_forward: WalkForwardResult,
     evaluator_version: str = "v8_paper_evaluation",
-    runtime_db_path: str | Path = "paper_runtime.db",
-    campaign_db_path: str | Path = "paper_evaluation_campaign.db",
+    runtime_db_path: str | Path = resolve_paper_runtime_db_path(),
+    campaign_db_path: str | Path = resolve_paper_campaign_db_path(),
 ) -> OperationalPaperCampaignContract:
     policy_floor_reasons = _validate_policy_floor(policy)
     period_start = _require_datetime(period_start_utc, "period_start_utc")
@@ -839,7 +840,7 @@ def _current_campaign_state(contract: OperationalPaperCampaignContract, *, now: 
 def get_operational_paper_campaign_status(
     *,
     campaign_id: str,
-    campaign_db_path: str | Path = "paper_evaluation_campaign.db",
+    campaign_db_path: str | Path = resolve_paper_campaign_db_path(),
 ) -> OperationalPaperCampaignStatusSnapshot:
     current = _utcnow()
     try:
@@ -903,9 +904,9 @@ def _campaign_result_from_report(
 def evaluate_operational_paper_campaign(
     *,
     campaign_id: str,
-    campaign_db_path: str | Path = "paper_evaluation_campaign.db",
-    runtime_db_path: str | Path = "paper_runtime.db",
-    trades_db_path: str | Path = "trades.db",
+    campaign_db_path: str | Path = resolve_paper_campaign_db_path(),
+    runtime_db_path: str | Path = resolve_paper_runtime_db_path(),
+    trades_db_path: str | Path = resolve_trades_db_path(),
 ) -> OperationalPaperCampaignReport:
     current = _utcnow()
     contract = load_operational_paper_campaign_contract(campaign_db_path, campaign_id=campaign_id)
@@ -999,8 +1000,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     prepare = subparsers.add_parser("prepare", help="Prepare a new operational paper campaign.")
     prepare.add_argument("--campaign-id", required=True)
-    prepare.add_argument("--campaign-db", default="paper_evaluation_campaign.db")
-    prepare.add_argument("--runtime-db", default="paper_runtime.db")
+    prepare.add_argument("--campaign-db", default=str(resolve_paper_campaign_db_path()))
+    prepare.add_argument("--runtime-db", default=str(resolve_paper_runtime_db_path()))
     prepare.add_argument("--cohort-hash", required=False)
     prepare.add_argument("--strategy-version", required=True)
     prepare.add_argument("--symbol", required=True)
@@ -1014,13 +1015,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     status = subparsers.add_parser("status", help="Show a sanitized campaign status snapshot.")
     status.add_argument("--campaign-id", required=True)
-    status.add_argument("--campaign-db", default="paper_evaluation_campaign.db")
+    status.add_argument("--campaign-db", default=str(resolve_paper_campaign_db_path()))
 
     evaluate = subparsers.add_parser("evaluate", help="Evaluate a finished operational paper campaign.")
     evaluate.add_argument("--campaign-id", required=True)
-    evaluate.add_argument("--campaign-db", default="paper_evaluation_campaign.db")
-    evaluate.add_argument("--runtime-db", default="paper_runtime.db")
-    evaluate.add_argument("--trades-db", default="trades.db")
+    evaluate.add_argument("--campaign-db", default=str(resolve_paper_campaign_db_path()))
+    evaluate.add_argument("--runtime-db", default=str(resolve_paper_runtime_db_path()))
+    evaluate.add_argument("--trades-db", default=str(resolve_trades_db_path()))
 
     return parser
 def main(argv: list[str] | None = None) -> int:

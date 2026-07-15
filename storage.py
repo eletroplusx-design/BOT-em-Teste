@@ -6,8 +6,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from config import resolve_trades_db_path
 
-DB_NAME = "trades.db"
+
+DB_NAME = str(resolve_trades_db_path())
 STRATEGY_VERSION_DEFAULT = "v2_risk_safe"
 
 
@@ -1416,3 +1418,16 @@ def registrar_validacao_sol(total_trades, profit_factor, win_rate, drawdown_max,
     except Exception as exc:
         logging.warning(f"Falha ao registrar validacao SOL: {exc}")
         return False
+
+
+def _ensure_default_storage_ready() -> None:
+    default_path = Path(DB_NAME)
+    try:
+        default_path.parent.mkdir(parents=True, exist_ok=True)
+        criar_tabelas(str(default_path))
+        inicializar_banco(str(default_path))
+    except Exception as exc:  # pragma: no cover - best effort bootstrap
+        logging.warning(f"Falha ao inicializar storage padrao: {exc.__class__.__name__}")
+
+
+_ensure_default_storage_ready()
