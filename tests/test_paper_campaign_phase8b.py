@@ -13,10 +13,12 @@ from unittest.mock import patch
 import pytest
 
 import paper_evaluation.campaign as campaign_module
+import paper_evaluation.evidence as evidence_module
 import paper_evaluation._operational as operational_module
 from paper_evaluation import (
     PaperCampaignManifestError,
     PaperCampaignPolicyError,
+    PaperEvaluationEvidenceError,
     PaperEvaluationPolicy,
     PaperEvaluationStatus,
 )
@@ -487,6 +489,33 @@ def test_campaign_frozen_selection_hash_and_json_remain_stable(tmp_path):
         )
     assert contract.walk_forward_manifest_hash == reference["manifest"]["manifest_hash"]
     assert contract.walk_forward_result_hash == campaign_module.paper_evaluation_hash(reference)
+
+
+@pytest.mark.parametrize(
+    ("configuration", "expected"),
+    [
+        ({"regime": "bull"}, "BULL"),
+        ({"execution_contract": {"regime": "BEAR"}}, "BEAR"),
+        ({"regime": "CHOP", "execution_contract": {"regime": "CHOP"}}, "CHOP"),
+        ({}, None),
+    ],
+)
+def test_campaign_normalize_regime_accepts_valid_sources(configuration, expected):
+    assert evidence_module._normalize_regime(configuration) == expected
+
+
+@pytest.mark.parametrize(
+    ("configuration", "message"),
+    [
+        ({"regime": "INVALID", "execution_contract": {"regime": "BULL"}}, "configuration.regime"),
+        ({"regime": "BULL", "execution_contract": {"regime": "BEAR"}}, "regime divergence"),
+        ({"execution_contract": {"regime": "INVALID"}}, "configuration.execution_contract.regime"),
+        ({"regime": ""}, "configuration.regime"),
+    ],
+)
+def test_campaign_normalize_regime_blocks_invalid_or_divergent_values(configuration, message):
+    with pytest.raises(PaperEvaluationEvidenceError, match=message):
+        evidence_module._normalize_regime(configuration)
 
 
 def test_campaign_reference_and_policy_tamper_in_sqlite_block(tmp_path):

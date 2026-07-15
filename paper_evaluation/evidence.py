@@ -93,15 +93,30 @@ def _strict_bool(value: Any, field_name: str) -> bool:
 
 
 def _normalize_regime(configuration: Mapping[str, Any]) -> str | None:
-    candidates = [
-        configuration.get("regime"),
-        (configuration.get("execution_contract") or {}).get("regime") if isinstance(configuration.get("execution_contract"), Mapping) else None,
-    ]
-    for candidate in candidates:
-        if type(candidate) is str:
-            regime = candidate.strip().upper()
-            if regime in {"BULL", "BEAR", "CHOP"}:
-                return regime
+    top_level_present = "regime" in configuration
+    top_level_value = configuration.get("regime")
+    nested_mapping = configuration.get("execution_contract")
+    nested_present = isinstance(nested_mapping, Mapping) and "regime" in nested_mapping
+    nested_value = nested_mapping.get("regime") if nested_present else None
+
+    def _strict_regime(value: Any, field_name: str) -> str:
+        if type(value) is not str:
+            raise PaperEvaluationEvidenceError(f"{field_name} must be a regime string.")
+        regime = value.strip().upper()
+        if regime not in {"BULL", "BEAR", "CHOP"}:
+            raise PaperEvaluationEvidenceError(f"{field_name} must be BULL, BEAR or CHOP.")
+        return regime
+
+    if top_level_present:
+        top_level_regime = _strict_regime(top_level_value, "configuration.regime")
+        if nested_present:
+            nested_regime = _strict_regime(nested_value, "configuration.execution_contract.regime")
+            if top_level_regime != nested_regime:
+                raise PaperEvaluationEvidenceError("regime divergence between configuration and execution contract.")
+        return top_level_regime
+
+    if nested_present:
+        return _strict_regime(nested_value, "configuration.execution_contract.regime")
     return None
 
 
