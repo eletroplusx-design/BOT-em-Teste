@@ -24,3 +24,19 @@ class PaperEvaluationManifestError(PaperEvaluationError):
 
 class PaperEvaluationReadError(PaperEvaluationError):
     """Raised when strict SQLite reads fail closed."""
+
+
+class PaperCampaignError(PaperEvaluationError):
+    """Raised when a paper campaign contract or evaluation is invalid."""
+
+
+class PaperCampaignPolicyError(PaperCampaignError):
+    """Raised when a campaign policy is contradictory or below operational floors."""
+
+
+class PaperCampaignManifestError(PaperCampaignError):
+    """Raised when a campaign contract or persisted payload is invalid."""
+
+
+class PaperCampaignReadError(PaperCampaignError):
+    """Raised when campaign persistence cannot be read safely."""

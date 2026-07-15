@@ -202,6 +202,7 @@ def persist_operational_cohort_contract(
 def load_latest_operational_cohort_contract(
     db_path: str | Path,
     *,
+    cohort_hash: str | None = None,
     strategy_version: str | None = None,
     symbol: str | None = None,
     interval: str | None = None,
@@ -220,6 +221,9 @@ def load_latest_operational_cohort_contract(
         if strategy_version is not None:
             filters.append("strategy_version = ?")
             params.append(_require_str(strategy_version, "strategy_version"))
+        if cohort_hash is not None:
+            filters.append("cohort_hash = ?")
+            params.append(_require_str(cohort_hash, "cohort_hash"))
         if symbol is not None:
             filters.append("symbol = ?")
             params.append(_require_str(symbol, "symbol"))
