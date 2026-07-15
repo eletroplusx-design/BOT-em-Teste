@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
+import sys
 from collections.abc import Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -109,7 +110,10 @@ def _validate_policy_floor(policy: PaperEvaluationPolicy) -> tuple[str, ...]:
         reasons.append("min_duration_hours below operational floor.")
     if policy.max_drawdown_percent > Decimal("15"):
         reasons.append("max_drawdown_percent above operational floor.")
-    if policy.min_profit_factor < Decimal("1.10"):
+    min_profit_factor = getattr(policy, "min_profit_factor", None)
+    if min_profit_factor is None:
+        reasons.append("min_profit_factor below operational floor.")
+    elif min_profit_factor < Decimal("1.10"):
         reasons.append("min_profit_factor below operational floor.")
     if policy.min_expectancy < Decimal("0"):
         reasons.append("min_expectancy below operational floor.")
@@ -157,6 +161,82 @@ def _reference_hashes(reference: WalkForwardResult) -> tuple[dict[str, Any], str
 
 def _policy_hash(policy: PaperEvaluationPolicy) -> str:
     return policy.policy_hash
+
+
+def _reference_scope_is_compatible(
+    reference_payload: Mapping[str, Any],
+    *,
+    strategy_version: str,
+    symbol: str,
+    interval: str,
+) -> None:
+    manifest = reference_payload.get("manifest")
+    if not isinstance(manifest, Mapping):
+        raise PaperCampaignManifestError("walk-forward manifest is invalid.")
+    if manifest.get("strategy_version") != strategy_version:
+        raise PaperCampaignManifestError("walk-forward strategy_version mismatch.")
+    if manifest.get("symbol") != symbol:
+        raise PaperCampaignManifestError("walk-forward symbol mismatch.")
+    if manifest.get("interval") != interval:
+        raise PaperCampaignManifestError("walk-forward interval mismatch.")
+    execution_contract = manifest.get("execution_contract")
+    if not isinstance(execution_contract, Mapping):
+        raise PaperCampaignManifestError("walk-forward execution contract is invalid.")
+    if execution_contract.get("paper_only") is not True:
+        raise PaperCampaignManifestError("walk-forward reference must be paper_only.")
+    if execution_contract.get("strategy_version") != strategy_version:
+        raise PaperCampaignManifestError("walk-forward execution contract strategy mismatch.")
+    if execution_contract.get("symbol") != symbol:
+        raise PaperCampaignManifestError("walk-forward execution contract symbol mismatch.")
+    if execution_contract.get("interval") != interval:
+        raise PaperCampaignManifestError("walk-forward execution contract interval mismatch.")
+    windows = reference_payload.get("windows", [])
+    if not isinstance(windows, list) or not windows:
+        raise PaperCampaignManifestError("walk-forward windows are required.")
+    for window in windows:
+        if not isinstance(window, Mapping):
+            raise PaperCampaignManifestError("walk-forward window payload is invalid.")
+        frozen_selection = window.get("frozen_selection")
+        if frozen_selection is None:
+            raise PaperCampaignManifestError("walk-forward frozen selection is required.")
+        if not isinstance(frozen_selection, Mapping):
+            raise PaperCampaignManifestError("walk-forward frozen selection payload is invalid.")
+        if frozen_selection.get("strategy_version") != strategy_version:
+            raise PaperCampaignManifestError("walk-forward frozen selection strategy mismatch.")
+        if frozen_selection.get("symbol") != symbol:
+            raise PaperCampaignManifestError("walk-forward frozen selection symbol mismatch.")
+        if frozen_selection.get("interval") != interval:
+            raise PaperCampaignManifestError("walk-forward frozen selection interval mismatch.")
+        frozen_execution_contract = frozen_selection.get("execution_contract")
+        if not isinstance(frozen_execution_contract, Mapping):
+            raise PaperCampaignManifestError("walk-forward frozen selection execution contract is invalid.")
+        if frozen_execution_contract.get("paper_only") is not True:
+            raise PaperCampaignManifestError("walk-forward frozen selection must be paper_only.")
+        if frozen_execution_contract.get("strategy_version") != strategy_version:
+            raise PaperCampaignManifestError("walk-forward frozen selection execution contract strategy mismatch.")
+        if frozen_execution_contract.get("symbol") != symbol:
+            raise PaperCampaignManifestError("walk-forward frozen selection execution contract symbol mismatch.")
+        if frozen_execution_contract.get("interval") != interval:
+            raise PaperCampaignManifestError("walk-forward frozen selection execution contract interval mismatch.")
+
+
+def _reference_from_contract(contract: "OperationalPaperCampaignContract") -> WalkForwardResult:
+    reference_payload = dict(contract.reference_payload_json)
+    reference = _walk_forward_from_payload(reference_payload)
+    payload, manifest_hash_value, result_hash = _reference_hashes(reference)
+    if serialize_value(payload) != reference_payload:
+        raise PaperCampaignManifestError("walk-forward reference payload mismatch.")
+    if manifest_hash_value != contract.walk_forward_manifest_hash:
+        raise PaperCampaignManifestError("walk-forward manifest hash mismatch.")
+    if result_hash != contract.walk_forward_result_hash:
+        raise PaperCampaignManifestError("walk-forward result hash mismatch.")
+    _reference_scope_is_compatible(
+        reference_payload,
+        strategy_version=contract.strategy_version,
+        symbol=contract.symbol,
+        interval=contract.interval,
+    )
+    return reference
 
 
 def _paper_report_payload(value: Any | None) -> dict[str, Any] | None:
@@ -261,6 +341,7 @@ class OperationalPaperCampaignContract:
     period_start_utc: datetime
     period_end_utc: datetime
     policy_payload: Mapping[str, Any]
+    reference_payload_json: Mapping[str, Any]
     policy_hash: str
     walk_forward_manifest_hash: str
     walk_forward_result_hash: str
@@ -280,6 +361,7 @@ class OperationalPaperCampaignContract:
         if self.period_end_utc <= self.period_start_utc:
             raise PaperCampaignManifestError("period_end_utc must be later than period_start_utc.")
         object.__setattr__(self, "policy_payload", dict(self.policy_payload))
+        object.__setattr__(self, "reference_payload_json", MappingProxyType(dict(self.reference_payload_json)))
         object.__setattr__(self, "policy_hash", _require_str(self.policy_hash, "policy_hash"))
         object.__setattr__(self, "walk_forward_manifest_hash", _require_str(self.walk_forward_manifest_hash, "walk_forward_manifest_hash"))
         object.__setattr__(self, "walk_forward_result_hash", _require_str(self.walk_forward_result_hash, "walk_forward_result_hash"))
@@ -313,6 +395,7 @@ class OperationalPaperCampaignContract:
             "period_start_utc": self.period_start_utc.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
             "period_end_utc": self.period_end_utc.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
             "policy_payload": serialize_value(dict(self.policy_payload)),
+            "reference_payload_json": serialize_value(dict(self.reference_payload_json)),
             "policy_hash": self.policy_hash,
             "walk_forward_manifest_hash": self.walk_forward_manifest_hash,
             "walk_forward_result_hash": self.walk_forward_result_hash,
@@ -418,6 +501,7 @@ _CAMPAIGN_REQUIRED_COLUMNS = {
     "period_start_utc",
     "period_end_utc",
     "policy_payload_json",
+    "reference_payload_json",
     "policy_hash",
     "walk_forward_manifest_hash",
     "walk_forward_result_hash",
@@ -478,6 +562,7 @@ def ensure_operational_paper_campaign_schema(db_path: str | Path) -> None:
                 period_start_utc TEXT NOT NULL,
                 period_end_utc TEXT NOT NULL,
                 policy_payload_json TEXT NOT NULL,
+                reference_payload_json TEXT NOT NULL,
                 policy_hash TEXT NOT NULL,
                 walk_forward_manifest_hash TEXT NOT NULL,
                 walk_forward_result_hash TEXT NOT NULL,
@@ -521,6 +606,7 @@ def _campaign_from_row(row: sqlite3.Row) -> OperationalPaperCampaignContract:
             period_start_utc=datetime.fromisoformat(str(row["period_start_utc"]).replace("Z", "+00:00")),
             period_end_utc=datetime.fromisoformat(str(row["period_end_utc"]).replace("Z", "+00:00")),
             policy_payload=json.loads(row["policy_payload_json"]),
+            reference_payload_json=json.loads(row["reference_payload_json"]),
             policy_hash=row["policy_hash"],
             walk_forward_manifest_hash=row["walk_forward_manifest_hash"],
             walk_forward_result_hash=row["walk_forward_result_hash"],
@@ -544,9 +630,9 @@ def persist_operational_paper_campaign_contract(db_path: str | Path, contract: O
                 """
                 INSERT INTO paper_evaluation_campaign_contracts (
                     campaign_hash, campaign_id, cohort_hash, strategy_version, symbol, interval, inclusion_rule,
-                    period_start_utc, period_end_utc, policy_payload_json, policy_hash, walk_forward_manifest_hash,
+                    period_start_utc, period_end_utc, policy_payload_json, reference_payload_json, policy_hash, walk_forward_manifest_hash,
                     walk_forward_result_hash, evaluator_version, created_at_utc, payload_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     contract.campaign_hash,
@@ -558,7 +644,8 @@ def persist_operational_paper_campaign_contract(db_path: str | Path, contract: O
                     contract.inclusion_rule,
                     contract.period_start_utc.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
                     contract.period_end_utc.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
-                    json.dumps(dict(contract.policy_payload), ensure_ascii=False, sort_keys=True),
+                    json.dumps(serialize_value(dict(contract.policy_payload)), ensure_ascii=False, sort_keys=True),
+                    json.dumps(serialize_value(dict(contract.reference_payload_json)), ensure_ascii=False, sort_keys=True),
                     contract.policy_hash,
                     contract.walk_forward_manifest_hash,
                     contract.walk_forward_result_hash,
@@ -715,7 +802,13 @@ def create_operational_paper_campaign(
         raise PaperCampaignManifestError("cohort period_start_utc diverges from the campaign scope.")
     if cohort_contract.period_end_utc != period_end:
         raise PaperCampaignManifestError("cohort period_end_utc diverges from the campaign scope.")
-    _, manifest_hash_value, result_hash = _reference_hashes(reference_walk_forward)
+    reference_payload, manifest_hash_value, result_hash = _reference_hashes(reference_walk_forward)
+    _reference_scope_is_compatible(
+        reference_payload,
+        strategy_version=strategy_version,
+        symbol=symbol,
+        interval=interval,
+    )
     contract = OperationalPaperCampaignContract(
         campaign_id=campaign_id,
         cohort_hash=cohort_contract.cohort_hash,
@@ -726,6 +819,7 @@ def create_operational_paper_campaign(
         period_start_utc=period_start,
         period_end_utc=period_end,
         policy_payload=policy.as_dict(),
+        reference_payload_json=reference_payload,
         policy_hash=_policy_hash(policy),
         walk_forward_manifest_hash=manifest_hash_value,
         walk_forward_result_hash=result_hash,
@@ -752,9 +846,8 @@ def get_operational_paper_campaign_status(
     *,
     campaign_id: str,
     campaign_db_path: str | Path = "paper_evaluation_campaign.db",
-    now: datetime | None = None,
 ) -> OperationalPaperCampaignStatusSnapshot:
-    current = _require_now_utc(now)
+    current = _utcnow()
     try:
         contract = load_operational_paper_campaign_contract(campaign_db_path, campaign_id=campaign_id)
     except PaperCampaignError as exc:
@@ -819,11 +912,8 @@ def evaluate_operational_paper_campaign(
     campaign_db_path: str | Path = "paper_evaluation_campaign.db",
     runtime_db_path: str | Path = "paper_runtime.db",
     trades_db_path: str | Path = "trades.db",
-    policy: PaperEvaluationPolicy | None = None,
-    reference_walk_forward: WalkForwardResult | None = None,
-    now: datetime | None = None,
 ) -> OperationalPaperCampaignReport:
-    current = _require_now_utc(now)
+    current = _utcnow()
     contract = load_operational_paper_campaign_contract(campaign_db_path, campaign_id=campaign_id)
     existing_report = load_operational_paper_campaign_report(campaign_db_path, campaign_hash=contract.campaign_hash)
     if existing_report is not None:
@@ -834,27 +924,10 @@ def evaluate_operational_paper_campaign(
         return _campaign_result_from_report(contract, None, campaign_db_path=campaign_db_path, now=current, reasons=("campaign window is still running.",))
 
     frozen_policy = _policy_from_payload(contract.policy_payload, contract.policy_hash)
-    if policy is not None and policy.policy_hash != frozen_policy.policy_hash:
-        raise PaperCampaignPolicyError("policy mismatch with the frozen campaign policy.")
-    operational_policy = policy or frozen_policy
-    reference_payload = {}
-    manifest_hash_value = None
-    result_hash = None
-    if reference_walk_forward is not None:
-        reference_payload, manifest_hash_value, result_hash = _reference_hashes(reference_walk_forward)
-    policy_floor_reasons = _validate_policy_floor(operational_policy)
+    policy_floor_reasons = _validate_policy_floor(frozen_policy)
     if policy_floor_reasons:
-        return _campaign_result_from_report(contract, None, campaign_db_path=campaign_db_path, now=current, reasons=policy_floor_reasons)
-
-    if reference_walk_forward is None:
-        return _campaign_result_from_report(contract, None, campaign_db_path=campaign_db_path, now=current, reasons=("walk-forward reference required.",))
-
-    if manifest_hash_value != contract.walk_forward_manifest_hash:
-        raise PaperCampaignManifestError("walk-forward manifest hash mismatch.")
-    if result_hash != contract.walk_forward_result_hash:
-        raise PaperCampaignManifestError("walk-forward result hash mismatch.")
-    if reference_payload.get("manifest", {}).get("manifest_hash") != contract.walk_forward_manifest_hash:
-        raise PaperCampaignManifestError("walk-forward manifest hash mismatch.")
+        raise PaperCampaignPolicyError("; ".join(policy_floor_reasons))
+    reference_walk_forward = _reference_from_contract(contract)
 
     cohort_contract = load_latest_operational_cohort_contract(
         runtime_db_path,
@@ -872,7 +945,7 @@ def evaluate_operational_paper_campaign(
     report = evaluate_paper_sessions_from_storage(
         runtime_db_path=runtime_db_path,
         trades_db_path=trades_db_path,
-        policy=operational_policy,
+        policy=frozen_policy,
         reference_walk_forward=reference_walk_forward,
         evaluation_id=contract.campaign_id,
         inclusion_rule=contract.inclusion_rule,
@@ -938,8 +1011,6 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--campaign-db", default="paper_evaluation_campaign.db")
     evaluate.add_argument("--runtime-db", default="paper_runtime.db")
     evaluate.add_argument("--trades-db", default="trades.db")
-    evaluate.add_argument("--policy-json", required=False, help="Optional JSON representation of the frozen policy.")
-    evaluate.add_argument("--reference-json", required=False, help="Optional JSON representation of the frozen WalkForwardResult.")
 
     return parser
 
@@ -951,55 +1022,53 @@ def _load_json_argument(value: str) -> Any:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    try:
+        if args.command == "prepare":
+            policy_payload = _load_json_argument(args.policy_json)
+            reference_payload = _load_json_argument(args.reference_json)
+            with _campaign_load_mode():
+                policy = PaperEvaluationPolicy(**policy_payload)
+            reference = _walk_forward_from_payload(reference_payload)
+            contract = create_operational_paper_campaign(
+                campaign_id=args.campaign_id,
+                cohort_hash=args.cohort_hash,
+                strategy_version=args.strategy_version,
+                symbol=args.symbol,
+                interval=args.interval,
+                inclusion_rule=args.inclusion_rule,
+                period_start_utc=_parse_utc_datetime(args.period_start_utc),
+                period_end_utc=_parse_utc_datetime(args.period_end_utc),
+                policy=policy,
+                reference_walk_forward=reference,
+                evaluator_version=args.evaluator_version,
+                runtime_db_path=args.runtime_db,
+                campaign_db_path=args.campaign_db,
+            )
+            print(contract.campaign_hash)
+            return 0
 
-    if args.command == "prepare":
-        policy_payload = _load_json_argument(args.policy_json)
-        reference_payload = _load_json_argument(args.reference_json)
-        with _campaign_load_mode():
-            policy = PaperEvaluationPolicy(**policy_payload)
-        reference = _walk_forward_from_payload(reference_payload)
-        contract = create_operational_paper_campaign(
-            campaign_id=args.campaign_id,
-            cohort_hash=args.cohort_hash,
-            strategy_version=args.strategy_version,
-            symbol=args.symbol,
-            interval=args.interval,
-            inclusion_rule=args.inclusion_rule,
-            period_start_utc=_parse_utc_datetime(args.period_start_utc),
-            period_end_utc=_parse_utc_datetime(args.period_end_utc),
-            policy=policy,
-            reference_walk_forward=reference,
-            evaluator_version=args.evaluator_version,
-            runtime_db_path=args.runtime_db,
-            campaign_db_path=args.campaign_db,
-        )
-        print(contract.campaign_hash)
-        return 0
+        if args.command == "status":
+            snapshot = get_operational_paper_campaign_status(campaign_id=args.campaign_id, campaign_db_path=args.campaign_db)
+            print(_format_status(snapshot))
+            return 0
 
-    if args.command == "status":
-        snapshot = get_operational_paper_campaign_status(campaign_id=args.campaign_id, campaign_db_path=args.campaign_db)
-        print(_format_status(snapshot))
-        return 0
+        if args.command == "evaluate":
+            report = evaluate_operational_paper_campaign(
+                campaign_id=args.campaign_id,
+                campaign_db_path=args.campaign_db,
+                runtime_db_path=args.runtime_db,
+                trades_db_path=args.trades_db,
+            )
+            print(report.report_hash)
+            return 0
 
-    if args.command == "evaluate":
-        policy = None
-        reference = None
-        if args.policy_json:
-            policy = PaperEvaluationPolicy(**_load_json_argument(args.policy_json))
-        if args.reference_json:
-            reference = _walk_forward_from_payload(_load_json_argument(args.reference_json))
-        report = evaluate_operational_paper_campaign(
-            campaign_id=args.campaign_id,
-            campaign_db_path=args.campaign_db,
-            runtime_db_path=args.runtime_db,
-            trades_db_path=args.trades_db,
-            policy=policy,
-            reference_walk_forward=reference,
-        )
-        print(report.report_hash)
-        return 0
-
-    raise PaperCampaignError("unknown command.")
+        raise PaperCampaignError("unknown command.")
+    except PaperCampaignError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except Exception:
+        print("error: campaign command failed.", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":  # pragma: no cover
