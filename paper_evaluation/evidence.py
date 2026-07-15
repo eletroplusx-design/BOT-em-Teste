@@ -92,6 +92,34 @@ def _strict_bool(value: Any, field_name: str) -> bool:
     return value
 
 
+def _normalize_regime(configuration: Mapping[str, Any]) -> str | None:
+    top_level_present = "regime" in configuration
+    top_level_value = configuration.get("regime")
+    nested_mapping = configuration.get("execution_contract")
+    nested_present = isinstance(nested_mapping, Mapping) and "regime" in nested_mapping
+    nested_value = nested_mapping.get("regime") if nested_present else None
+
+    def _strict_regime(value: Any, field_name: str) -> str:
+        if type(value) is not str:
+            raise PaperEvaluationEvidenceError(f"{field_name} must be a regime string.")
+        regime = value.strip().upper()
+        if regime not in {"BULL", "BEAR", "CHOP"}:
+            raise PaperEvaluationEvidenceError(f"{field_name} must be BULL, BEAR or CHOP.")
+        return regime
+
+    if top_level_present:
+        top_level_regime = _strict_regime(top_level_value, "configuration.regime")
+        if nested_present:
+            nested_regime = _strict_regime(nested_value, "configuration.execution_contract.regime")
+            if top_level_regime != nested_regime:
+                raise PaperEvaluationEvidenceError("regime divergence between configuration and execution contract.")
+        return top_level_regime
+
+    if nested_present:
+        return _strict_regime(nested_value, "configuration.execution_contract.regime")
+    return None
+
+
 def _strict_datetime(value: Any, field_name: str) -> datetime:
     if not isinstance(value, datetime):
         raise PaperEvaluationEvidenceError(f"{field_name} must be a datetime.")
@@ -661,15 +689,7 @@ def load_paper_session_evidence(
                 "internal_error_count": sum(1 for snapshot in snapshots if snapshot.internal_error),
                 "expired_data_cycles": sum(1 for snapshot in snapshots if not snapshot.data_fresh),
                 "suspension_reasons": tuple(sorted({snapshot.result_status or snapshot.session_state for snapshot in snapshots if snapshot.session_state == "SUSPENDED"})),
-                "regime_coverage": tuple(
-                    sorted(
-                        {
-                            str(configuration.get("regime", "")).strip().upper()
-                            for _snapshot in snapshots
-                            if str(configuration.get("regime", "")).strip()
-                        }
-                    )
-                ),
+                "regime_coverage": tuple(sorted({regime for regime in (_normalize_regime(configuration) for _snapshot in snapshots) if regime})),
                 "observed_costs": observed_costs,
             }
             return PaperSessionEvidence(
@@ -698,15 +718,7 @@ def load_paper_session_evidence(
                 internal_error_count=sum(1 for snapshot in snapshots if snapshot.internal_error),
                 expired_data_cycles=sum(1 for snapshot in snapshots if not snapshot.data_fresh),
                 suspension_reasons=tuple(sorted({snapshot.result_status or snapshot.session_state for snapshot in snapshots if snapshot.session_state == "SUSPENDED"})),
-                regime_coverage=tuple(
-                    sorted(
-                        {
-                            str(configuration.get("regime", "")).strip().upper()
-                            for _snapshot in snapshots
-                            if str(configuration.get("regime", "")).strip()
-                        }
-                    )
-                ),
+                regime_coverage=tuple(sorted({regime for regime in (_normalize_regime(configuration) for _snapshot in snapshots) if regime})),
                 observed_costs=observed_costs,
             )
     except PaperEvaluationEvidenceError:

@@ -1,5 +1,17 @@
 from .adapters import PaperEvaluationAdapter, evaluate_paper_sessions_from_storage, load_paper_session_evidence, load_paper_session_evidence_batch
 from .artifacts import build_paper_evaluation_manifest, paper_evaluation_hash
+from .campaign import (
+    OperationalPaperCampaignContract,
+    OperationalPaperCampaignReport,
+    OperationalPaperCampaignState,
+    create_operational_paper_campaign,
+    evaluate_operational_paper_campaign,
+    get_operational_paper_campaign_status,
+    load_operational_paper_campaign_contract,
+    load_operational_paper_campaign_report,
+    persist_operational_paper_campaign_contract,
+    persist_operational_paper_campaign_report,
+)
 from .errors import (
     PaperEvaluationDecisionError,
     PaperEvaluationError,
@@ -8,6 +20,10 @@ from .errors import (
     PaperEvaluationMetricsError,
     PaperEvaluationPolicyError,
     PaperEvaluationReadError,
+    PaperCampaignError,
+    PaperCampaignManifestError,
+    PaperCampaignPolicyError,
+    PaperCampaignReadError,
 )
 from .evaluator import evaluate_paper_sessions
 from .metrics import aggregate_paper_session_metrics, compute_paper_session_metrics
@@ -41,6 +57,10 @@ __all__ = [
     "paper_evaluation_hash",
     "PaperEvaluationDecision",
     "PaperEvaluationDecisionError",
+    "PaperCampaignError",
+    "PaperCampaignManifestError",
+    "PaperCampaignPolicyError",
+    "PaperCampaignReadError",
     "PaperEvaluationCohort",
     "PaperEvaluationError",
     "PaperEvaluationEvidenceError",
@@ -59,4 +79,14 @@ __all__ = [
     "PaperSessionRejection",
     "PaperSessionSnapshotEvidence",
     "PaperSessionTradeEvidence",
+    "OperationalPaperCampaignContract",
+    "OperationalPaperCampaignReport",
+    "OperationalPaperCampaignState",
+    "create_operational_paper_campaign",
+    "evaluate_operational_paper_campaign",
+    "get_operational_paper_campaign_status",
+    "load_operational_paper_campaign_contract",
+    "load_operational_paper_campaign_report",
+    "persist_operational_paper_campaign_contract",
+    "persist_operational_paper_campaign_report",
 ]
