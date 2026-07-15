@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -27,7 +29,8 @@ from paper_evaluation import (
     evaluate_paper_sessions,
     evaluate_paper_sessions_from_storage,
 )
-from paper_evaluation._operational import OperationalCohortContract, persist_operational_cohort_contract
+import paper_evaluation._operational as operational_module
+from paper_evaluation._operational import OperationalCohortContract, load_latest_operational_cohort_contract, persist_operational_cohort_contract
 from paper_evaluation.models import _OperationalEvidenceBatch
 from promotion import PaperMonitoringSnapshot, adapt_walk_forward_result, evaluate_promotion
 from promotion.errors import PromotionPolicyError
@@ -314,18 +317,6 @@ def _seed_runtime_and_trades(tmp_path: Path, *, session_id: str, trade_result: D
     decision = _decision()
     runtime_store = PaperRuntimeStore(runtime_db)
     session_started = datetime(2026, 7, 11, 9, 0, tzinfo=timezone.utc)
-    persist_operational_cohort_contract(
-        runtime_db,
-        OperationalCohortContract(
-            strategy_version=decision.strategy_version,
-            symbol=decision.symbol,
-            interval=decision.interval,
-            inclusion_rule="sqlite_all_sessions",
-            period_start_utc=session_started,
-            period_end_utc=session_started + timedelta(days=1),
-            created_at_utc=session_started - timedelta(minutes=1),
-        ),
-    )
     runtime_session = PaperRuntimeSession.create_from_decision(
         decision,
         session_id=session_id,
@@ -349,6 +340,22 @@ def _seed_runtime_and_trades(tmp_path: Path, *, session_id: str, trade_result: D
     )
     runtime_session.evaluate_snapshot(snapshot, decision=decision, idempotency_key=f"{session_id}:snapshot:1")
     runtime_session.complete("session complete")
+    with sqlite3.connect(runtime_db) as conn:
+        try:
+            contract_exists = conn.execute("SELECT 1 FROM paper_evaluation_cohort_contracts LIMIT 1").fetchone() is not None
+        except sqlite3.OperationalError:
+            contract_exists = False
+    if not contract_exists:
+        with patch.object(operational_module, "_utcnow", return_value=session_started - timedelta(minutes=1)):
+            persist_operational_cohort_contract(
+                runtime_db,
+                strategy_version=decision.strategy_version,
+                symbol=decision.symbol,
+                interval=decision.interval,
+                inclusion_rule="sqlite_all_sessions",
+                period_start_utc=session_started,
+                period_end_utc=session_started + timedelta(days=1),
+            )
     trade_id = registrar_trade_paper(
         symbol="BTCUSDT",
         direcao="COMPRA" if trade_result >= 0 else "VENDA",
@@ -384,6 +391,29 @@ def _seed_runtime_and_trades(tmp_path: Path, *, session_id: str, trade_result: D
         close_idempotency_key=f"{session_id}:close:1",
     )
     return runtime_db, trades_db
+
+
+def _persist_contract(
+    runtime_db: Path,
+    *,
+    strategy_version: str,
+    symbol: str,
+    interval: str,
+    inclusion_rule: str,
+    period_start_utc: datetime,
+    period_end_utc: datetime,
+    created_at_utc: datetime,
+):
+    with patch.object(operational_module, "_utcnow", return_value=created_at_utc):
+        return persist_operational_cohort_contract(
+            runtime_db,
+            strategy_version=strategy_version,
+            symbol=symbol,
+            interval=interval,
+            inclusion_rule=inclusion_rule,
+            period_start_utc=period_start_utc,
+            period_end_utc=period_end_utc,
+        )
 
 
 def test_paper_evaluation_empty_set_insufficient_evidence():
@@ -691,18 +721,109 @@ def test_operational_contract_hash_mutation_is_blocked():
         replace(contract, inclusion_rule="manual")
 
 
-def test_operational_contract_created_after_window_is_rejected():
+def test_operational_contract_persistence_is_prospective_and_write_once(tmp_path):
+    runtime_db = tmp_path / "runtime.db"
+    started = datetime(2026, 7, 11, 9, 0, tzinfo=timezone.utc)
+    contract = _persist_contract(
+        runtime_db,
+        strategy_version="v8_paper_evaluation",
+        symbol="BTCUSDT",
+        interval="1h",
+        inclusion_rule="sqlite_all_sessions",
+        period_start_utc=started + timedelta(hours=1),
+        period_end_utc=started + timedelta(hours=2),
+        created_at_utc=started,
+    )
+    assert contract.created_at_utc == started
+    with pytest.raises(sqlite3.IntegrityError):
+        _persist_contract(
+            runtime_db,
+            strategy_version="v8_paper_evaluation",
+            symbol="BTCUSDT",
+            interval="1h",
+            inclusion_rule="sqlite_all_sessions",
+            period_start_utc=started + timedelta(hours=1),
+            period_end_utc=started + timedelta(hours=2),
+            created_at_utc=started - timedelta(minutes=1),
+        )
+
+
+@pytest.mark.parametrize(
+    "created_at_delta",
+    [timedelta(0), timedelta(hours=1)],
+)
+def test_operational_contract_persistence_rejects_started_or_past_window(tmp_path, created_at_delta):
+    runtime_db = tmp_path / "runtime.db"
     started = datetime(2026, 7, 11, 9, 0, tzinfo=timezone.utc)
     with pytest.raises(PaperEvaluationManifestError):
-        OperationalCohortContract(
+        _persist_contract(
+            runtime_db,
             strategy_version="v8_paper_evaluation",
             symbol="BTCUSDT",
             interval="1h",
             inclusion_rule="sqlite_all_sessions",
             period_start_utc=started,
             period_end_utc=started + timedelta(hours=2),
-            created_at_utc=started,
+            created_at_utc=started + created_at_delta,
         )
+
+
+def test_operational_contract_duplicate_and_replacement_attempts_fail(tmp_path):
+    runtime_db = tmp_path / "runtime.db"
+    started = datetime(2026, 7, 11, 9, 0, tzinfo=timezone.utc)
+    _persist_contract(
+        runtime_db,
+        strategy_version="v8_paper_evaluation",
+        symbol="BTCUSDT",
+        interval="1h",
+        inclusion_rule="sqlite_all_sessions",
+        period_start_utc=started + timedelta(hours=1),
+        period_end_utc=started + timedelta(hours=2),
+        created_at_utc=started,
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        _persist_contract(
+            runtime_db,
+            strategy_version="v8_paper_evaluation",
+            symbol="BTCUSDT",
+            interval="1h",
+            inclusion_rule="sqlite_all_sessions",
+            period_start_utc=started + timedelta(hours=1),
+            period_end_utc=started + timedelta(hours=2),
+            created_at_utc=started - timedelta(minutes=1),
+        )
+    with sqlite3.connect(runtime_db) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM paper_evaluation_cohort_contracts").fetchone()
+        payload = json.loads(row["payload_json"])
+    with sqlite3.connect(runtime_db) as conn:
+        conn.execute("UPDATE paper_evaluation_cohort_contracts SET symbol = 'ETHUSDT' WHERE cohort_hash = ?", (row["cohort_hash"],))
+        conn.commit()
+    with pytest.raises(PaperEvaluationManifestError):
+        load_latest_operational_cohort_contract(runtime_db)
+    runtime_db_payload = tmp_path / "runtime_payload.db"
+    _persist_contract(
+        runtime_db_payload,
+        strategy_version="v8_paper_evaluation",
+        symbol="BTCUSDT",
+        interval="1h",
+        inclusion_rule="sqlite_all_sessions",
+        period_start_utc=started + timedelta(hours=1),
+        period_end_utc=started + timedelta(hours=2),
+        created_at_utc=started,
+    )
+    with sqlite3.connect(runtime_db_payload) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM paper_evaluation_cohort_contracts").fetchone()
+        payload = json.loads(row["payload_json"])
+        payload["interval"] = "4h"
+        conn.execute(
+            "UPDATE paper_evaluation_cohort_contracts SET payload_json = ? WHERE cohort_hash = ?",
+            (json.dumps(payload, ensure_ascii=False, sort_keys=True), row["cohort_hash"]),
+        )
+        conn.commit()
+    with pytest.raises(PaperEvaluationReadError):
+        load_latest_operational_cohort_contract(runtime_db_payload)
 
 
 def test_manual_operational_batch_without_loader_token_is_rejected():

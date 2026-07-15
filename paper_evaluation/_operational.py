@@ -21,6 +21,10 @@ class _OperationalBatchToken:
 _OPERATIONAL_BATCH_TOKEN = _OperationalBatchToken()
 
 
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 def _require_str(value: Any, field_name: str, *, allow_empty: bool = False) -> str:
     if type(value) is not str:
         raise PaperEvaluationManifestError(f"{field_name} must be a string.")
@@ -144,17 +148,38 @@ def ensure_operational_cohort_schema(db_path: str | Path) -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_paper_evaluation_cohort_contracts_lookup ON paper_evaluation_cohort_contracts(strategy_version, symbol, interval, inclusion_rule, period_start_utc, period_end_utc, created_at_utc)"
         )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_paper_evaluation_cohort_contracts_window_unique ON paper_evaluation_cohort_contracts(strategy_version, symbol, interval, inclusion_rule, period_start_utc, period_end_utc)"
+        )
         conn.commit()
 
 
-def persist_operational_cohort_contract(db_path: str | Path, contract: OperationalCohortContract) -> OperationalCohortContract:
+def persist_operational_cohort_contract(
+    db_path: str | Path,
+    *,
+    strategy_version: str,
+    symbol: str,
+    interval: str,
+    inclusion_rule: str,
+    period_start_utc: datetime,
+    period_end_utc: datetime,
+) -> OperationalCohortContract:
     ensure_operational_cohort_schema(db_path)
+    contract = OperationalCohortContract(
+        strategy_version=strategy_version,
+        symbol=symbol,
+        interval=interval,
+        inclusion_rule=inclusion_rule,
+        period_start_utc=period_start_utc,
+        period_end_utc=period_end_utc,
+        created_at_utc=_utcnow(),
+    )
     payload = json.dumps(contract.as_dict(), ensure_ascii=False, sort_keys=True)
     with _connect_rw(db_path) as conn:
         conn.row_factory = sqlite3.Row
         conn.execute(
             """
-            INSERT OR REPLACE INTO paper_evaluation_cohort_contracts (
+            INSERT INTO paper_evaluation_cohort_contracts (
                 cohort_hash, strategy_version, symbol, interval, inclusion_rule, period_start_utc, period_end_utc, created_at_utc, payload_json
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
@@ -221,8 +246,32 @@ def load_latest_operational_cohort_contract(
             created_at_utc=datetime.fromisoformat(str(row["created_at_utc"]).replace("Z", "+00:00")),
             cohort_hash=row["cohort_hash"],
         )
-        if row["payload_json"]:
-            stored_payload = json.loads(row["payload_json"])
-            if stored_payload.get("cohort_hash") != contract.cohort_hash:
-                raise PaperEvaluationReadError("operational cohort contract hash mismatch.")
+        stored_payload = json.loads(row["payload_json"]) if row["payload_json"] else None
+        expected_payload = contract.as_dict()
+        if stored_payload != expected_payload:
+            raise PaperEvaluationReadError("operational cohort contract payload mismatch.")
+        if row["cohort_hash"] != contract.cohort_hash:
+            raise PaperEvaluationReadError("operational cohort contract hash mismatch.")
+        row_payload = {
+            "strategy_version": row["strategy_version"],
+            "symbol": row["symbol"],
+            "interval": row["interval"],
+            "inclusion_rule": row["inclusion_rule"],
+            "period_start_utc": row["period_start_utc"],
+            "period_end_utc": row["period_end_utc"],
+            "created_at_utc": row["created_at_utc"],
+            "cohort_hash": row["cohort_hash"],
+        }
+        expected_columns = {
+            "strategy_version": expected_payload["strategy_version"],
+            "symbol": expected_payload["symbol"],
+            "interval": expected_payload["interval"],
+            "inclusion_rule": expected_payload["inclusion_rule"],
+            "period_start_utc": expected_payload["period_start_utc"],
+            "period_end_utc": expected_payload["period_end_utc"],
+            "created_at_utc": expected_payload["created_at_utc"],
+            "cohort_hash": expected_payload["cohort_hash"],
+        }
+        if row_payload != expected_columns:
+            raise PaperEvaluationReadError("operational cohort contract column mismatch.")
         return contract
