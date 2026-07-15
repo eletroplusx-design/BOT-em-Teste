@@ -16,6 +16,7 @@ from .errors import (
     PaperEvaluationMetricsError,
     PaperEvaluationPolicyError,
 )
+from ._operational import _OPERATIONAL_BATCH_TOKEN, OperationalCohortContract
 
 
 def _require_timezone_aware(dt: datetime, field_name: str) -> datetime:
@@ -931,24 +932,18 @@ class PaperSessionEvidence:
 
     def as_dict(self) -> dict[str, Any]:
         return serialize_value(self.as_hash_payload())
-
-
-class _OperationalBatchToken:
-    __slots__ = ()
-
-
-_OPERATIONAL_BATCH_TOKEN = _OperationalBatchToken()
-
-
 @dataclass(frozen=True, slots=True)
 class _OperationalEvidenceBatch:
+    contract: OperationalCohortContract
     cohort: PaperEvaluationCohort
     evidences: tuple[PaperSessionEvidence, ...]
     rejections: tuple[PaperSessionRejection, ...]
     batch_hash: str = field(default="", compare=False)
-    _token: _OperationalBatchToken = field(default=_OPERATIONAL_BATCH_TOKEN, repr=False, compare=False)
+    _token: Any | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        if not isinstance(self.contract, OperationalCohortContract):
+            raise PaperEvaluationEvidenceError("contract must be an OperationalCohortContract instance.")
         if not isinstance(self.cohort, PaperEvaluationCohort):
             raise PaperEvaluationEvidenceError("cohort must be a PaperEvaluationCohort instance.")
         if self._token is not _OPERATIONAL_BATCH_TOKEN:
@@ -972,6 +967,7 @@ class _OperationalEvidenceBatch:
 
     def as_hash_payload(self, *, include_hash: bool = True) -> dict[str, Any]:
         payload = {
+            "contract": self.contract.as_dict(),
             "cohort": self.cohort.as_dict(),
             "evidences": [evidence.as_dict() for evidence in self.evidences],
             "rejections": [rejection.as_dict() for rejection in self.rejections],

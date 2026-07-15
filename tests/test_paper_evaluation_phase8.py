@@ -27,6 +27,7 @@ from paper_evaluation import (
     evaluate_paper_sessions,
     evaluate_paper_sessions_from_storage,
 )
+from paper_evaluation._operational import OperationalCohortContract, persist_operational_cohort_contract
 from paper_evaluation.models import _OperationalEvidenceBatch
 from promotion import PaperMonitoringSnapshot, adapt_walk_forward_result, evaluate_promotion
 from promotion.errors import PromotionPolicyError
@@ -313,6 +314,18 @@ def _seed_runtime_and_trades(tmp_path: Path, *, session_id: str, trade_result: D
     decision = _decision()
     runtime_store = PaperRuntimeStore(runtime_db)
     session_started = datetime(2026, 7, 11, 9, 0, tzinfo=timezone.utc)
+    persist_operational_cohort_contract(
+        runtime_db,
+        OperationalCohortContract(
+            strategy_version=decision.strategy_version,
+            symbol=decision.symbol,
+            interval=decision.interval,
+            inclusion_rule="sqlite_all_sessions",
+            period_start_utc=session_started,
+            period_end_utc=session_started + timedelta(days=1),
+            created_at_utc=session_started - timedelta(minutes=1),
+        ),
+    )
     runtime_session = PaperRuntimeSession.create_from_decision(
         decision,
         session_id=session_id,
@@ -615,6 +628,24 @@ def test_operational_evaluation_requires_walk_forward_reference(tmp_path):
     assert any("walk-forward reference required" in reason for reason in report.decision.reasons)
 
 
+def test_operational_evaluation_without_persisted_cohort_is_insufficient(tmp_path):
+    runtime_db, trades_db = _seed_runtime_and_trades(tmp_path, session_id="operational-missing-contract", trade_result=Decimal("25"))
+    with sqlite3.connect(runtime_db) as conn:
+        conn.execute("DELETE FROM paper_evaluation_cohort_contracts")
+        conn.commit()
+    report = evaluate_paper_sessions_from_storage(
+        runtime_db_path=runtime_db,
+        trades_db_path=trades_db,
+        policy=_lenient_policy(),
+        reference_walk_forward=_decision(),
+        evaluation_id="operational-missing-contract",
+        synthetic_test_data=False,
+        operational_evidence=True,
+    )
+    assert report.decision.status is PaperEvaluationStatus.INSUFFICIENT_EVIDENCE
+    assert report.manifest.operational_evidence is False
+
+
 def test_operational_period_filters_are_rejected(tmp_path):
     runtime_db, trades_db = _seed_runtime_and_trades(tmp_path, session_id="operational-period", trade_result=Decimal("25"))
     with pytest.raises(PaperEvaluationDecisionError):
@@ -645,9 +676,47 @@ def test_operational_cohort_hash_mutation_is_blocked():
         replace(cohort, inclusion_rule="manual")
 
 
+def test_operational_contract_hash_mutation_is_blocked():
+    started = datetime(2026, 7, 11, 9, 0, tzinfo=timezone.utc)
+    contract = OperationalCohortContract(
+        strategy_version="v8_paper_evaluation",
+        symbol="BTCUSDT",
+        interval="1h",
+        inclusion_rule="sqlite_all_sessions",
+        period_start_utc=started,
+        period_end_utc=started + timedelta(hours=2),
+        created_at_utc=started - timedelta(minutes=1),
+    )
+    with pytest.raises(PaperEvaluationManifestError):
+        replace(contract, inclusion_rule="manual")
+
+
+def test_operational_contract_created_after_window_is_rejected():
+    started = datetime(2026, 7, 11, 9, 0, tzinfo=timezone.utc)
+    with pytest.raises(PaperEvaluationManifestError):
+        OperationalCohortContract(
+            strategy_version="v8_paper_evaluation",
+            symbol="BTCUSDT",
+            interval="1h",
+            inclusion_rule="sqlite_all_sessions",
+            period_start_utc=started,
+            period_end_utc=started + timedelta(hours=2),
+            created_at_utc=started,
+        )
+
+
 def test_manual_operational_batch_without_loader_token_is_rejected():
     started = datetime(2026, 7, 11, 9, 0, tzinfo=timezone.utc)
     session = _make_trade_session("manual-batch", trade_results=(Decimal("25"),), started_at=started)
+    contract = OperationalCohortContract(
+        strategy_version="v8_paper_evaluation",
+        symbol="BTCUSDT",
+        interval="1h",
+        inclusion_rule="sqlite_all_sessions",
+        period_start_utc=started,
+        period_end_utc=started + timedelta(hours=1),
+        created_at_utc=started - timedelta(minutes=1),
+    )
     cohort = PaperEvaluationCohort(
         strategy_version="v8_paper_evaluation",
         period_start_utc=started,
@@ -658,10 +727,40 @@ def test_manual_operational_batch_without_loader_token_is_rejected():
     )
     with pytest.raises(PaperEvaluationEvidenceError):
         _OperationalEvidenceBatch(
+            contract=contract,
             cohort=cohort,
             evidences=(session,),
             rejections=tuple(),
             _token=object(),
+        )
+
+
+def test_manual_operational_batch_without_token_is_rejected():
+    started = datetime(2026, 7, 11, 9, 0, tzinfo=timezone.utc)
+    session = _make_trade_session("manual-batch-token", trade_results=(Decimal("25"),), started_at=started)
+    contract = OperationalCohortContract(
+        strategy_version="v8_paper_evaluation",
+        symbol="BTCUSDT",
+        interval="1h",
+        inclusion_rule="sqlite_all_sessions",
+        period_start_utc=started,
+        period_end_utc=started + timedelta(hours=1),
+        created_at_utc=started - timedelta(minutes=1),
+    )
+    cohort = PaperEvaluationCohort(
+        strategy_version="v8_paper_evaluation",
+        period_start_utc=started,
+        period_end_utc=started + timedelta(hours=1),
+        inclusion_rule="sqlite_all_sessions",
+        created_at_utc=started,
+        session_ids=("manual-batch-token",),
+    )
+    with pytest.raises(PaperEvaluationEvidenceError):
+        _OperationalEvidenceBatch(
+            contract=contract,
+            cohort=cohort,
+            evidences=(session,),
+            rejections=tuple(),
         )
 
 
@@ -860,7 +959,7 @@ def test_operational_evidence_from_sqlite_and_phase5_reference(tmp_path):
     )
     assert report.manifest.session_count == 1
     assert report.manifest.operational_evidence is True
-    assert report.manifest.cohort_hash == batch.cohort.cohort_hash
+    assert report.manifest.cohort_hash == batch.contract.cohort_hash
     assert report.synthetic_test_data is False
     assert report.decision.status is PaperEvaluationStatus.APPROVED_FOR_EXTENDED_PAPER
     assert report.walk_forward_comparison["reference_manifest_hash"] == reference.manifest["manifest_hash"]

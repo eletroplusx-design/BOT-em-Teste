@@ -43,10 +43,13 @@ class PaperEvaluationAdapter:
                 raise PaperEvaluationDecisionError("operational evidence must enumerate sessions directly from storage.")
             if self.period_start_utc is not None or self.period_end_utc is not None:
                 raise PaperEvaluationDecisionError("operational evidence must use the frozen cohort period.")
-            batch = load_operational_evidence_batch(
-                runtime_db_path=self.runtime_db_path,
-                trades_db_path=self.trades_db_path,
-            )
+            try:
+                batch = load_operational_evidence_batch(
+                    runtime_db_path=self.runtime_db_path,
+                    trades_db_path=self.trades_db_path,
+                )
+            except PaperEvaluationReadError:
+                return [], [], None
             return list(batch.evidences), list(batch.rejections), batch
         return load_paper_session_evidence_batch(
             runtime_db_path=self.runtime_db_path,
@@ -69,7 +72,16 @@ class PaperEvaluationAdapter:
                 raise PaperEvaluationDecisionError("operational evidence must enumerate sessions directly from storage.")
         if self.operational_evidence:
             if operational_batch is None:
-                raise PaperEvaluationDecisionError("operational evidence batch is required.")
+                return evaluate_paper_sessions(
+                    evidences,
+                    policy=self.policy,
+                    reference_walk_forward=None,
+                    evaluation_id=self.evaluation_id,
+                    inclusion_rule=self.inclusion_rule,
+                    synthetic_test_data=self.synthetic_test_data,
+                    expected_session_ids=normalized_session_ids,
+                    load_rejections=tuple(rejections),
+                )
             return _evaluate_paper_sessions_from_operational_batch(
                 evidences,
                 policy=self.policy,

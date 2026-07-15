@@ -23,9 +23,14 @@ from promotion import (
 from validation.models import CandidateConfig, FrozenSelection
 
 from .errors import PaperEvaluationEvidenceError, PaperEvaluationReadError
+from ._operational import (
+    OperationalCohortContract,
+    _OPERATIONAL_BATCH_TOKEN,
+    load_latest_operational_cohort_contract,
+    persist_operational_cohort_contract,
+)
 from .models import (
     _OperationalEvidenceBatch,
-    _OPERATIONAL_BATCH_TOKEN,
     PaperFillEvidence,
     PaperEvaluationCohort,
     PaperSessionEvidence,
@@ -238,25 +243,33 @@ def _load_runtime_session_rows(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     return rows
 
 
-def _build_operational_cohort(rows: list[sqlite3.Row], *, inclusion_rule: str = "sqlite_all_sessions") -> PaperEvaluationCohort:
-    session_ids = tuple(str(row["session_id"]).strip() for row in rows if str(row["session_id"]).strip())
-    if not session_ids:
+def _load_operational_session_rows(conn: sqlite3.Connection, contract: OperationalCohortContract) -> list[sqlite3.Row]:
+    if contract.inclusion_rule != "sqlite_all_sessions":
+        raise PaperEvaluationReadError("unsupported operational inclusion rule.")
+    rows = conn.execute(
+        """
+        SELECT session_id, created_at_utc, session_started_utc, updated_at_utc, strategy_version, symbol, interval
+        FROM paper_runtime_sessions
+        WHERE strategy_version = ?
+          AND symbol = ?
+          AND interval = ?
+          AND datetime(created_at_utc) >= datetime(?)
+          AND datetime(session_started_utc) >= datetime(?)
+          AND datetime(session_started_utc) <= datetime(?)
+        ORDER BY session_started_utc ASC, session_id ASC
+        """,
+        (
+            contract.strategy_version,
+            contract.symbol,
+            contract.interval,
+            contract.created_at_utc.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+            contract.period_start_utc.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+            contract.period_end_utc.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+        ),
+    ).fetchall()
+    if not rows:
         raise PaperEvaluationReadError("no paper sessions found.")
-    strategy_versions = {str(row["strategy_version"]).strip() for row in rows}
-    symbols = {str(row["symbol"]).strip() for row in rows}
-    intervals = {str(row["interval"]).strip() for row in rows}
-    if len(strategy_versions) != 1 or len(symbols) != 1 or len(intervals) != 1:
-        raise PaperEvaluationEvidenceError("operational cohort must be homogeneous.")
-    started_values = [datetime.fromisoformat(str(row["session_started_utc"]).replace("Z", "+00:00")) for row in rows]
-    updated_values = [datetime.fromisoformat(str(row["updated_at_utc"]).replace("Z", "+00:00")) for row in rows]
-    return PaperEvaluationCohort(
-        strategy_version=next(iter(strategy_versions)),
-        period_start_utc=min(started_values),
-        period_end_utc=max(updated_values),
-        inclusion_rule=inclusion_rule,
-        created_at_utc=min(started_values),
-        session_ids=session_ids,
-    )
+    return rows
 
 
 def _load_runtime_snapshots(conn: sqlite3.Connection, session_id: str) -> list[PaperSessionSnapshotEvidence]:
@@ -713,8 +726,19 @@ def load_operational_evidence_batch(
     with _connect_readonly(runtime_db_path) as runtime_conn, _connect_readonly(trades_db_path) as trades_conn:
         _validate_runtime_schema(runtime_conn)
         _validate_trade_schema(trades_conn)
-        session_rows = _load_runtime_session_rows(runtime_conn)
-        cohort = _build_operational_cohort(session_rows)
+        contract = load_latest_operational_cohort_contract(runtime_db_path)
+        session_rows = _load_operational_session_rows(runtime_conn, contract)
+        session_ids = tuple(str(row["session_id"]).strip() for row in session_rows if str(row["session_id"]).strip())
+        if not session_ids:
+            raise PaperEvaluationReadError("no paper sessions found.")
+        cohort = PaperEvaluationCohort(
+            strategy_version=contract.strategy_version,
+            period_start_utc=contract.period_start_utc,
+            period_end_utc=contract.period_end_utc,
+            inclusion_rule=contract.inclusion_rule,
+            created_at_utc=contract.created_at_utc,
+            session_ids=session_ids,
+        )
         evidences: list[PaperSessionEvidence] = []
         rejections: list[PaperSessionRejection] = []
         for row in session_rows:
@@ -724,7 +748,13 @@ def load_operational_evidence_batch(
                 evidences.append(evidence)
             except PaperEvaluationEvidenceError as exc:
                 rejections.append(PaperSessionRejection(session_id=session_id, reason=str(exc)))
-        return _OperationalEvidenceBatch(cohort=cohort, evidences=tuple(evidences), rejections=tuple(rejections), _token=_OPERATIONAL_BATCH_TOKEN)
+        return _OperationalEvidenceBatch(
+            contract=contract,
+            cohort=cohort,
+            evidences=tuple(evidences),
+            rejections=tuple(rejections),
+            _token=_OPERATIONAL_BATCH_TOKEN,
+        )
 
 
 def load_paper_session_evidence_batch(
