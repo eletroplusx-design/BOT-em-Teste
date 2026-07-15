@@ -62,6 +62,17 @@ def _require_bool_strict(value: Any, field_name: str) -> bool:
     return value
 
 
+def _normalize_costs_mapping(value: Mapping[str, Any], field_name: str) -> dict[str, Decimal]:
+    normalized: dict[str, Decimal] = {}
+    for key, item in dict(value).items():
+        key_text = str(key).strip()
+        if not key_text:
+            raise PromotionPolicyError(f"{field_name} keys cannot be empty.")
+        decimal = _to_decimal(item, f"{field_name}[{key_text}]")
+        normalized[key_text] = decimal
+    return normalized
+
+
 @dataclass(frozen=True, slots=True)
 class MonitoredPaperLimits:
     paper_capital_max: Decimal = Decimal("10000")
@@ -161,7 +172,7 @@ class PaperMonitoringSnapshot:
         object.__setattr__(self, "strategy_version", str(self.strategy_version).strip())
         object.__setattr__(self, "trading_mode", str(self.trading_mode).strip().upper())
         object.__setattr__(self, "configuration", dict(self.configuration))
-        object.__setattr__(self, "observed_costs", dict(self.observed_costs))
+        object.__setattr__(self, "observed_costs", _normalize_costs_mapping(self.observed_costs, "observed_costs"))
         object.__setattr__(self, "current_loss_streak", _strict_int(self.current_loss_streak, "current_loss_streak", allow_zero=True))
         object.__setattr__(self, "open_positions", _strict_int(self.open_positions, "open_positions", allow_zero=True))
         object.__setattr__(self, "executed_trades", _strict_int(self.executed_trades, "executed_trades", allow_zero=True))
