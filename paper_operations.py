@@ -3,10 +3,13 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+import re
 import shutil
 import sqlite3
 import sys
 import tempfile
+from contextlib import contextmanager
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -53,6 +56,7 @@ from paper_evaluation.errors import (
 )
 from promotion import PromotionDecision, PromotionPolicy, PromotionStatus, adapt_walk_forward_result, evaluate_promotion
 from promotion.errors import PromotionDecisionError, PromotionPolicyError
+from validation.artifacts import manifest_hash as validation_manifest_hash
 from validation import WalkForwardResult
 
 import storage
@@ -63,6 +67,11 @@ DEFAULT_REFERENCE_FILE = "reference.json"
 DEFAULT_DECISION_FILE = "promotion_decision.json"
 DEFAULT_POLICY_FILE = "policy.json"
 DEFAULT_BACKUP_RETENTION = 7
+_ALLOW_TEMPORARY_DATA_DIRS_FOR_TESTS = False
+_REFERENCE_PROVENANCE_KEY = "operational_provenance"
+_REFERENCE_PAYLOAD_KEY = "walk_forward"
+_REFERENCE_PROVENANCE_VERSION = 1
+_OPERATIONAL_LOCK_FILE = ".paper_operations.lock"
 
 
 class PaperOperationsError(Exception):
@@ -70,7 +79,7 @@ class PaperOperationsError(Exception):
 
 
 def _data_dir(raw: str | Path | None = None) -> Path:
-    return resolve_paper_data_dir(raw, allow_temporary=raw is not None)
+    return resolve_paper_data_dir(raw, allow_temporary=_ALLOW_TEMPORARY_DATA_DIRS_FOR_TESTS)
 
 
 def _paths(data_dir: str | Path | None = None) -> dict[str, Path]:
@@ -105,6 +114,10 @@ def _write_json(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(serialize_value(payload), ensure_ascii=False, sort_keys=True, indent=2), encoding="utf-8")
 
 
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 def _load_json_file(path: str | Path, *, label: str) -> dict[str, Any]:
     file_path = Path(path)
     if not file_path.exists():
@@ -119,6 +132,98 @@ def _load_json_file(path: str | Path, *, label: str) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise PaperOperationsError(f"{label} file must contain a JSON object.")
     return payload
+
+
+def _require_reference_envelope(payload: Mapping[str, Any]) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
+    if not isinstance(payload, Mapping):
+        raise PaperOperationsError("walk-forward reference file is invalid.")
+    provenance = payload.get(_REFERENCE_PROVENANCE_KEY)
+    walk_forward_payload = payload.get(_REFERENCE_PAYLOAD_KEY)
+    if not isinstance(provenance, Mapping) or not isinstance(walk_forward_payload, Mapping):
+        raise PaperOperationsError("walk-forward reference must include operational provenance.")
+    if provenance.get("synthetic_test_data") is not False:
+        raise PaperOperationsError("walk-forward reference must be operational provenance, not synthetic test data.")
+    if provenance.get("version") != _REFERENCE_PROVENANCE_VERSION:
+        raise PaperOperationsError("walk-forward reference provenance version is invalid.")
+    return provenance, walk_forward_payload
+
+
+def _lock_file_path(root: Path, *, scope: str) -> Path:
+    scope_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", scope.strip() or "default")
+    return root / f"{scope_name}.{_OPERATIONAL_LOCK_FILE}"
+
+
+def _process_is_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        if os.name == "nt":
+            import ctypes
+
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            handle = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if not handle:
+                return False
+            try:
+                code = ctypes.c_ulong()
+                if not ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                    return False
+                return code.value == 259
+            finally:
+                ctypes.windll.kernel32.CloseHandle(handle)
+        os.kill(pid, 0)
+        return True
+    except Exception:
+        return False
+
+
+@contextmanager
+def _acquire_operational_lock(root: Path, *, scope: str) -> Any:
+    lock_path = _lock_file_path(root, scope=scope)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "pid": os.getpid(),
+        "created_at_utc": _utcnow().isoformat().replace("+00:00", "Z"),
+        "scope": scope,
+    }
+    for attempt in range(2):
+        try:
+            fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+        except FileExistsError:
+            try:
+                existing = json.loads(lock_path.read_text(encoding="utf-8"))
+            except Exception:
+                existing = {}
+            pid = existing.get("pid")
+            try:
+                pid = int(pid)
+            except Exception:
+                pid = -1
+            if _process_is_alive(pid):
+                raise PaperOperationsError("operational lock is held by another live process.")
+            try:
+                lock_path.unlink()
+            except Exception:
+                if attempt == 1:
+                    raise PaperOperationsError("operational lock could not be refreshed.")
+                continue
+            continue
+        else:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh, ensure_ascii=False, sort_keys=True)
+            break
+    else:  # pragma: no cover - defensive
+        raise PaperOperationsError("operational lock could not be acquired.")
+    try:
+        yield lock_path
+    finally:
+        try:
+            if lock_path.exists():
+                existing = json.loads(lock_path.read_text(encoding="utf-8"))
+                if existing.get("pid") == os.getpid() and existing.get("scope") == scope:
+                    lock_path.unlink()
+        except Exception:
+            pass
 
 
 def _hash_file(path: Path) -> str:
@@ -151,17 +256,50 @@ def _report_line(label: str, value: Any) -> str:
 
 def _load_walk_forward_reference(path: str | Path) -> WalkForwardResult:
     payload = _load_json_file(path, label="walk-forward reference")
-    result = _walk_forward_from_payload(payload)
+    provenance, walk_forward_payload = _require_reference_envelope(payload)
+    result = _walk_forward_from_payload(walk_forward_payload)
     if result.summary.get("runner_trusted") is not True or result.manifest.get("runner_trusted") is not True:
         raise PaperOperationsError("walk-forward reference must be trusted.")
     execution_contract = result.manifest.get("execution_contract", {})
     if not isinstance(execution_contract, Mapping) or execution_contract.get("paper_only") is not True:
         raise PaperOperationsError("walk-forward reference must remain paper-only.")
+    if provenance.get("manifest_hash") != result.manifest.get("manifest_hash"):
+        raise PaperOperationsError("walk-forward reference manifest hash mismatch.")
+    if provenance.get("result_hash") != validation_manifest_hash(result.as_dict()):
+        raise PaperOperationsError("walk-forward reference result hash mismatch.")
+    if provenance.get("data_signature_hash") != result.manifest.get("data_signature", {}).get("content_hash"):
+        raise PaperOperationsError("walk-forward reference data signature mismatch.")
     return result
 
 
 def _load_promotion_decision(path: str | Path) -> PromotionDecision:
     payload = _load_json_file(path, label="promotion decision")
+    required_keys = {
+        "status",
+        "frozen_selection",
+        "strategy_version",
+        "symbol",
+        "interval",
+        "phase5_manifest",
+        "evidence_hash",
+        "policy_hash",
+        "decision_hash",
+        "criteria_evaluated",
+        "reasons",
+        "recalculated_metrics",
+        "paper_limits",
+        "timestamp_utc",
+        "paper_limits_hash",
+    }
+    missing = sorted(required_keys - set(payload))
+    extra = sorted(set(payload) - required_keys)
+    if missing or extra:
+        problems = []
+        if missing:
+            problems.append(f"missing fields: {', '.join(missing)}")
+        if extra:
+            problems.append(f"unexpected fields: {', '.join(extra)}")
+        raise PaperOperationsError("promotion decision file is invalid: " + "; ".join(problems))
     frozen_selection = payload.get("frozen_selection")
     if not isinstance(frozen_selection, Mapping):
         raise PaperOperationsError("promotion decision file is invalid.")
@@ -191,22 +329,26 @@ def _load_promotion_decision(path: str | Path) -> PromotionDecision:
         )
         for item in payload.get("criteria_evaluated", []) or []
     )
+    try:
+        status = PromotionStatus(payload["status"])
+    except Exception as exc:
+        raise PaperOperationsError("promotion decision status is invalid.") from exc
     return PromotionDecision(
-        status=payload.get("status", PromotionStatus.APPROVED_FOR_MONITORED_PAPER.value),
+        status=status,
         frozen_selection=frozen,
-        strategy_version=payload.get("strategy_version", frozen.strategy_version),
-        symbol=payload.get("symbol", frozen.symbol),
-        interval=payload.get("interval", frozen.interval),
-        phase5_manifest=dict(payload.get("phase5_manifest", {}) or {}),
-        evidence_hash=payload.get("evidence_hash", ""),
-        policy_hash=payload.get("policy_hash", ""),
-        decision_hash=payload.get("decision_hash", ""),
+        strategy_version=payload["strategy_version"],
+        symbol=payload["symbol"],
+        interval=payload["interval"],
+        phase5_manifest=dict(payload["phase5_manifest"]),
+        evidence_hash=payload["evidence_hash"],
+        policy_hash=payload["policy_hash"],
+        decision_hash=payload["decision_hash"],
         criteria_evaluated=criteria,
-        reasons=tuple(payload.get("reasons", []) or []),
-        recalculated_metrics=dict(payload.get("recalculated_metrics", {}) or {}),
-        paper_limits=dict(payload.get("paper_limits", {}) or {}),
-        timestamp_utc=datetime.fromisoformat(str(payload.get("timestamp_utc", "")).replace("Z", "+00:00")),
-        paper_limits_hash=payload.get("paper_limits_hash", ""),
+        reasons=tuple(payload["reasons"]),
+        recalculated_metrics=dict(payload["recalculated_metrics"]),
+        paper_limits=dict(payload["paper_limits"]),
+        timestamp_utc=_parse_utc(payload["timestamp_utc"]),
+        paper_limits_hash=payload["paper_limits_hash"],
     )
 
 
@@ -299,6 +441,22 @@ def doctor(*, data_dir: str | Path | None = None) -> dict[str, Any]:
         load_operational_paper_campaign_contract(paths["campaign_db"])
     except Exception:
         issues.append("operational campaign unavailable.")
+    try:
+        with _acquire_operational_lock(root, scope="doctor_probe"):
+            pass
+    except Exception:
+        issues.append("operational lock unavailable.")
+    backups = backup_list(data_dir=data_dir).get("backups") or []
+    if not backups:
+        issues.append("no valid backup available.")
+    else:
+        try:
+            backup_verify(backup_dir=paths["backups_dir"] / backups[-1])
+        except Exception:
+            issues.append("latest backup verification failed.")
+    restore_report = _load_last_restore_verify_report(paths["backups_dir"])
+    if restore_report is None:
+        issues.append("recent restore verification unavailable.")
     ready = not issues
     return {"status": "READY" if ready else "NOT_READY", "issues": tuple(issues), "paths": {k: _sanitize_path(v, root) for k, v in paths.items()}}
 
@@ -327,8 +485,23 @@ def initialize(*, data_dir: str | Path | None = None, copy_existing_trades: str 
 def phase5_reference(*, input_file: str | Path, output_file: str | Path | None = None) -> dict[str, Any]:
     result = _load_walk_forward_reference(input_file)
     output = Path(output_file) if output_file is not None else _paths()["reference_file"]
-    _write_json(output, result.as_dict())
-    return {"output": str(output), "manifest_hash": result.manifest.get("manifest_hash"), "runner_trusted": result.manifest.get("runner_trusted")}
+    envelope = {
+        _REFERENCE_PROVENANCE_KEY: {
+            "version": _REFERENCE_PROVENANCE_VERSION,
+            "synthetic_test_data": False,
+            "manifest_hash": result.manifest.get("manifest_hash"),
+            "result_hash": validation_manifest_hash(result.as_dict()),
+            "data_signature_hash": result.manifest.get("data_signature", {}).get("content_hash"),
+        },
+        _REFERENCE_PAYLOAD_KEY: result.as_dict(),
+    }
+    _write_json(output, envelope)
+    return {
+        "output": str(output),
+        "manifest_hash": result.manifest.get("manifest_hash"),
+        "runner_trusted": result.manifest.get("runner_trusted"),
+        "synthetic_test_data": False,
+    }
 
 
 def promotion_decision(*, reference_file: str | Path, policy_file: str | Path, output_file: str | Path | None = None) -> dict[str, Any]:
@@ -352,15 +525,16 @@ def cohort_prepare(
     runtime_db: str | Path | None = None,
 ) -> dict[str, Any]:
     runtime_db_path = Path(runtime_db) if runtime_db is not None else _db_paths()["runtime_db"]
-    contract = persist_operational_cohort_contract(
-        runtime_db_path,
-        strategy_version=strategy_version,
-        symbol=symbol,
-        interval=interval,
-        inclusion_rule=inclusion_rule,
-        period_start_utc=_parse_utc(period_start_utc),
-        period_end_utc=_parse_utc(period_end_utc),
-    )
+    with _acquire_operational_lock(runtime_db_path.parent, scope=f"cohort_prepare:{strategy_version}:{symbol}:{interval}"):
+        contract = persist_operational_cohort_contract(
+            runtime_db_path,
+            strategy_version=strategy_version,
+            symbol=symbol,
+            interval=interval,
+            inclusion_rule=inclusion_rule,
+            period_start_utc=_parse_utc(period_start_utc),
+            period_end_utc=_parse_utc(period_end_utc),
+        )
     return {"cohort_hash": contract.cohort_hash, "runtime_db": str(runtime_db_path)}
 
 
@@ -389,20 +563,21 @@ def campaign_prepare(
     reference = _load_walk_forward_reference(reference_file)
     runtime_db_path = Path(runtime_db) if runtime_db is not None else _db_paths()["runtime_db"]
     campaign_db_path = Path(campaign_db) if campaign_db is not None else _db_paths()["campaign_db"]
-    contract = create_operational_paper_campaign(
-        campaign_id=campaign_id,
-        cohort_hash=cohort_hash,
-        strategy_version=strategy_version,
-        symbol=symbol,
-        interval=interval,
-        inclusion_rule=inclusion_rule,
-        period_start_utc=_parse_utc(period_start_utc),
-        period_end_utc=_parse_utc(period_end_utc),
-        policy=policy,
-        reference_walk_forward=reference,
-        runtime_db_path=runtime_db_path,
-        campaign_db_path=campaign_db_path,
-    )
+    with _acquire_operational_lock(campaign_db_path.parent, scope=f"campaign_prepare:{campaign_id}"):
+        contract = create_operational_paper_campaign(
+            campaign_id=campaign_id,
+            cohort_hash=cohort_hash,
+            strategy_version=strategy_version,
+            symbol=symbol,
+            interval=interval,
+            inclusion_rule=inclusion_rule,
+            period_start_utc=_parse_utc(period_start_utc),
+            period_end_utc=_parse_utc(period_end_utc),
+            policy=policy,
+            reference_walk_forward=reference,
+            runtime_db_path=runtime_db_path,
+            campaign_db_path=campaign_db_path,
+        )
     return {"campaign_hash": contract.campaign_hash, "campaign_id": contract.campaign_id}
 
 
@@ -413,13 +588,14 @@ def campaign_status(*, campaign_id: str, campaign_db: str | Path | None = None) 
 
 
 def _load_runtime_session(session_id: str | None = None, *, data_dir: str | Path | None = None, runtime_db: str | Path | None = None):
+    if session_id is None:
+        return None
     store = _runtime_store_for(data_dir, runtime_db)
     try:
         session = get_monitored_session(session_id=session_id, store=store)
         if session is not None:
             return session
-        if session_id is not None:
-            return PaperRuntimeSession.from_store(session_id, store=store)
+        return PaperRuntimeSession.from_store(session_id, store=store)
     except Exception:
         return None
 
@@ -441,17 +617,13 @@ def session_start(
     if decision.strategy_version != contract.strategy_version or decision.symbol != contract.symbol or decision.interval != contract.interval:
         raise PaperOperationsError("promotion decision diverges from campaign scope.")
     session_id = new_session_id()
-    try:
+    with _acquire_operational_lock(_paths(data_dir)["root"], scope=f"session_start:{campaign_id}"):
         session = create_monitored_session(
             decision,
             session_id=session_id,
             session_started_utc=datetime.now(timezone.utc),
             store=_runtime_store_for(data_dir),
         )
-    except Exception:
-        session = _load_runtime_session(data_dir=data_dir)
-        if session is None:
-            raise
     return {"session_id": session.record.session_id if session is not None else session_id, "state": session.record.state.value if session is not None else "N/A"}
 
 
@@ -492,30 +664,135 @@ def _backup_file_hashes(files: list[Path]) -> dict[str, str]:
     return {file.name: _hash_file(file) for file in files if file.exists()}
 
 
+_BACKUP_REQUIRED_FILES = {"trades.db", "paper_runtime.db", "paper_evaluation_campaign.db"}
+
+
+def _sanitize_backup_name(name: str | None) -> str:
+    if name is None:
+        return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    if type(name) is not str:
+        raise PaperOperationsError("backup_name must be a string.")
+    candidate = name.strip()
+    if not candidate:
+        raise PaperOperationsError("backup_name cannot be empty.")
+    if candidate.startswith(("/", "\\")) or ":" in candidate or ".." in Path(candidate).parts:
+        raise PaperOperationsError("backup_name must be a simple identifier.")
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", candidate):
+        raise PaperOperationsError("backup_name must be a simple identifier.")
+    return candidate
+
+
+def _validate_backup_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
+    if not isinstance(manifest, Mapping) or not manifest:
+        raise PaperOperationsError("backup manifest invalid.")
+    required_keys = {"created_at_utc", "data_dir", "campaign_id", "files", "schema_version"}
+    missing = sorted(required_keys - set(manifest))
+    extra = sorted(set(manifest) - required_keys)
+    if missing or extra:
+        problems = []
+        if missing:
+            problems.append(f"missing fields: {', '.join(missing)}")
+        if extra:
+            problems.append(f"unexpected fields: {', '.join(extra)}")
+        raise PaperOperationsError("backup manifest invalid: " + "; ".join(problems))
+    created_at = _parse_utc(manifest["created_at_utc"])
+    if not isinstance(manifest["data_dir"], str) or not manifest["data_dir"].strip():
+        raise PaperOperationsError("backup manifest data_dir is invalid.")
+    if any(sep in manifest["data_dir"] for sep in ("/", "\\")) or ":" in manifest["data_dir"]:
+        raise PaperOperationsError("backup manifest data_dir must be sanitized.")
+    files = manifest["files"]
+    if not isinstance(files, Mapping) or not files:
+        raise PaperOperationsError("backup manifest files are invalid.")
+    if set(files) != _BACKUP_REQUIRED_FILES:
+        raise PaperOperationsError("backup manifest must contain exactly the required database files.")
+    for name, payload in files.items():
+        if not isinstance(payload, Mapping):
+            raise PaperOperationsError("backup manifest file entry is invalid.")
+        if set(payload) != {"sha256"}:
+            raise PaperOperationsError("backup manifest file entry is invalid.")
+        sha256 = payload.get("sha256")
+        if type(sha256) is not str or not sha256.strip():
+            raise PaperOperationsError("backup manifest file hash is invalid.")
+    schema_version = manifest["schema_version"]
+    if type(schema_version) is not int or schema_version <= 0:
+        raise PaperOperationsError("backup manifest schema_version is invalid.")
+    campaign_id = manifest["campaign_id"]
+    if campaign_id is not None and (type(campaign_id) is not str or not campaign_id.strip()):
+        raise PaperOperationsError("backup manifest campaign_id is invalid.")
+    return {
+        "created_at_utc": created_at,
+        "data_dir": manifest["data_dir"].strip(),
+        "campaign_id": campaign_id.strip() if isinstance(campaign_id, str) else None,
+        "files": dict(files),
+        "schema_version": schema_version,
+    }
+
+
 def backup_create(*, data_dir: str | Path | None = None, backup_name: str | None = None) -> dict[str, Any]:
     paths = _paths(data_dir)
     backup_root = paths["backups_dir"]
     backup_root.mkdir(parents=True, exist_ok=True)
-    backup_dir = backup_root / (backup_name or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"))
-    backup_dir.mkdir(parents=False, exist_ok=False)
-    db_files = [paths["trades_db"], paths["runtime_db"], paths["campaign_db"]]
-    copied: list[Path] = []
-    for db_file in db_files:
-        if not db_file.exists():
-            continue
-        target = backup_dir / db_file.name
-        with sqlite3.connect(db_file) as source_conn, sqlite3.connect(target) as target_conn:
-            source_conn.backup(target_conn)
-        copied.append(target)
-    manifest = {
-        "created_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        "data_dir": str(paths["root"]),
-        "campaign_id": _latest_campaign_id(paths["campaign_db"]),
-        "files": {item.name: {"sha256": _hash_file(item)} for item in copied},
-        "schema_version": 1,
-    }
-    _write_json(backup_dir / "manifest.json", manifest)
-    return {"backup_dir": str(backup_dir), "files": sorted(item.name for item in copied), "manifest_hash": hashlib.sha256(json.dumps(manifest, sort_keys=True).encode("utf-8")).hexdigest()}
+    safe_name = _sanitize_backup_name(backup_name)
+    if backup_name is None:
+        safe_name = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    final_backup_dir = backup_root / safe_name
+    if final_backup_dir.exists():
+        raise PaperOperationsError("backup directory already exists.")
+    with _acquire_operational_lock(paths["root"], scope="backup_create"):
+        db_files = [paths["trades_db"], paths["runtime_db"], paths["campaign_db"]]
+        if not all(db_file.exists() for db_file in db_files):
+            raise PaperOperationsError("all operational databases must exist before backup.")
+        temp_backup_dir = Path(tempfile.mkdtemp(prefix=f".{safe_name}.", dir=backup_root))
+        copied: list[Path] = []
+        try:
+            for db_file in db_files:
+                target = temp_backup_dir / db_file.name
+                source_conn = sqlite3.connect(db_file)
+                target_conn = sqlite3.connect(target)
+                try:
+                    source_conn.backup(target_conn)
+                    target_conn.commit()
+                    integrity = target_conn.execute("PRAGMA integrity_check").fetchone()
+                    if not integrity or str(integrity[0]).strip().upper() != "OK":
+                        raise PaperOperationsError("backup integrity check failed.")
+                finally:
+                    try:
+                        target_conn.close()
+                    finally:
+                        source_conn.close()
+                copied.append(target)
+            for sidecar in temp_backup_dir.iterdir():
+                if sidecar.is_file() and sidecar.name.endswith(("-wal", "-shm", "-journal")):
+                    try:
+                        sidecar.unlink()
+                    except Exception:
+                        pass
+            manifest = {
+                "created_at_utc": _utcnow().isoformat().replace("+00:00", "Z"),
+                "data_dir": paths["root"].name,
+                "campaign_id": _latest_campaign_id(paths["campaign_db"]),
+                "files": {item.name: {"sha256": _hash_file(item)} for item in copied},
+                "schema_version": 1,
+            }
+            _validate_backup_manifest(manifest)
+            manifest_path = temp_backup_dir / "manifest.json"
+            _write_json(manifest_path, manifest)
+            if hasattr(os, "fsync"):
+                try:
+                    with manifest_path.open("rb") as handle:
+                        os.fsync(handle.fileno())
+                except OSError:
+                    pass
+            shutil.move(str(temp_backup_dir), str(final_backup_dir))
+            _apply_backup_retention(backup_root, keep=DEFAULT_BACKUP_RETENTION)
+            return {
+                "backup_dir": str(final_backup_dir),
+                "files": sorted(item.name for item in copied),
+                "manifest_hash": hashlib.sha256(json.dumps(manifest, sort_keys=True).encode("utf-8")).hexdigest(),
+            }
+        except Exception:
+            shutil.rmtree(temp_backup_dir, ignore_errors=True)
+            raise
 
 
 def _latest_campaign_id(campaign_db: Path) -> str | None:
@@ -524,6 +801,28 @@ def _latest_campaign_id(campaign_db: Path) -> str | None:
         return snapshot.campaign_id
     except Exception:
         return None
+
+
+def _apply_backup_retention(backup_root: Path, *, keep: int) -> None:
+    if keep <= 0 or not backup_root.exists():
+        return
+    backups: list[tuple[datetime, Path]] = []
+    for entry in backup_root.iterdir():
+        if not entry.is_dir():
+            continue
+        manifest_path = entry / "manifest.json"
+        if not manifest_path.exists():
+            continue
+        try:
+            manifest = _validate_backup_manifest(_load_json_file(manifest_path, label="backup manifest"))
+            backups.append((manifest["created_at_utc"], entry))
+        except Exception:
+            continue
+    backups.sort(key=lambda item: item[0])
+    while len(backups) > keep:
+        _, entry = backups.pop(0)
+        if entry.exists():
+            shutil.rmtree(entry, ignore_errors=True)
 
 
 def backup_list(*, data_dir: str | Path | None = None) -> dict[str, Any]:
@@ -537,13 +836,94 @@ def backup_list(*, data_dir: str | Path | None = None) -> dict[str, Any]:
     return {"backups": backups}
 
 
+def _load_last_restore_verify_report(backup_root: Path) -> dict[str, Any] | None:
+    report_path = backup_root / ".last_restore_verify.json"
+    if not report_path.exists():
+        return None
+    try:
+        report = _load_json_file(report_path, label="restore verification report")
+    except Exception:
+        return None
+    if report.get("verified") is not True:
+        return None
+    return report
+
+
+def _paper_activity_snapshot(paths: Mapping[str, Path]) -> dict[str, Any]:
+    trades_db = str(paths["trades_db"])
+    open_trades: list[dict[str, Any]] = []
+    closed_trades: list[dict[str, Any]] = []
+    decision_logs: list[dict[str, Any]] = []
+    outbox_pending: list[dict[str, Any]] = []
+    issues: list[str] = []
+    try:
+        open_trades = storage.obter_trades_paper_abertos(db_name=trades_db, strict=True)
+    except Exception as exc:
+        issues.append(f"open_trades: {exc.__class__.__name__}")
+    try:
+        closed_trades = storage.obter_ultimos_trades_paper(limite=1000, db_name=trades_db, strict=True)
+    except Exception as exc:
+        issues.append(f"closed_trades: {exc.__class__.__name__}")
+    try:
+        decision_logs = storage.buscar_ultimos_decision_logs(limite=1000, modos=("PAPER_SOL", "VIGIA_BTC"))
+    except Exception as exc:
+        issues.append(f"decision_logs: {exc.__class__.__name__}")
+    try:
+        outbox_pending = storage.obter_outbox_paper_pendentes(db_name=trades_db, strict=True)
+    except Exception as exc:
+        issues.append(f"outbox: {exc.__class__.__name__}")
+
+    def _utc_date(value: Any) -> str | None:
+        if not value:
+            return None
+        try:
+            dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            if dt.tzinfo is None or dt.utcoffset() is None:
+                return None
+            return dt.astimezone(timezone.utc).date().isoformat()
+        except Exception:
+            return None
+
+    closed_dates = sorted({date for date in (_utc_date(trade.get("fechado_em") or trade.get("timestamp")) for trade in closed_trades) if date})
+    log_regimes = sorted({
+        str(value).strip().upper()
+        for item in decision_logs
+        for value in [item.get("regime")]
+        if type(value) is str and value.strip()
+    })
+    last_activity = None
+    for source in (decision_logs, closed_trades, open_trades):
+        if source:
+            candidate = source[0].get("timestamp") or source[0].get("fechado_em") or source[0].get("created_at_utc")
+            if candidate:
+                last_activity = candidate
+                break
+
+    return {
+        "open_positions": len(open_trades),
+        "closed_trades": len(closed_trades),
+        "distinct_days": len(closed_dates),
+        "regimes": log_regimes,
+        "outbox_pending": len(outbox_pending),
+        "last_activity": last_activity,
+        "issues": tuple(issues),
+    }
+
+
 def backup_verify(*, backup_dir: str | Path) -> dict[str, Any]:
     backup_path = Path(backup_dir)
-    manifest = _load_json_file(backup_path / "manifest.json", label="backup manifest")
-    files = manifest.get("files", {})
-    if not isinstance(files, Mapping):
-        raise PaperOperationsError("backup manifest invalid.")
-    for name, expected in files.items():
+    manifest = _validate_backup_manifest(_load_json_file(backup_path / "manifest.json", label="backup manifest"))
+    sidecar_suffixes = ("-wal", "-shm", "-journal")
+    actual_files = {
+        entry.name
+        for entry in backup_path.iterdir()
+        if entry.is_file() and not entry.name.endswith(sidecar_suffixes)
+    }
+    allowed_files = set(manifest["files"]) | {"manifest.json"}
+    extra_files = sorted(actual_files - allowed_files)
+    if extra_files:
+        raise PaperOperationsError("backup directory contains unexpected files.")
+    for name, expected in manifest["files"].items():
         db_file = backup_path / name
         if not db_file.exists():
             raise PaperOperationsError("backup file missing.")
@@ -551,28 +931,107 @@ def backup_verify(*, backup_dir: str | Path) -> dict[str, Any]:
             raise PaperOperationsError("backup file hash mismatch.")
         if not _sqlite_integrity_ok(db_file):
             raise PaperOperationsError("backup integrity check failed.")
-    return {"backup_dir": str(backup_path), "verified": True}
+    for sidecar in backup_path.iterdir():
+        if sidecar.is_file() and sidecar.name.endswith(sidecar_suffixes):
+            try:
+                sidecar.unlink()
+            except Exception:
+                pass
+    return {
+        "backup_dir": backup_path.name,
+        "verified": True,
+        "created_at_utc": manifest["created_at_utc"].astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "campaign_id": manifest["campaign_id"],
+        "files": sorted(manifest["files"]),
+    }
 
 
 def restore_verify(*, backup_dir: str | Path) -> dict[str, Any]:
     backup_path = Path(backup_dir)
-    backup_verify(backup_dir=backup_path)
+    verification = backup_verify(backup_dir=backup_path)
     temp_dir = Path(tempfile.mkdtemp(prefix="paper_restore_verify_"))
     try:
-        for file_name in ("trades.db", "paper_runtime.db", "paper_evaluation_campaign.db"):
+        restored_files = []
+        for file_name in _BACKUP_REQUIRED_FILES:
             src = backup_path / file_name
-            if src.exists():
-                shutil.copy2(src, temp_dir / file_name)
-                if not _sqlite_integrity_ok(temp_dir / file_name):
-                    raise PaperOperationsError("restore verification integrity failed.")
-        return {"restored_to": str(temp_dir), "verified": True}
+            if not src.exists():
+                raise PaperOperationsError("restore verification file missing.")
+            target = temp_dir / file_name
+            shutil.copy2(src, target)
+            if not _sqlite_integrity_ok(target):
+                raise PaperOperationsError("restore verification integrity failed.")
+            restored_files.append(file_name)
+        verification_report = {
+            "backup_dir": backup_path.name,
+            "verified": True,
+            "files": sorted(restored_files),
+            "created_at_utc": _utcnow().isoformat().replace("+00:00", "Z"),
+        }
+        _write_json(backup_path.parent / ".last_restore_verify.json", verification_report)
+        return verification_report
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def restore_apply(*, backup_dir: str | Path, data_dir: str | Path | None = None, confirm: bool = False) -> dict[str, Any]:
+    if not confirm:
+        raise PaperOperationsError("restore apply requires explicit confirmation.")
+    backup_path = Path(backup_dir)
+    backup_verify(backup_dir=backup_path)
+    paths = _paths(data_dir)
+    root = paths["root"]
+    runtime_store = PaperRuntimeStore(paths["runtime_db"])
+    try:
+        active_sessions = runtime_store.list_active_sessions() if paths["runtime_db"].exists() else []
+    except Exception:
+        active_sessions = []
+    if active_sessions:
+        raise PaperOperationsError("restore apply requires an inactive runtime.")
+    with _acquire_operational_lock(root, scope="restore_apply"):
+        staging_dir = Path(tempfile.mkdtemp(prefix=".restore_stage.", dir=paths["backups_dir"]))
+        copied_files: list[str] = []
+        try:
+            for file_name in _BACKUP_REQUIRED_FILES:
+                src = backup_path / file_name
+                if not src.exists():
+                    raise PaperOperationsError("restore source file missing.")
+                shutil.copy2(src, staging_dir / file_name)
+                if not _sqlite_integrity_ok(staging_dir / file_name):
+                    raise PaperOperationsError("restore staging integrity failed.")
+                copied_files.append(file_name)
+            for file_name in _BACKUP_REQUIRED_FILES:
+                target = paths["root"] / file_name
+                source = staging_dir / file_name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                source_conn = sqlite3.connect(source)
+                target_conn = sqlite3.connect(target)
+                try:
+                    source_conn.backup(target_conn)
+                    target_conn.commit()
+                    integrity = target_conn.execute("PRAGMA integrity_check").fetchone()
+                    if not integrity or str(integrity[0]).strip().upper() != "OK":
+                        raise PaperOperationsError("restore apply integrity failed.")
+                finally:
+                    try:
+                        target_conn.close()
+                    finally:
+                        source_conn.close()
+            result = {
+                "restored_from": backup_path.name,
+                "restored_files": sorted(copied_files),
+                "restored_at_utc": _utcnow().isoformat().replace("+00:00", "Z"),
+            }
+            _write_json(paths["backups_dir"] / ".last_restore_apply.json", result)
+            return result
+        except Exception:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            raise
 
 
 def report(*, data_dir: str | Path | None = None, campaign_id: str | None = None, session_id: str | None = None) -> dict[str, Any]:
     paths = _paths(data_dir)
     doctor_report = doctor(data_dir=data_dir)
+    activity = _paper_activity_snapshot(paths)
     campaign_snapshot = None
     campaign_error = None
     if campaign_id:
@@ -593,8 +1052,10 @@ def report(*, data_dir: str | Path | None = None, campaign_id: str | None = None
         "campaign_error": campaign_error,
         "session": session_snapshot,
         "session_error": session_error,
+        "activity": activity,
         "paths": {k: _sanitize_path(v, paths["root"]) for k, v in paths.items()},
         "last_backup": (backup_list(data_dir=data_dir).get("backups") or [None])[-1],
+        "last_restore_verify": _load_last_restore_verify_report(paths["backups_dir"]),
     }
 
 
@@ -697,6 +1158,10 @@ def build_parser() -> argparse.ArgumentParser:
     restore_sub = restore.add_subparsers(dest="restore_command", required=True)
     restore_verify_parser = restore_sub.add_parser("verify", help="Restore a backup into a temp directory and verify it.")
     restore_verify_parser.add_argument("--backup-dir", required=True)
+    restore_apply_parser = restore_sub.add_parser("apply", help="Apply a verified backup to the local operational data directory.")
+    restore_apply_parser.add_argument("--backup-dir", required=True)
+    restore_apply_parser.add_argument("--data-dir", default=None)
+    restore_apply_parser.add_argument("--confirm", action="store_true", help="Explicitly confirm restore application.")
 
     report_parser = subparsers.add_parser("report", help="Show the local paper operation report.")
     report_parser.add_argument("--data-dir", default=None)
@@ -802,6 +1267,9 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
         if args.command == "restore" and args.restore_command == "verify":
             _print_result(restore_verify(backup_dir=args.backup_dir))
+            return 0
+        if args.command == "restore" and args.restore_command == "apply":
+            _print_result(restore_apply(backup_dir=args.backup_dir, data_dir=args.data_dir, confirm=args.confirm))
             return 0
         if args.command == "report":
             _print_result(report(data_dir=args.data_dir, campaign_id=args.campaign_id, session_id=args.session_id))
