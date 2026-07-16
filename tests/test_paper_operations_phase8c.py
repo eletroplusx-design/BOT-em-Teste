@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from functools import lru_cache
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
+import paper_operations as paper_ops
 from domain.serialization import serialize_value
 from paper_evaluation import PaperEvaluationPolicy
 from paper_operations import (
@@ -40,8 +45,7 @@ from backtesting import BacktestConfig, LeakFreeBacktestEngine
 from validation import CandidateConfig, SelectionCriteria, ValidationSplitConfig, WalkForwardValidator
 from validation import TrustedLeakFreeBacktestRunner
 from validation.artifacts import manifest_hash as validation_manifest_hash
-
-from tests.test_promotion_phase6 import _promotion_result
+import storage
 
 
 def _write_json(path: Path, payload) -> None:
@@ -55,8 +59,128 @@ def _enable_operational_tmp_dirs(monkeypatch) -> None:
     monkeypatch.setattr("paper_operations._ALLOW_TEMPORARY_DATA_DIRS_FOR_TESTS", True)
 
 
-def _trusted_walk_forward_envelope(tmp_path: Path, sample_btc_data):
-    result = _promotion_result()
+def _operational_reference_frame(rows: int = 1200) -> pd.DataFrame:
+    closes = []
+    for idx in range(rows):
+        bloco = idx % 40
+        if bloco < 20:
+            closes.append(100 + bloco)
+        else:
+            closes.append(120 - (bloco - 20))
+    frame = pd.DataFrame(
+        {
+            "open_time": pd.date_range("2025-01-01", periods=rows, freq="h", tz="UTC"),
+            "close_time": pd.date_range("2025-01-01", periods=rows, freq="h", tz="UTC"),
+            "open": [valor - 1 for valor in closes],
+            "high": [valor + 1 for valor in closes],
+            "low": [valor - 2 for valor in closes],
+            "close": closes,
+            "volume": [1000 + (idx % 50) * 10 for idx in range(rows)],
+        }
+    )
+    frame.attrs["fonte_dados"] = "BINANCE"
+    return frame
+
+
+@lru_cache(maxsize=1)
+def _real_walk_forward_reference():
+    frame = _operational_reference_frame()
+    candidate = CandidateConfig.from_mapping("trend_follow", {"mode": "deterministic"})
+    costs = {
+        "entry_fee_rate": Decimal("0.0004"),
+        "exit_fee_rate": Decimal("0.0004"),
+        "spread_bps": Decimal("5"),
+        "slippage_bps": Decimal("5"),
+        "leverage": Decimal("1"),
+    }
+
+    def strategy_factory(_candidate):
+        def strategy(history, snapshot):
+            if len(history) < 3:
+                return None
+            last = history[-1]
+            prev = history[-2]
+            close = Decimal(str(last.close))
+            if last.close > prev.close:
+                return Signal(
+                    symbol="BTCUSDT",
+                    direction=Direction.COMPRA,
+                    entry=close,
+                    stop_loss=close - Decimal("5"),
+                    take_profit=close + Decimal("5"),
+                    rr=Decimal("1"),
+                    timestamp=last.close_time,
+                    source=DataSource.PAPER,
+                    score=Decimal("7"),
+                    regime="BULL",
+                    volume_status="ALTO",
+                    reason="trend follow",
+                    strategy_version="v4_walk_forward",
+                )
+            return Signal(
+                symbol="BTCUSDT",
+                direction=Direction.VENDA,
+                entry=close,
+                stop_loss=close + Decimal("5"),
+                take_profit=close - Decimal("5"),
+                rr=Decimal("1"),
+                timestamp=last.close_time,
+                source=DataSource.PAPER,
+                score=Decimal("7"),
+                regime="BEAR",
+                volume_status="ALTO",
+                reason="trend follow",
+                strategy_version="v4_walk_forward",
+            )
+
+        return strategy
+
+    runner = TrustedLeakFreeBacktestRunner(
+        engine_factory=lambda: LeakFreeBacktestEngine(
+            BacktestConfig(
+                initial_capital=Decimal("10000"),
+                risk_percent=Decimal("1"),
+                entry_fee_rate=costs["entry_fee_rate"],
+                exit_fee_rate=costs["exit_fee_rate"],
+                spread_bps=costs["spread_bps"],
+                slippage_bps=costs["slippage_bps"],
+                leverage=Decimal("1"),
+                symbol="BTCUSDT",
+                interval="1h",
+                strategy_version="v4_walk_forward",
+            )
+        ),
+        strategy_factory=strategy_factory,
+        symbol="BTCUSDT",
+        interval="1h",
+    )
+    validator = WalkForwardValidator(
+        split_config=ValidationSplitConfig(
+            mode="rolling",
+            train_bars=120,
+            validation_bars=40,
+            test_bars=40,
+            warmup_bars=20,
+            purge_bars=5,
+            embargo_bars=5,
+            step_bars=40,
+        ),
+        selection_criteria=SelectionCriteria(min_total_trades=1),
+        strategy_version="v4_walk_forward",
+        symbol="BTCUSDT",
+        interval="1h",
+        costs=costs,
+        require_trusted_runner=True,
+    )
+    result = validator.run(frame, [candidate], runner=runner)
+    assert result.summary["runner_trusted"] is True
+    assert result.summary["total_trades"] > 0
+    assert result.summary["profit_factor"] is not None
+    return result
+
+
+def _trusted_walk_forward_envelope(tmp_path: Path):
+    result = _real_walk_forward_reference()
     envelope = {
         "operational_provenance": {
             "version": 1,
@@ -72,14 +196,85 @@ def _trusted_walk_forward_envelope(tmp_path: Path, sample_btc_data):
     return input_path, result
 
 
-def _prepare_full_operational_flow(tmp_path: Path, monkeypatch, sample_btc_data):
+def _seed_decision_log(db_path: Path, *, modo: str, decisao: str, symbol: str) -> None:
+    storage.criar_tabelas(db_name=str(db_path))
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO decision_logs (
+                timestamp, symbol, modo, decisao, direcao, preco, regime, adx,
+                volume_status, motivo, bloqueado_por, fonte_dados, erro, strategy_version
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                symbol,
+                modo,
+                decisao,
+                "N/A",
+                1.0,
+                "BULL",
+                20.0,
+                "ALTO",
+                "test",
+                "N/A",
+                "BINANCE",
+                None,
+                "v2_risk_safe",
+            ),
+        )
+        conn.commit()
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def _sqlite_logical_fingerprint(path: Path) -> str:
+    if not path.exists():
+        return "missing"
+    with sqlite3.connect(path) as conn:
+        table_names = [
+            row[0]
+            for row in conn.execute(
+                """
+                SELECT name
+                FROM sqlite_master
+                WHERE type='table' AND name NOT LIKE 'sqlite_%'
+                ORDER BY name
+                """
+            ).fetchall()
+        ]
+        payload: list[dict[str, object]] = []
+        for table_name in table_names:
+            columns = [row[1] for row in conn.execute(f'PRAGMA table_info("{table_name}")').fetchall()]
+            rows = conn.execute(f'SELECT * FROM "{table_name}" ORDER BY rowid').fetchall()
+            payload.append({"table": table_name, "columns": columns, "rows": rows})
+    digest = hashlib.sha256()
+    digest.update(json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8"))
+    return digest.hexdigest()
+
+
+def _sqlite_table_rows(path: Path, table: str):
+    with sqlite3.connect(path) as conn:
+        return conn.execute(f'SELECT * FROM "{table}" ORDER BY rowid').fetchall()
+
+
+def _sqlite_table_count(path: Path, table: str) -> int:
+    with sqlite3.connect(path) as conn:
+        return conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
+
+
+def _prepare_full_operational_flow(tmp_path: Path, monkeypatch):
     _enable_operational_tmp_dirs(monkeypatch)
     monkeypatch.setattr("paper_operations.live_trading_permitted", lambda: False)
-    monkeypatch.setattr("paper_operations.validate_component_config", lambda component: (True, []))
     data_dir = tmp_path / "paper_data"
     initialize(data_dir=data_dir)
 
-    reference_input, real_result = _trusted_walk_forward_envelope(tmp_path, sample_btc_data)
+    reference_input, real_result = _trusted_walk_forward_envelope(tmp_path)
     reference_output = data_dir / "reference.json"
     phase5_reference(input_file=reference_input, output_file=reference_output)
 
@@ -134,13 +329,25 @@ def test_operational_data_dir_rejects_temporary_paths_by_default(tmp_path, monke
 
 def test_phase5_reference_rejects_synthetic_fixture(tmp_path):
     synthetic_reference = tmp_path / "synthetic_reference.json"
-    _write_json(synthetic_reference, _promotion_result().as_dict())
+    _write_json(
+        synthetic_reference,
+        {
+            "operational_provenance": {
+                "version": 1,
+                "synthetic_test_data": True,
+                "manifest_hash": "synthetic",
+                "result_hash": "synthetic",
+                "data_signature_hash": "synthetic",
+            },
+            "walk_forward": {"windows": [], "summary": {}, "manifest": {}},
+        },
+    )
     with pytest.raises(PaperOperationsError):
         phase5_reference(input_file=synthetic_reference, output_file=tmp_path / "output.json")
 
 
 def test_phase8c_full_local_operations_flow_uses_real_reference_and_sanitized_reports(tmp_path, monkeypatch, sample_btc_data):
-    flow = _prepare_full_operational_flow(tmp_path, monkeypatch, sample_btc_data)
+    flow = _prepare_full_operational_flow(tmp_path, monkeypatch)
     data_dir = flow["data_dir"]
 
     session = session_start(
@@ -178,11 +385,15 @@ def test_phase8c_full_local_operations_flow_uses_real_reference_and_sanitized_re
 
     doctor_report = doctor(data_dir=data_dir)
     assert doctor_report["status"] == "READY"
+    assert doctor_report["local_operations_ready"] is True
 
     report_result = report(data_dir=data_dir, campaign_id=flow["campaign_id"], session_id=session["session_id"])
     assert report_result["doctor"]["status"] == "READY"
+    assert report_result["doctor"]["local_operations_ready"] is True
+    assert report_result["doctor"]["bot_runtime_ready"] in {True, False}
     assert report_result["campaign"]["campaign_id"] == flow["campaign_id"]
     assert report_result["session"]["session_id"] == session["session_id"]
+    assert report_result["operational_summary"]["local_operations_ready"] is True
     assert report_result["activity"]["open_positions"] >= 0
     assert report_result["activity"]["closed_trades"] >= 0
     assert report_result["activity"]["distinct_days"] >= 0
@@ -191,7 +402,7 @@ def test_phase8c_full_local_operations_flow_uses_real_reference_and_sanitized_re
 
 
 def test_promotion_decision_requires_status_and_session_start_fails_closed(tmp_path, monkeypatch, sample_btc_data):
-    flow = _prepare_full_operational_flow(tmp_path, monkeypatch, sample_btc_data)
+    flow = _prepare_full_operational_flow(tmp_path, monkeypatch)
     data_dir = flow["data_dir"]
     bad_decision = tmp_path / "bad_decision.json"
     payload = json.loads(flow["decision_file"].read_text(encoding="utf-8"))
@@ -208,7 +419,7 @@ def test_promotion_decision_requires_status_and_session_start_fails_closed(tmp_p
 
 
 def test_session_start_does_not_fallback_to_other_active_session(tmp_path, monkeypatch, sample_btc_data):
-    flow = _prepare_full_operational_flow(tmp_path, monkeypatch, sample_btc_data)
+    flow = _prepare_full_operational_flow(tmp_path, monkeypatch)
     data_dir = flow["data_dir"]
     session = session_start(
         campaign_id=flow["campaign_id"],
@@ -228,12 +439,12 @@ def test_session_start_does_not_fallback_to_other_active_session(tmp_path, monke
         )
 
 
-def test_lock_blocks_live_process_and_recovers_stale_lock(tmp_path, monkeypatch, sample_btc_data):
-    flow = _prepare_full_operational_flow(tmp_path, monkeypatch, sample_btc_data)
+def test_lock_malformed_blocks_and_requires_admin_recovery(tmp_path, monkeypatch):
+    flow = _prepare_full_operational_flow(tmp_path, monkeypatch)
     data_dir = flow["data_dir"]
     lock_path = _lock_file_path(data_dir, scope=f"session_start:{flow['campaign_id']}")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    _write_json(lock_path, {"pid": os.getpid(), "created_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), "scope": f"session_start:{flow['campaign_id']}"})
+    _write_json(lock_path, {"pid": 999999, "scope": "session_start"})
     with pytest.raises(PaperOperationsError):
         session_start(
             campaign_id=flow["campaign_id"],
@@ -241,7 +452,43 @@ def test_lock_blocks_live_process_and_recovers_stale_lock(tmp_path, monkeypatch,
             campaign_db=data_dir / "paper_evaluation_campaign.db",
             data_dir=data_dir,
         )
-    _write_json(lock_path, {"pid": 999999, "created_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), "scope": f"session_start:{flow['campaign_id']}"})
+    assert paper_operations_main(["lock", "recover", "--data-dir", str(data_dir), "--confirm"]) == 0
+    assert not lock_path.exists()
+    recovered = session_start(
+        campaign_id=flow["campaign_id"],
+        decision_file=flow["decision_file"],
+        campaign_db=data_dir / "paper_evaluation_campaign.db",
+        data_dir=data_dir,
+    )
+    assert recovered["session_id"]
+
+
+def test_lock_blocks_live_process_and_recovers_stale_lock(tmp_path, monkeypatch):
+    flow = _prepare_full_operational_flow(tmp_path, monkeypatch)
+    data_dir = flow["data_dir"]
+    lock_path = _lock_file_path(data_dir, scope=f"session_start:{flow['campaign_id']}")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    live_payload = {
+        "operation": f"session_start:{flow['campaign_id']}",
+        "scope": f"session_start:{flow['campaign_id']}",
+        "pid": os.getpid(),
+        "instance_id": "live-instance",
+        "nonce": "live-nonce",
+        "created_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+    _write_json(lock_path, live_payload)
+    with pytest.raises(PaperOperationsError):
+        session_start(
+            campaign_id=flow["campaign_id"],
+            decision_file=flow["decision_file"],
+            campaign_db=data_dir / "paper_evaluation_campaign.db",
+            data_dir=data_dir,
+        )
+    stale_payload = dict(live_payload)
+    stale_payload["pid"] = 999999
+    stale_payload["instance_id"] = "stale-instance"
+    _write_json(lock_path, stale_payload)
+    assert paper_operations_main(["lock", "recover", "--data-dir", str(data_dir), "--confirm"]) == 0
     recovered = session_start(
         campaign_id=flow["campaign_id"],
         decision_file=flow["decision_file"],
@@ -252,7 +499,7 @@ def test_lock_blocks_live_process_and_recovers_stale_lock(tmp_path, monkeypatch,
 
 
 def test_backup_manifest_and_restore_apply_hardened(tmp_path, monkeypatch, sample_btc_data):
-    flow = _prepare_full_operational_flow(tmp_path, monkeypatch, sample_btc_data)
+    flow = _prepare_full_operational_flow(tmp_path, monkeypatch)
     data_dir = flow["data_dir"]
     backup = backup_create(data_dir=data_dir, backup_name="valid-backup")
     manifest_path = Path(backup["backup_dir"]) / "manifest.json"
@@ -277,7 +524,7 @@ def test_backup_manifest_and_restore_apply_hardened(tmp_path, monkeypatch, sampl
 
 
 def test_backup_retention_keeps_latest_valid_backups(tmp_path, monkeypatch, sample_btc_data):
-    flow = _prepare_full_operational_flow(tmp_path, monkeypatch, sample_btc_data)
+    flow = _prepare_full_operational_flow(tmp_path, monkeypatch)
     data_dir = flow["data_dir"]
     names = []
     for index in range(8):
@@ -289,14 +536,16 @@ def test_backup_retention_keeps_latest_valid_backups(tmp_path, monkeypatch, samp
 
 
 def test_doctor_requires_backup_and_restore_verify_and_report_includes_activity(tmp_path, monkeypatch, sample_btc_data):
-    flow = _prepare_full_operational_flow(tmp_path, monkeypatch, sample_btc_data)
+    flow = _prepare_full_operational_flow(tmp_path, monkeypatch)
     data_dir = flow["data_dir"]
     backup = backup_create(data_dir=data_dir, backup_name="doctor-backup")
     restore_verify(backup_dir=backup["backup_dir"])
     doctor_report = doctor(data_dir=data_dir)
     assert doctor_report["status"] == "READY"
+    assert doctor_report["local_operations_ready"] is True
 
     report_result = report(data_dir=data_dir, campaign_id=flow["campaign_id"], session_id=None)
+    assert report_result["doctor"]["local_operations_ready"] is True
     assert report_result["activity"]["open_positions"] >= 0
     assert report_result["activity"]["closed_trades"] >= 0
     assert report_result["activity"]["distinct_days"] >= 0
@@ -317,7 +566,7 @@ def test_cli_rejects_temporary_paths_and_missing_status(tmp_path, monkeypatch, s
     captured = capsys.readouterr()
     assert "temporary directory" in captured.err or "error:" in captured.err
 
-    flow = _prepare_full_operational_flow(tmp_path, monkeypatch, sample_btc_data)
+    flow = _prepare_full_operational_flow(tmp_path, monkeypatch)
     bad_decision = tmp_path / "bad_decision_cli.json"
     payload = json.loads(flow["decision_file"].read_text(encoding="utf-8"))
     payload.pop("status", None)
@@ -335,3 +584,121 @@ def test_cli_rejects_temporary_paths_and_missing_status(tmp_path, monkeypatch, s
         str(flow["data_dir"]),
     ])
     assert exit_code == 1
+
+
+def test_report_uses_selected_database_for_decision_logs(tmp_path, monkeypatch):
+    flow = _prepare_full_operational_flow(tmp_path, monkeypatch)
+    data_dir = flow["data_dir"]
+    db_a = data_dir / "trades.db"
+    db_b = tmp_path / "other" / "trades.db"
+    db_b.parent.mkdir(parents=True, exist_ok=True)
+    _seed_decision_log(db_a, modo="PAPER_SOL", decisao="AGUARDAR", symbol="BTCUSDT")
+    _seed_decision_log(db_b, modo="PAPER_SOL", decisao="BLOQUEADO", symbol="ETHUSDT")
+
+    captured: dict[str, object] = {}
+    original = storage.buscar_ultimos_decision_logs
+
+    def wrapped(*args, **kwargs):
+        captured["db_name"] = kwargs.get("db_name")
+        captured["strict"] = kwargs.get("strict")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(storage, "buscar_ultimos_decision_logs", wrapped)
+    report_result = report(data_dir=data_dir, campaign_id=flow["campaign_id"], session_id=None)
+    assert captured["db_name"] == str(db_a)
+    assert captured["strict"] is True
+    assert "operational_summary" in report_result
+
+
+def test_backup_verify_is_read_only(tmp_path, monkeypatch):
+    flow = _prepare_full_operational_flow(tmp_path, monkeypatch)
+    data_dir = flow["data_dir"]
+    backup = backup_create(data_dir=data_dir, backup_name="readonly-backup")
+    backup_dir = Path(backup["backup_dir"])
+    before = {path.name: _sha256_file(path) for path in backup_dir.iterdir() if path.is_file()}
+
+    verified = backup_verify(backup_dir=backup["backup_dir"])
+    assert verified["verified"] is True
+    after = {path.name: _sha256_file(path) for path in backup_dir.iterdir() if path.is_file()}
+    assert after == before
+
+
+def test_backup_retention_ignores_corrupted_backups(tmp_path, monkeypatch):
+    flow = _prepare_full_operational_flow(tmp_path, monkeypatch)
+    data_dir = flow["data_dir"]
+    for index in range(6):
+        backup_create(data_dir=data_dir, backup_name=f"backup-{index:02d}")
+    corrupted = Path(backup_create(data_dir=data_dir, backup_name="backup-corrupted")["backup_dir"])
+    (corrupted / "manifest.json").write_text("{", encoding="utf-8")
+    backup_create(data_dir=data_dir, backup_name="backup-06")
+    backups = backup_list(data_dir=data_dir)["backups"]
+    assert "backup-00" in backups
+    assert "backup-corrupted" in backups
+
+
+def test_restore_apply_rolls_back_on_intermediate_failure(tmp_path, monkeypatch):
+    flow = _prepare_full_operational_flow(tmp_path, monkeypatch)
+    data_dir = flow["data_dir"]
+    backup = backup_create(data_dir=data_dir, backup_name="rollback-backup")
+    _seed_decision_log(data_dir / "trades.db", modo="PAPER_SOL", decisao="ERRO", symbol="BTCUSDT")
+    before_trade_rows = _sqlite_table_rows(data_dir / "trades.db", "decision_logs")
+    before_runtime_meta = _sqlite_table_rows(data_dir / "paper_runtime.db", "paper_runtime_meta")
+    before_runtime_contracts = _sqlite_table_rows(data_dir / "paper_runtime.db", "paper_evaluation_cohort_contracts")
+    before_runtime_counts = {
+        table: _sqlite_table_count(data_dir / "paper_runtime.db", table)
+        for table in ("paper_runtime_events", "paper_runtime_idempotency", "paper_runtime_sessions", "paper_runtime_snapshots")
+    }
+    before_campaign_contracts = _sqlite_table_rows(data_dir / "paper_evaluation_campaign.db", "paper_evaluation_campaign_contracts")
+    before_campaign_reports = _sqlite_table_rows(data_dir / "paper_evaluation_campaign.db", "paper_evaluation_campaign_reports")
+    calls = {"count": 0}
+    original_restore = paper_ops._restore_sqlite_file
+
+    def failing_restore(source, target):
+        calls["count"] += 1
+        if calls["count"] == 2:
+            raise PaperOperationsError("forced restore failure")
+        return original_restore(source, target)
+
+    monkeypatch.setattr(paper_ops, "_restore_sqlite_file", failing_restore)
+    with pytest.raises(PaperOperationsError):
+        restore_apply(backup_dir=backup["backup_dir"], data_dir=data_dir, confirm=True)
+    assert _sqlite_table_rows(data_dir / "trades.db", "decision_logs") == before_trade_rows
+    assert _sqlite_table_rows(data_dir / "paper_runtime.db", "paper_runtime_meta") == before_runtime_meta
+    assert _sqlite_table_rows(data_dir / "paper_runtime.db", "paper_evaluation_cohort_contracts") == before_runtime_contracts
+    assert {
+        table: _sqlite_table_count(data_dir / "paper_runtime.db", table)
+        for table in ("paper_runtime_events", "paper_runtime_idempotency", "paper_runtime_sessions", "paper_runtime_snapshots")
+    } == before_runtime_counts
+    assert _sqlite_table_rows(data_dir / "paper_evaluation_campaign.db", "paper_evaluation_campaign_contracts") == before_campaign_contracts
+    assert _sqlite_table_rows(data_dir / "paper_evaluation_campaign.db", "paper_evaluation_campaign_reports") == before_campaign_reports
+
+
+def test_restore_verify_receipt_expires_and_blocks_doctor(tmp_path, monkeypatch):
+    flow = _prepare_full_operational_flow(tmp_path, monkeypatch)
+    data_dir = flow["data_dir"]
+    backup = backup_create(data_dir=data_dir, backup_name="expiry-backup")
+    receipt = restore_verify(backup_dir=backup["backup_dir"])
+    assert receipt["verified"] is True
+    expires_at = datetime.fromisoformat(receipt["expires_at_utc"].replace("Z", "+00:00"))
+    monkeypatch.setattr(paper_ops, "_utcnow", lambda: expires_at + timedelta(minutes=1))
+    doctor_report = doctor(data_dir=data_dir)
+    assert doctor_report["status"] == "NOT_READY"
+    assert doctor_report["local_operations_ready"] is False
+    assert "recent restore verification unavailable." in doctor_report["local_issues"]
+
+
+def test_storage_decision_logs_use_explicit_db_name_and_strict(tmp_path):
+    db_a = tmp_path / "paper_data_a" / "trades.db"
+    db_b = tmp_path / "paper_data_b" / "trades.db"
+    db_a.parent.mkdir(parents=True, exist_ok=True)
+    db_b.parent.mkdir(parents=True, exist_ok=True)
+    _seed_decision_log(db_a, modo="PAPER_SOL", decisao="AGUARDAR", symbol="BTCUSDT")
+    _seed_decision_log(db_b, modo="VIGIA_BTC", decisao="BLOQUEADO", symbol="ETHUSDT")
+
+    logs_a = storage.buscar_ultimos_decision_logs(limite=5, db_name=str(db_a), strict=True)
+    logs_b = storage.buscar_ultimos_decision_logs(limite=5, db_name=str(db_b), strict=True)
+
+    assert logs_a[0]["symbol"] == "BTCUSDT"
+    assert logs_b[0]["symbol"] == "ETHUSDT"
+    assert logs_a[0]["modo"] == "PAPER_SOL"
+    assert logs_b[0]["modo"] == "VIGIA_BTC"

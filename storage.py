@@ -638,25 +638,43 @@ def atualizar_outbox_paper_trade(
         return False
 
 
-def buscar_ultimos_decision_logs(limite=10, modos=None):
+def buscar_ultimos_decision_logs(limite=10, modos=None, db_name=DB_NAME, strict=False):
     try:
-        criar_tabelas()
-        with sqlite3.connect(DB_NAME) as conn:
-            cursor = conn.cursor()
-            query = (
-                "SELECT id, timestamp, symbol, modo, decisao, direcao, preco, regime, adx, "
-                "volume_status, motivo, bloqueado_por, fonte_dados, erro, strategy_version "
-                "FROM decision_logs"
-            )
-            parametros = []
-            if modos:
-                modos = list(modos)
-                placeholders = ",".join("?" for _ in modos)
-                query += f" WHERE modo IN ({placeholders})"
-                parametros.extend(modos)
-            query += " ORDER BY timestamp DESC LIMIT ?"
-            parametros.append(limite)
-            rows = cursor.execute(query, parametros).fetchall()
+        if strict:
+            with _abrir_conexao_leitura_strita(db_name) as conn:
+                cursor = conn.cursor()
+                query = (
+                    "SELECT id, timestamp, symbol, modo, decisao, direcao, preco, regime, adx, "
+                    "volume_status, motivo, bloqueado_por, fonte_dados, erro, strategy_version "
+                    "FROM decision_logs"
+                )
+                parametros = []
+                if modos:
+                    modos = list(modos)
+                    placeholders = ",".join("?" for _ in modos)
+                    query += f" WHERE modo IN ({placeholders})"
+                    parametros.extend(modos)
+                query += " ORDER BY timestamp DESC LIMIT ?"
+                parametros.append(limite)
+                rows = cursor.execute(query, parametros).fetchall()
+        else:
+            criar_tabelas(db_name)
+            with sqlite3.connect(db_name) as conn:
+                cursor = conn.cursor()
+                query = (
+                    "SELECT id, timestamp, symbol, modo, decisao, direcao, preco, regime, adx, "
+                    "volume_status, motivo, bloqueado_por, fonte_dados, erro, strategy_version "
+                    "FROM decision_logs"
+                )
+                parametros = []
+                if modos:
+                    modos = list(modos)
+                    placeholders = ",".join("?" for _ in modos)
+                    query += f" WHERE modo IN ({placeholders})"
+                    parametros.extend(modos)
+                query += " ORDER BY timestamp DESC LIMIT ?"
+                parametros.append(limite)
+                rows = cursor.execute(query, parametros).fetchall()
         return [
             {
                 "id": row[0],
@@ -678,8 +696,7 @@ def buscar_ultimos_decision_logs(limite=10, modos=None):
             for row in rows
         ]
     except Exception as exc:
-        logging.warning(f"Falha ao buscar decision_logs: {exc}")
-        return []
+        return _tratar_falha_leitura_storage("Falha ao buscar decision_logs", exc, strict=strict)
 
 
 def buscar_ultimo_decision_log(modos=None):
