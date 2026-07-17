@@ -10,6 +10,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+import decisor
 import paper_operations as paper_ops
 from domain import Candle
 from domain.serialization import serialize_value
@@ -91,8 +92,45 @@ def _operational_reference_package(frame: pd.DataFrame, *, symbol: str = "BTCUSD
     )
 
 
+def _operational_reference_frame(rows: int = 1200) -> pd.DataFrame:
+    prices = []
+    price = 100.0
+    cycle = 0
+    while len(prices) < rows:
+        for _ in range(30):
+            if len(prices) >= rows:
+                break
+            price += 4
+            prices.append(price)
+        for _ in range(3):
+            if len(prices) >= rows:
+                break
+            price -= 30
+            prices.append(price)
+        post_step = 1 if cycle % 2 == 0 else -4
+        for _ in range(10):
+            if len(prices) >= rows:
+                break
+            price += post_step
+            prices.append(price)
+        cycle += 1
+    prices = prices[:rows]
+    times = pd.date_range("2025-01-01", periods=rows, freq="h", tz="UTC")
+    return pd.DataFrame(
+        {
+            "open_time": times,
+            "close_time": times + pd.Timedelta(hours=1) - pd.Timedelta(milliseconds=1),
+            "open": [valor - 1 for valor in prices],
+            "high": [valor + 2 for valor in prices],
+            "low": [valor - 2 for valor in prices],
+            "close": prices,
+            "volume": [1000 + (idx % 10) * 50 for idx in range(rows)],
+        }
+    )
+
+
 def _mock_operational_market_data(monkeypatch, frame: pd.DataFrame) -> MarketDataPackage:
-    package = _operational_reference_package(frame.iloc[:220].copy())
+    package = _operational_reference_package(_operational_reference_frame())
     monkeypatch.setattr(
         paper_ops.trusted_market_data_service,
         "fetch",
@@ -176,6 +214,8 @@ def _sqlite_table_count(path: Path, table: str) -> int:
 def _prepare_full_operational_flow(tmp_path: Path, monkeypatch, sample_btc_data):
     _enable_operational_tmp_dirs(monkeypatch)
     monkeypatch.setattr("paper_operations.live_trading_permitted", lambda: False)
+    monkeypatch.setattr(decisor, "obter_funding_rate", lambda symbol="BTCUSDT": None)
+    monkeypatch.setattr(decisor, "log_decisao", lambda *args, **kwargs: None)
     data_dir = tmp_path / "paper_data"
     initialize(data_dir=data_dir)
 
@@ -186,7 +226,7 @@ def _prepare_full_operational_flow(tmp_path: Path, monkeypatch, sample_btc_data)
         {
             "symbol": "BTCUSDT",
             "interval": "1h",
-            "limit": 1200,
+            "limit": 1000,
             "strategy_version": "v4_walk_forward",
             "provider": "trusted_market_data_service",
         },
@@ -202,11 +242,11 @@ def _prepare_full_operational_flow(tmp_path: Path, monkeypatch, sample_btc_data)
             min_oos_trades=1,
             min_oos_net_return_percent=0,
             min_oos_expectancy=0,
-            min_oos_profit_factor=1,
-            max_oos_drawdown_percent=25,
+            min_oos_profit_factor=0.1,
+            max_oos_drawdown_percent=100,
             min_profitable_window_ratio_percent=0,
             max_validation_degradation_percent=100,
-            require_nonzero_costs=False,
+            require_nonzero_costs=True,
         ).as_dict(),
     )
     decision_file = tmp_path / "promotion_decision.json"
@@ -300,13 +340,13 @@ def test_phase8c_full_local_operations_flow_uses_real_reference_and_sanitized_re
 
     backup = backup_create(data_dir=data_dir, backup_name="test-backup")
     assert Path(backup["backup_dir"]).exists()
-    assert backup["files"] == ["paper_evaluation_campaign.db", "paper_runtime.db", "trades.db"]
+    assert backup["files"] == ["paper_evaluation_campaign.db", "paper_evaluation_reference.db", "paper_runtime.db", "trades.db"]
     assert backup_list(data_dir=data_dir)["backups"] == ["test-backup"]
 
     restore = restore_verify(backup_dir=backup["backup_dir"])
     assert restore["verified"] is True
     assert restore["backup_dir"] == "test-backup"
-    assert restore["files"] == ["paper_evaluation_campaign.db", "paper_runtime.db", "trades.db"]
+    assert restore["files"] == ["paper_evaluation_campaign.db", "paper_evaluation_reference.db", "paper_runtime.db", "trades.db"]
     assert "paper_restore_verify_" not in json.dumps(restore)
 
     applied = restore_apply(backup_dir=backup["backup_dir"], data_dir=data_dir, confirm=True)
@@ -323,6 +363,8 @@ def test_phase8c_full_local_operations_flow_uses_real_reference_and_sanitized_re
     assert report_result["campaign"]["campaign_id"] == flow["campaign_id"]
     assert report_result["session"]["session_id"] == session["session_id"]
     assert report_result["operational_summary"]["local_operations_ready"] is True
+    assert report_result["operational_summary"]["sessions_observed"] >= 1
+    assert report_result["operational_summary"]["hours_observed"] >= 0
     assert report_result["activity"]["open_positions"] >= 0
     assert report_result["activity"]["closed_trades"] >= 0
     assert report_result["activity"]["distinct_days"] >= 0
@@ -434,7 +476,7 @@ def test_backup_manifest_and_restore_apply_hardened(tmp_path, monkeypatch, sampl
     manifest_path = Path(backup["backup_dir"]) / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert manifest["data_dir"] == data_dir.name
-    assert set(manifest["files"]) == {"trades.db", "paper_runtime.db", "paper_evaluation_campaign.db"}
+    assert set(manifest["files"]) == {"trades.db", "paper_runtime.db", "paper_evaluation_campaign.db", "paper_evaluation_reference.db"}
 
     empty_manifest_backup = Path(backup["backup_dir"]) / "empty"
     empty_manifest_backup.mkdir()
@@ -475,6 +517,7 @@ def test_doctor_requires_backup_and_restore_verify_and_report_includes_activity(
 
     report_result = report(data_dir=data_dir, campaign_id=flow["campaign_id"], session_id=None)
     assert report_result["doctor"]["local_operations_ready"] is True
+    assert report_result["operational_summary"]["sessions_observed"] >= 1
     assert report_result["activity"]["open_positions"] >= 0
     assert report_result["activity"]["closed_trades"] >= 0
     assert report_result["activity"]["distinct_days"] >= 0

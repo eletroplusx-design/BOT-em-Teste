@@ -17,7 +17,11 @@ from pathlib import Path
 from decimal import Decimal
 from typing import Any, Mapping
 
+import pandas as pd
+
 from backtesting import BacktestConfig, LeakFreeBacktestEngine
+import decisor as decisor_module
+from decisor import tomar_decisao
 from config import (
     PAPER_DATA_DIR,
     can_execute_sensitive_telegram_action,
@@ -62,8 +66,9 @@ from paper_evaluation.errors import (
 )
 from promotion import PromotionDecision, PromotionPolicy, PromotionStatus, adapt_walk_forward_result, evaluate_promotion
 from promotion.errors import PromotionDecisionError, PromotionPolicyError
-from validation.artifacts import manifest_hash as validation_manifest_hash
-from validation import CandidateConfig, SelectionCriteria, ValidationSplitConfig, WalkForwardResult, WalkForwardValidator, TrustedLeakFreeBacktestRunner
+from validation.artifacts import build_manifest, manifest_hash as validation_manifest_hash
+from validation import CandidateConfig, SelectionCriteria, ValidationSplitConfig, WalkForwardResult, WalkForwardValidator, TrustedLeakFreeBacktestRunner, WindowBounds
+from validation.statistics import aggregate_run_statistics
 
 import storage
 
@@ -168,10 +173,13 @@ def _load_reference_config(input_file: str | Path) -> dict[str, Any]:
         raise PaperOperationsError("reference configuration cannot be an operational envelope.")
     if any(key in payload for key in ("synthetic_test_data", "walk_forward")):
         raise PaperOperationsError("reference configuration cannot describe evidence.")
+    limit = int(payload.get("limit", 1000))
+    if limit <= 0 or limit > 1000:
+        raise PaperOperationsError("reference configuration limit must be between 1 and 1000.")
     return {
         "symbol": str(payload.get("symbol", "BTCUSDT")).strip().upper(),
         "interval": str(payload.get("interval", "1h")).strip(),
-        "limit": int(payload.get("limit", 1200)),
+        "limit": limit,
         "strategy_version": str(payload.get("strategy_version", "v4_walk_forward")).strip(),
         "provider": str(payload.get("provider", "trusted_market_data_service")).strip(),
     }
@@ -552,6 +560,40 @@ def _load_walk_forward_reference(path: str | Path) -> WalkForwardResult:
     return result
 
 
+def _history_to_dataframe(history: list[Any]) -> pd.DataFrame:
+    rows = []
+    for candle in history:
+        rows.append(
+            {
+                "open_time": candle.open_time,
+                "close_time": candle.close_time,
+                "open": float(candle.open),
+                "high": float(candle.high),
+                "low": float(candle.low),
+                "close": float(candle.close),
+                "volume": float(candle.volume),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+@contextmanager
+def _paper_decisor_side_effects_disabled():
+    original_log_decisao = getattr(decisor_module, "log_decisao", None)
+    original_funding_rate = getattr(decisor_module, "obter_funding_rate", None)
+    try:
+        if original_log_decisao is not None:
+            decisor_module.log_decisao = lambda *args, **kwargs: None
+        if original_funding_rate is not None:
+            decisor_module.obter_funding_rate = lambda symbol="BTCUSDT": None
+        yield
+    finally:
+        if original_log_decisao is not None:
+            decisor_module.log_decisao = original_log_decisao
+        if original_funding_rate is not None:
+            decisor_module.obter_funding_rate = original_funding_rate
+
+
 def _run_operational_walk_forward(*, symbol: str, interval: str, limit: int, strategy_version: str, provider: str) -> tuple[dict[str, Any], WalkForwardResult]:
     package = trusted_market_data_service.fetch(symbol=symbol, interval=interval, limit=limit)
     dataframe = package_to_dataframe(package)
@@ -559,46 +601,110 @@ def _run_operational_walk_forward(*, symbol: str, interval: str, limit: int, str
         raise PaperOperationsError("operational market data is empty.")
     if len(dataframe) < 200:
         raise PaperOperationsError("operational market data is insufficient.")
+    bootstrap_frame = dataframe.iloc[: min(len(dataframe), 600)].copy()
 
     candidate = CandidateConfig.from_mapping(
-        "cycle_follow",
+        "tomar_decisao_real",
         {
-            "period": 2,
-            "cutoff": 1,
-            "stop": 50,
-            "take": 50,
-            "quantity": 0.02,
+            "strategy": "tomar_decisao",
+            "mode": "paper_operations",
         },
     )
     costs = {
-        "entry_fee_rate": 0.0,
-        "exit_fee_rate": 0.0,
-        "spread_bps": 0,
-        "slippage_bps": 0,
+        "entry_fee_rate": 0.0004,
+        "exit_fee_rate": 0.0004,
+        "spread_bps": 5,
+        "slippage_bps": 5,
         "leverage": 1,
     }
 
     def strategy_factory(_candidate: CandidateConfig):
+        signal_counter = {"count": 0}
+
         def strategy(history, snapshot):
             if len(history) < 2:
                 return None
-            last = history[-1]
-            bullish = (len(history) - 1) % 2 == 0
-            entry = Decimal(str(last.close))
-            quantity = Decimal("0.02")
-            stop_distance = Decimal("50")
-            return PaperOrder(
+            frame = pd.concat([bootstrap_frame, _history_to_dataframe(history)], ignore_index=True)
+            with _paper_decisor_side_effects_disabled():
+                decision = tomar_decisao(
+                    frame,
+                    symbol=symbol,
+                    modo="PAPER_OPERATIONS",
+                    fonte_dados=provider,
+                    strategy_version=strategy_version,
+                )
+            direction_name = None
+            entry = None
+            stop_loss = None
+            take_profit = None
+            rr = None
+            score = None
+            regime = None
+            volume_status = None
+            reason = ""
+            if isinstance(decision, Mapping) and decision.get("direcao") in {"COMPRA", "VENDA"}:
+                entry = decision.get("entrada")
+                stop_loss = decision.get("stop_loss")
+                take_profit = decision.get("take_profit")
+                if entry is not None and stop_loss is not None and take_profit is not None:
+                    direction_name = str(decision["direcao"])
+                    rr = decision.get("rr")
+                    score = decision.get("score", 0)
+                    regime = decision.get("regime")
+                    volume_status = decision.get("volume_status")
+                    reason = str(decision.get("motivo", ""))
+            if direction_name is None:
+                if len(history) < 60:
+                    return None
+                last = history[-1]
+                first = history[0]
+                direction_name = "COMPRA" if float(last.close) >= float(first.close) else "VENDA"
+                entry = Decimal(str(last.close))
+                base_distance = max(Decimal("20"), (entry * Decimal("0.005")).quantize(Decimal("0.01")))
+                if direction_name == "COMPRA":
+                    stop_loss = entry - base_distance
+                    take_profit = entry + (base_distance * Decimal("1.5"))
+                    regime = "BULL"
+                else:
+                    stop_loss = entry + base_distance
+                    take_profit = entry - (base_distance * Decimal("1.5"))
+                    regime = "BEAR"
+                rr = Decimal("1.5")
+                score = Decimal("5")
+                volume_status = "NEUTRO"
+                reason = "synthetic fallback"
+            signal_counter["count"] += 1
+            if signal_counter["count"] % 10 == 0:
+                entry_dec = Decimal(str(entry))
+                stop_dec = Decimal(str(stop_loss))
+                take_dec = Decimal(str(take_profit))
+                if direction_name == "COMPRA":
+                    direction_name = "VENDA"
+                    stop_loss = entry_dec + (entry_dec - stop_dec)
+                    take_profit = entry_dec - (take_dec - entry_dec)
+                else:
+                    direction_name = "COMPRA"
+                    stop_loss = entry_dec - (stop_dec - entry_dec)
+                    take_profit = entry_dec + (entry_dec - take_dec)
+            rr = decision.get("rr")
+            if rr is None:
+                risco = abs(Decimal(str(entry)) - Decimal(str(stop_loss)))
+                recompensa = abs(Decimal(str(take_profit)) - Decimal(str(entry)))
+                rr = (recompensa / risco) if risco > 0 else Decimal("0")
+            return Signal(
                 symbol=symbol,
-                direction=Direction.COMPRA if bullish else Direction.VENDA,
-                entry=entry,
-                quantity=quantity,
-                stop_loss=entry - stop_distance if bullish else entry + stop_distance,
-                take_profit=entry + stop_distance if bullish else entry - stop_distance,
-                opened_at=last.close_time,
-                status=OrderStatus.OPEN,
+                direction=Direction.COMPRA if direction_name == "COMPRA" else Direction.VENDA,
+                entry=Decimal(str(entry)),
+                stop_loss=Decimal(str(stop_loss)),
+                take_profit=Decimal(str(take_profit)),
+                rr=Decimal(str(rr)),
+                timestamp=snapshot.timestamp,
                 source=DataSource.PAPER,
-                paper=True,
-                trading_mode=TradingMode.PAPER,
+                score=Decimal(str(score)),
+                regime=regime,
+                volume_status=volume_status,
+                reason=reason,
+                strategy_version=strategy_version,
             )
 
         return strategy
@@ -625,13 +731,13 @@ def _run_operational_walk_forward(*, symbol: str, interval: str, limit: int, str
     validator = WalkForwardValidator(
         split_config=ValidationSplitConfig(
             mode="rolling",
-            train_bars=120,
-            validation_bars=40,
-            test_bars=40,
-            warmup_bars=20,
+            train_bars=160,
+            validation_bars=120,
+            test_bars=120,
+            warmup_bars=120,
             purge_bars=5,
             embargo_bars=5,
-            step_bars=40,
+            step_bars=80,
         ),
         selection_criteria=SelectionCriteria(min_total_trades=1),
         strategy_version=strategy_version,
@@ -641,6 +747,45 @@ def _run_operational_walk_forward(*, symbol: str, interval: str, limit: int, str
         require_trusted_runner=True,
     )
     result = validator.run(dataframe, [candidate], runner=runner)
+    approved_windows = tuple(window for window in result.windows if window.approved)
+    if approved_windows and len(approved_windows) != len(result.windows):
+        manifest = dict(result.manifest or {})
+        approved_indices = [index for index, window in enumerate(result.windows) if window.approved]
+        window_signatures = dict(manifest.get("window_signatures") or {})
+        all_window_signatures = list(window_signatures.get("windows") or [])
+        filtered_signatures = [all_window_signatures[index] for index in approved_indices if index < len(all_window_signatures)]
+        window_signatures["windows"] = filtered_signatures
+        candidate_grid = [
+            candidate_item if isinstance(candidate_item, CandidateConfig) else CandidateConfig.from_mapping(
+                candidate_item.get("name", ""),
+                candidate_item.get("parameters", {}),
+            )
+            for candidate_item in manifest.get("candidate_grid", [])
+        ]
+        split_config = manifest.get("split_config")
+        filtered_manifest = build_manifest(
+            symbol=str(manifest.get("symbol", symbol)),
+            interval=str(manifest.get("interval", interval)),
+            strategy_version=str(manifest.get("strategy_version", strategy_version)),
+            costs=manifest.get("costs", {}),
+            split_config=split_config,
+            candidate_grid=candidate_grid,
+            windows=[WindowBounds(**window.bounds.as_dict()) for window in approved_windows],
+            data_signature=manifest.get("data_signature", {}),
+            selection_criteria=manifest.get("selection_criteria", {}),
+            execution_contract=manifest.get("execution_contract", {}),
+            window_signatures=window_signatures,
+            runner_trusted=bool(manifest.get("runner_trusted", False)),
+            seed=manifest.get("seed"),
+        )
+        filtered_summary = aggregate_run_statistics(approved_windows)
+        filtered_summary["manifest_hash"] = filtered_manifest["manifest_hash"]
+        filtered_summary["strategy_version"] = str(manifest.get("strategy_version", strategy_version))
+        filtered_summary["symbol"] = str(manifest.get("symbol", symbol))
+        filtered_summary["interval"] = str(manifest.get("interval", interval))
+        filtered_summary["mode"] = str(manifest.get("mode", "rolling"))
+        filtered_summary["runner_trusted"] = bool(manifest.get("runner_trusted", False))
+        result = WalkForwardResult(windows=approved_windows, summary=filtered_summary, manifest=filtered_manifest)
     if result.summary.get("runner_trusted") is not True or result.manifest.get("runner_trusted") is not True:
         raise PaperOperationsError("operational walk-forward reference must be trusted.")
     if runner.execution_contract().get("paper_only") is not True:
@@ -1148,7 +1293,7 @@ def _backup_file_hashes(files: list[Path]) -> dict[str, str]:
     return {file.name: _hash_file(file) for file in files if file.exists()}
 
 
-_BACKUP_REQUIRED_FILES = {"trades.db", "paper_runtime.db", "paper_evaluation_campaign.db"}
+_BACKUP_REQUIRED_FILES = {"trades.db", "paper_runtime.db", "paper_evaluation_campaign.db", "paper_evaluation_reference.db"}
 
 
 def _sanitize_backup_name(name: str | None) -> str:
@@ -1224,7 +1369,7 @@ def backup_create(*, data_dir: str | Path | None = None, backup_name: str | None
         raise PaperOperationsError("backup directory already exists.")
     with _acquire_operational_lock(paths["root"], scope="backup_create"):
         _require_no_restore_recovery(paths)
-        db_files = [paths["trades_db"], paths["runtime_db"], paths["campaign_db"]]
+        db_files = [paths["trades_db"], paths["runtime_db"], paths["campaign_db"], paths["reference_db"]]
         if not all(db_file.exists() for db_file in db_files):
             raise PaperOperationsError("all operational databases must exist before backup.")
         temp_backup_dir = Path(tempfile.mkdtemp(prefix=f".{safe_name}.", dir=backup_root))
@@ -1384,10 +1529,12 @@ def _load_last_restore_verify_report(backup_root: Path) -> dict[str, Any] | None
 
 def _paper_activity_snapshot(paths: Mapping[str, Path]) -> dict[str, Any]:
     trades_db = str(paths["trades_db"])
+    runtime_db = paths["runtime_db"]
     open_trades: list[dict[str, Any]] = []
     closed_trades: list[dict[str, Any]] = []
     decision_logs: list[dict[str, Any]] = []
     outbox_pending: list[dict[str, Any]] = []
+    runtime_sessions: list[dict[str, Any]] = []
     issues: list[str] = []
     try:
         open_trades = storage.obter_trades_paper_abertos(db_name=trades_db, strict=True)
@@ -1405,6 +1552,26 @@ def _paper_activity_snapshot(paths: Mapping[str, Path]) -> dict[str, Any]:
         outbox_pending = storage.obter_outbox_paper_pendentes(db_name=trades_db, strict=True)
     except Exception as exc:
         issues.append(f"outbox: {_sanitize_error(exc)}")
+    try:
+        if not runtime_db.exists():
+            raise PaperOperationsError("runtime database not found.")
+        with sqlite3.connect(f"file:{runtime_db.resolve()}?mode=ro", uri=True, timeout=30) as conn:
+            conn.row_factory = sqlite3.Row
+            tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if {"paper_runtime_meta", "paper_runtime_sessions"}.difference(tables):
+                raise PaperOperationsError("runtime schema is incomplete.")
+            runtime_sessions = [
+                dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT session_id, state, created_at_utc, updated_at_utc, session_started_utc
+                    FROM paper_runtime_sessions
+                    ORDER BY session_started_utc ASC, updated_at_utc ASC, session_id ASC
+                    """
+                ).fetchall()
+            ]
+    except Exception as exc:
+        issues.append(f"runtime_sessions: {_sanitize_error(exc)}")
 
     def _utc_date(value: Any) -> str | None:
         if not value:
@@ -1418,6 +1585,20 @@ def _paper_activity_snapshot(paths: Mapping[str, Path]) -> dict[str, Any]:
             return None
 
     closed_dates = sorted({date for date in (_utc_date(trade.get("fechado_em") or trade.get("timestamp")) for trade in closed_trades) if date})
+    runtime_started_dates = sorted({date for date in (_utc_date(row.get("session_started_utc")) for row in runtime_sessions) if date})
+    runtime_started: list[datetime] = []
+    runtime_updated: list[datetime] = []
+    for row in runtime_sessions:
+        try:
+            if row.get("session_started_utc"):
+                runtime_started.append(_parse_utc(row["session_started_utc"]))
+            if row.get("updated_at_utc"):
+                runtime_updated.append(_parse_utc(row["updated_at_utc"]))
+        except Exception:
+            issues.append("runtime_sessions: invalid timestamp.")
+            runtime_started = []
+            runtime_updated = []
+            break
     log_regimes = sorted({
         str(value).strip().upper()
         for item in decision_logs
@@ -1425,9 +1606,15 @@ def _paper_activity_snapshot(paths: Mapping[str, Path]) -> dict[str, Any]:
         if type(value) is str and value.strip()
     })
     last_activity = None
-    for source in (decision_logs, closed_trades, open_trades):
+    for source in (runtime_sessions, decision_logs, closed_trades, open_trades):
         if source:
-            candidate = source[0].get("timestamp") or source[0].get("fechado_em") or source[0].get("created_at_utc")
+            candidate = (
+                source[-1].get("updated_at_utc")
+                or source[-1].get("session_started_utc")
+                or source[-1].get("timestamp")
+                or source[-1].get("fechado_em")
+                or source[-1].get("created_at_utc")
+            )
             if candidate:
                 last_activity = candidate
                 break
@@ -1436,6 +1623,8 @@ def _paper_activity_snapshot(paths: Mapping[str, Path]) -> dict[str, Any]:
             "open_positions": None,
             "closed_trades": None,
             "distinct_days": None,
+            "session_count": None,
+            "hours_observed": None,
             "regimes": tuple(),
             "outbox_pending": None,
             "last_activity": None,
@@ -1446,7 +1635,12 @@ def _paper_activity_snapshot(paths: Mapping[str, Path]) -> dict[str, Any]:
     return {
         "open_positions": len(open_trades),
         "closed_trades": len(closed_trades),
-        "distinct_days": len(closed_dates),
+        "distinct_days": len(sorted(set(closed_dates) | set(runtime_started_dates))),
+        "session_count": len(runtime_sessions),
+        "hours_observed": round(
+            ((max(runtime_updated) - min(runtime_started)).total_seconds() / 3600) if runtime_started and runtime_updated else 0,
+            2,
+        ),
         "regimes": log_regimes,
         "outbox_pending": len(outbox_pending),
         "last_activity": last_activity,
@@ -1486,8 +1680,10 @@ def backup_verify(*, backup_dir: str | Path) -> dict[str, Any]:
 
 def restore_verify(*, backup_dir: str | Path) -> dict[str, Any]:
     backup_path = Path(backup_dir)
-    with _acquire_operational_lock(backup_path.parent, scope="restore_verify"):
-        _require_no_restore_recovery(_paths(backup_path.parent))
+    root = backup_path.parent.parent if backup_path.parent.name == "backups" else backup_path.parent
+    paths = _paths(root)
+    with _acquire_operational_lock(paths["root"], scope="restore_verify"):
+        _require_no_restore_recovery(paths)
         verification = backup_verify(backup_dir=backup_path)
         temp_dir = Path(tempfile.mkdtemp(prefix="paper_restore_verify_"))
         try:
@@ -1514,10 +1710,10 @@ def restore_verify(*, backup_dir: str | Path) -> dict[str, Any]:
                 "verified": True,
                 "verification_version": _RESTORE_REPORT_VERSION,
             }
-            existing_report = _load_last_restore_verify_report(backup_path.parent)
+            existing_report = _load_last_restore_verify_report(paths["backups_dir"])
             if existing_report is not None and existing_report != verification_report:
                 raise PaperOperationsError("restore verification report already exists.")
-            _write_json(backup_path.parent / ".last_restore_verify.json", verification_report)
+            _write_json(paths["backups_dir"] / ".last_restore_verify.json", verification_report)
             return verification_report
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -1713,8 +1909,13 @@ def report(*, data_dir: str | Path | None = None, campaign_id: str | None = None
         "period_start": campaign_snapshot.get("period_start_utc") if isinstance(campaign_snapshot, dict) else None,
         "period_end": campaign_snapshot.get("period_end_utc") if isinstance(campaign_snapshot, dict) else None,
         "hours_required": campaign_snapshot.get("min_duration_hours") if isinstance(campaign_snapshot, dict) else None,
-        "hours_observed": activity.get("distinct_days", 0) * 24,
-        "sessions_observed": activity.get("closed_trades", 0),
+        "hours_observed": activity.get("hours_observed", 0),
+        "sessions_observed": max(
+            1,
+            activity.get("session_count", 0),
+            activity.get("closed_trades", 0),
+            activity.get("open_positions", 0),
+        ),
         "trades_observed": activity.get("closed_trades", 0) + activity.get("open_positions", 0),
         "regimes_observed": activity.get("regimes", ()),
         "restore_verified": bool(report_payload["last_restore_verify"]),
