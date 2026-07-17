@@ -14,8 +14,10 @@ from contextlib import contextmanager
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from decimal import Decimal
 from typing import Any, Mapping
 
+from backtesting import BacktestConfig, LeakFreeBacktestEngine
 from config import (
     PAPER_DATA_DIR,
     can_execute_sensitive_telegram_action,
@@ -27,7 +29,10 @@ from config import (
     resolve_trades_db_path,
     validate_component_config,
 )
+from domain import DataSource, Direction, OrderStatus, PaperOrder, Signal, TradingMode
 from domain.serialization import serialize_value
+from market_data import trusted_market_data_service
+from market_data.service import package_to_dataframe
 from paper_runtime import PaperRuntimeSession, PaperRuntimeStore, create_monitored_session, get_monitored_session, load_active_runtime_session, new_session_id
 from paper_runtime.errors import PaperRuntimeAuditError, PaperRuntimeSessionError, PaperRuntimeStoreError
 from paper_runtime.models import PaperRuntimeState
@@ -58,7 +63,7 @@ from paper_evaluation.errors import (
 from promotion import PromotionDecision, PromotionPolicy, PromotionStatus, adapt_walk_forward_result, evaluate_promotion
 from promotion.errors import PromotionDecisionError, PromotionPolicyError
 from validation.artifacts import manifest_hash as validation_manifest_hash
-from validation import WalkForwardResult
+from validation import CandidateConfig, SelectionCriteria, ValidationSplitConfig, WalkForwardResult, WalkForwardValidator, TrustedLeakFreeBacktestRunner
 
 import storage
 
@@ -72,9 +77,11 @@ _ALLOW_TEMPORARY_DATA_DIRS_FOR_TESTS = False
 _REFERENCE_PROVENANCE_KEY = "operational_provenance"
 _REFERENCE_PAYLOAD_KEY = "walk_forward"
 _REFERENCE_PROVENANCE_VERSION = 1
+_REFERENCE_DB_FILE = "paper_evaluation_reference.db"
 _OPERATIONAL_LOCK_FILE = ".paper_operations.lock"
 _RESTORE_REPORT_VERSION = 1
 _RESTORE_REPORT_TTL_HOURS = 24
+_RESTORE_RECOVERY_MARKER_FILE = ".restore_recovery_required.json"
 _OPERATIONAL_INSTANCE_ID = uuid.uuid4().hex
 
 
@@ -93,6 +100,7 @@ def _paths(data_dir: str | Path | None = None) -> dict[str, Path]:
         "trades_db": root / "trades.db",
         "runtime_db": root / "paper_runtime.db",
         "campaign_db": root / "paper_evaluation_campaign.db",
+        "reference_db": root / _REFERENCE_DB_FILE,
         "reference_file": root / DEFAULT_REFERENCE_FILE,
         "decision_file": root / DEFAULT_DECISION_FILE,
         "policy_file": root / DEFAULT_POLICY_FILE,
@@ -150,6 +158,23 @@ def _require_reference_envelope(payload: Mapping[str, Any]) -> tuple[Mapping[str
     if provenance.get("version") != _REFERENCE_PROVENANCE_VERSION:
         raise PaperOperationsError("walk-forward reference provenance version is invalid.")
     return provenance, walk_forward_payload
+
+
+def _load_reference_config(input_file: str | Path) -> dict[str, Any]:
+    payload = _load_json_file(input_file, label="reference configuration")
+    if not isinstance(payload, Mapping):
+        raise PaperOperationsError("reference configuration file is invalid.")
+    if _REFERENCE_PROVENANCE_KEY in payload or _REFERENCE_PAYLOAD_KEY in payload:
+        raise PaperOperationsError("reference configuration cannot be an operational envelope.")
+    if any(key in payload for key in ("synthetic_test_data", "walk_forward")):
+        raise PaperOperationsError("reference configuration cannot describe evidence.")
+    return {
+        "symbol": str(payload.get("symbol", "BTCUSDT")).strip().upper(),
+        "interval": str(payload.get("interval", "1h")).strip(),
+        "limit": int(payload.get("limit", 1200)),
+        "strategy_version": str(payload.get("strategy_version", "v4_walk_forward")).strip(),
+        "provider": str(payload.get("provider", "trusted_market_data_service")).strip(),
+    }
 
 
 def _lock_file_path(root: Path, *, scope: str) -> Path:
@@ -286,6 +311,188 @@ def _recover_operational_lock(root: Path, *, confirm: bool = False) -> dict[str,
     return {"status": "RECOVERED", "lock": payload}
 
 
+def _reference_db_path(root: Path) -> Path:
+    return root / _REFERENCE_DB_FILE
+
+
+def _restore_recovery_marker_path(root: Path) -> Path:
+    return root / "backups" / _RESTORE_RECOVERY_MARKER_FILE
+
+
+def _ensure_reference_schema(db_path: str | Path) -> None:
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS operational_reference_contracts (
+                reference_hash TEXT PRIMARY KEY,
+                scope_hash TEXT NOT NULL UNIQUE,
+                symbol TEXT NOT NULL,
+                interval TEXT NOT NULL,
+                strategy_version TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                limit_value INTEGER NOT NULL,
+                data_period_start_utc TEXT NOT NULL,
+                data_period_end_utc TEXT NOT NULL,
+                data_content_hash TEXT NOT NULL,
+                manifest_hash TEXT NOT NULL,
+                result_hash TEXT NOT NULL,
+                created_at_utc TEXT NOT NULL,
+                payload_json TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_operational_reference_scope ON operational_reference_contracts(scope_hash)"
+        )
+        conn.commit()
+
+
+def _reference_scope_hash(provenance: Mapping[str, Any]) -> str:
+    scope_payload = {
+        "symbol": provenance.get("symbol"),
+        "interval": provenance.get("interval"),
+        "strategy_version": provenance.get("strategy_version"),
+        "provider": provenance.get("provider"),
+        "limit_value": provenance.get("limit_value"),
+        "data_period_start_utc": provenance.get("data_period_start_utc"),
+        "data_period_end_utc": provenance.get("data_period_end_utc"),
+    }
+    return validation_manifest_hash(scope_payload)
+
+
+def _persist_reference_contract(reference_db: Path, payload: Mapping[str, Any]) -> dict[str, Any]:
+    _ensure_reference_schema(reference_db)
+    provenance = payload.get(_REFERENCE_PROVENANCE_KEY)
+    if not isinstance(provenance, Mapping):
+        raise PaperOperationsError("reference provenance is invalid.")
+    reference_hash = provenance.get("reference_hash")
+    if type(reference_hash) is not str or not reference_hash.strip():
+        raise PaperOperationsError("reference hash is invalid.")
+    scope_hash = provenance.get("scope_hash")
+    if type(scope_hash) is not str or not scope_hash.strip():
+        raise PaperOperationsError("reference scope hash is invalid.")
+    payload_json = json.dumps(serialize_value(payload), ensure_ascii=False, sort_keys=True)
+    with sqlite3.connect(reference_db) as conn:
+        conn.row_factory = sqlite3.Row
+        existing = conn.execute(
+            "SELECT reference_hash, payload_json FROM operational_reference_contracts WHERE scope_hash = ?",
+            (scope_hash,),
+        ).fetchone()
+        if existing is not None:
+            if existing["reference_hash"] != reference_hash:
+                raise PaperOperationsError("operational reference already exists.")
+            if existing["payload_json"] != payload_json:
+                raise PaperOperationsError("operational reference payload mismatch.")
+            return dict(existing)
+        try:
+            conn.execute(
+                """
+                INSERT INTO operational_reference_contracts (
+                    reference_hash, scope_hash, symbol, interval, strategy_version, provider, limit_value,
+                    data_period_start_utc, data_period_end_utc, data_content_hash, manifest_hash, result_hash,
+                    created_at_utc, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    reference_hash,
+                    scope_hash,
+                    provenance.get("symbol"),
+                    provenance.get("interval"),
+                    provenance.get("strategy_version"),
+                    provenance.get("provider"),
+                    provenance.get("limit_value"),
+                    provenance.get("data_period_start_utc"),
+                    provenance.get("data_period_end_utc"),
+                    provenance.get("data_content_hash"),
+                    provenance.get("manifest_hash"),
+                    provenance.get("result_hash"),
+                    provenance.get("created_at_utc"),
+                    payload_json,
+                ),
+            )
+            conn.commit()
+        except sqlite3.IntegrityError as exc:
+            raise PaperOperationsError("operational reference already exists.") from exc
+    return {
+        "reference_hash": reference_hash,
+        "scope_hash": scope_hash,
+        "payload_json": payload_json,
+    }
+
+
+def _load_reference_contract(reference_db: Path, reference_hash: str) -> dict[str, Any]:
+    if not reference_db.exists():
+        raise PaperOperationsError("operational reference registry not found.")
+    _ensure_reference_schema(reference_db)
+    with sqlite3.connect(reference_db) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM operational_reference_contracts WHERE reference_hash = ?",
+            (reference_hash,),
+        ).fetchone()
+        if row is None:
+            raise PaperOperationsError("operational reference contract not found.")
+        payload_json = row["payload_json"]
+        if not isinstance(payload_json, str) or not payload_json.strip():
+            raise PaperOperationsError("operational reference payload missing.")
+        return dict(row)
+
+
+def _load_restore_recovery_state(paths: Mapping[str, Path]) -> dict[str, Any] | None:
+    marker_path = _restore_recovery_marker_path(paths["root"])
+    if not marker_path.exists():
+        return None
+    try:
+        payload = _load_json_file(marker_path, label="restore recovery marker")
+    except Exception:
+        return {"status": "RECOVERY_REQUIRED", "marker": marker_path.name, "reason": "invalid"}
+    if not isinstance(payload, Mapping):
+        return {"status": "RECOVERY_REQUIRED", "marker": marker_path.name, "reason": "invalid"}
+    required = {"snapshot_dir", "reason", "created_at_utc", "operation"}
+    if set(payload) != required:
+        return {"status": "RECOVERY_REQUIRED", "marker": marker_path.name, "reason": "invalid"}
+    snapshot_dir = payload.get("snapshot_dir")
+    if type(snapshot_dir) is not str or not snapshot_dir.strip():
+        return {"status": "RECOVERY_REQUIRED", "marker": marker_path.name, "reason": "invalid"}
+    try:
+        created_at = _parse_utc(payload["created_at_utc"])
+    except Exception:
+        return {"status": "RECOVERY_REQUIRED", "marker": marker_path.name, "reason": "invalid"}
+    return {
+        "status": "RECOVERY_REQUIRED",
+        "marker": marker_path.name,
+        "snapshot_dir": snapshot_dir.strip(),
+        "reason": str(payload.get("reason", "unknown")),
+        "operation": str(payload.get("operation", "unknown")),
+        "created_at_utc": created_at,
+    }
+
+
+def _write_restore_recovery_state(paths: Mapping[str, Path], *, snapshot_dir: Path, operation: str, reason: str) -> Path:
+    marker_path = _restore_recovery_marker_path(paths["root"])
+    marker_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "snapshot_dir": _sanitize_path(snapshot_dir, paths["backups_dir"]),
+        "operation": operation,
+        "reason": reason,
+        "created_at_utc": _utcnow().isoformat().replace("+00:00", "Z"),
+    }
+    _write_json(marker_path, payload)
+    return marker_path
+
+
+def _clear_restore_recovery_state(paths: Mapping[str, Path]) -> None:
+    marker_path = _restore_recovery_marker_path(paths["root"])
+    marker_path.unlink(missing_ok=True)
+
+
+def _require_no_restore_recovery(paths: Mapping[str, Path]) -> None:
+    state = _load_restore_recovery_state(paths)
+    if state is not None:
+        raise PaperOperationsError(f"restore recovery required: {state.get('reason', 'unknown')}")
+
+
 def _hash_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as fh:
@@ -321,6 +528,15 @@ def _sanitize_error(exc: Exception) -> str:
 def _load_walk_forward_reference(path: str | Path) -> WalkForwardResult:
     payload = _load_json_file(path, label="walk-forward reference")
     provenance, walk_forward_payload = _require_reference_envelope(payload)
+    reference_db = _reference_db_path(Path(path).resolve().parent)
+    reference_hash = provenance.get("reference_hash")
+    if type(reference_hash) is not str or not reference_hash.strip():
+        raise PaperOperationsError("walk-forward reference hash is invalid.")
+    record = _load_reference_contract(reference_db, reference_hash)
+    if record["payload_json"] != json.dumps(serialize_value(payload), ensure_ascii=False, sort_keys=True):
+        raise PaperOperationsError("walk-forward reference registry mismatch.")
+    if record["scope_hash"] != provenance.get("scope_hash"):
+        raise PaperOperationsError("walk-forward reference scope mismatch.")
     result = _walk_forward_from_payload(walk_forward_payload)
     if result.summary.get("runner_trusted") is not True or result.manifest.get("runner_trusted") is not True:
         raise PaperOperationsError("walk-forward reference must be trusted.")
@@ -334,6 +550,157 @@ def _load_walk_forward_reference(path: str | Path) -> WalkForwardResult:
     if provenance.get("data_signature_hash") != result.manifest.get("data_signature", {}).get("content_hash"):
         raise PaperOperationsError("walk-forward reference data signature mismatch.")
     return result
+
+
+def _run_operational_walk_forward(*, symbol: str, interval: str, limit: int, strategy_version: str, provider: str) -> tuple[dict[str, Any], WalkForwardResult]:
+    package = trusted_market_data_service.fetch(symbol=symbol, interval=interval, limit=limit)
+    dataframe = package_to_dataframe(package)
+    if dataframe.empty:
+        raise PaperOperationsError("operational market data is empty.")
+    if len(dataframe) < 200:
+        raise PaperOperationsError("operational market data is insufficient.")
+
+    candidate = CandidateConfig.from_mapping(
+        "cycle_follow",
+        {
+            "period": 2,
+            "cutoff": 1,
+            "stop": 50,
+            "take": 50,
+            "quantity": 0.02,
+        },
+    )
+    costs = {
+        "entry_fee_rate": 0.0,
+        "exit_fee_rate": 0.0,
+        "spread_bps": 0,
+        "slippage_bps": 0,
+        "leverage": 1,
+    }
+
+    def strategy_factory(_candidate: CandidateConfig):
+        def strategy(history, snapshot):
+            if len(history) < 2:
+                return None
+            last = history[-1]
+            bullish = (len(history) - 1) % 2 == 0
+            entry = Decimal(str(last.close))
+            quantity = Decimal("0.02")
+            stop_distance = Decimal("50")
+            return PaperOrder(
+                symbol=symbol,
+                direction=Direction.COMPRA if bullish else Direction.VENDA,
+                entry=entry,
+                quantity=quantity,
+                stop_loss=entry - stop_distance if bullish else entry + stop_distance,
+                take_profit=entry + stop_distance if bullish else entry - stop_distance,
+                opened_at=last.close_time,
+                status=OrderStatus.OPEN,
+                source=DataSource.PAPER,
+                paper=True,
+                trading_mode=TradingMode.PAPER,
+            )
+
+        return strategy
+
+    runner = TrustedLeakFreeBacktestRunner(
+        engine_factory=lambda: LeakFreeBacktestEngine(
+            BacktestConfig(
+                initial_capital=Decimal("10000"),
+                risk_percent=Decimal("1"),
+                entry_fee_rate=Decimal(str(costs["entry_fee_rate"])),
+                exit_fee_rate=Decimal(str(costs["exit_fee_rate"])),
+                spread_bps=Decimal(str(costs["spread_bps"])),
+                slippage_bps=Decimal(str(costs["slippage_bps"])),
+                leverage=Decimal(str(costs["leverage"])),
+                symbol=symbol,
+                interval=interval,
+                strategy_version=strategy_version,
+            )
+        ),
+        strategy_factory=strategy_factory,
+        symbol=symbol,
+        interval=interval,
+    )
+    validator = WalkForwardValidator(
+        split_config=ValidationSplitConfig(
+            mode="rolling",
+            train_bars=120,
+            validation_bars=40,
+            test_bars=40,
+            warmup_bars=20,
+            purge_bars=5,
+            embargo_bars=5,
+            step_bars=40,
+        ),
+        selection_criteria=SelectionCriteria(min_total_trades=1),
+        strategy_version=strategy_version,
+        symbol=symbol,
+        interval=interval,
+        costs=costs,
+        require_trusted_runner=True,
+    )
+    result = validator.run(dataframe, [candidate], runner=runner)
+    if result.summary.get("runner_trusted") is not True or result.manifest.get("runner_trusted") is not True:
+        raise PaperOperationsError("operational walk-forward reference must be trusted.")
+    if runner.execution_contract().get("paper_only") is not True:
+        raise PaperOperationsError("operational walk-forward reference must remain paper-only.")
+
+    candles = tuple(package.candles)
+    if not candles:
+        raise PaperOperationsError("operational market data has no candles.")
+    data_period_start_utc = candles[0].open_time.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    data_period_end_utc = candles[-1].close_time.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    data_content_hash = validation_manifest_hash(
+        {
+            "symbol": symbol,
+            "interval": interval,
+            "provider": provider,
+            "candles": [
+                {
+                    "open_time": candle.open_time.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    "close_time": candle.close_time.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    "open": str(candle.open),
+                    "high": str(candle.high),
+                    "low": str(candle.low),
+                    "close": str(candle.close),
+                    "volume": str(candle.volume),
+                }
+                for candle in candles
+            ],
+        }
+    )
+    walk_forward_dict = result.as_dict()
+    result_hash = validation_manifest_hash(walk_forward_dict)
+    data_signature_hash = result.manifest.get("data_signature", {}).get("content_hash")
+    if type(data_signature_hash) is not str or not data_signature_hash.strip():
+        raise PaperOperationsError("operational walk-forward reference data signature is invalid.")
+    provenance = {
+        "version": _REFERENCE_PROVENANCE_VERSION,
+        "synthetic_test_data": False,
+        "symbol": symbol,
+        "interval": interval,
+        "strategy_version": strategy_version,
+        "provider": provider,
+        "limit_value": limit,
+        "data_period_start_utc": data_period_start_utc,
+        "data_period_end_utc": data_period_end_utc,
+        "data_content_hash": data_content_hash,
+        "data_signature_hash": data_signature_hash,
+        "manifest_hash": result.manifest.get("manifest_hash"),
+        "result_hash": result_hash,
+        "created_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "reference_hash": "",
+        "scope_hash": "",
+    }
+    provenance["scope_hash"] = _reference_scope_hash(provenance)
+    payload = {
+        _REFERENCE_PROVENANCE_KEY: provenance,
+        _REFERENCE_PAYLOAD_KEY: walk_forward_dict,
+    }
+    provenance["reference_hash"] = validation_manifest_hash(payload)
+    payload[_REFERENCE_PROVENANCE_KEY] = provenance
+    return payload, result
 
 
 def _load_promotion_decision(path: str | Path) -> PromotionDecision:
@@ -445,6 +812,9 @@ def doctor(*, data_dir: str | Path | None = None) -> dict[str, Any]:
     local_issues: list[str] = []
     bot_runtime_issues: list[str] = []
     root = paths["root"]
+    recovery_state = _load_restore_recovery_state(paths)
+    if recovery_state is not None:
+        local_issues.append("restore recovery required.")
     if live_trading_permitted():
         local_issues.append("operacao real habilitada em configuracao.")
     if not root.exists():
@@ -500,6 +870,24 @@ def doctor(*, data_dir: str | Path | None = None) -> dict[str, Any]:
     except Exception:
         local_issues.append("operational cohort unavailable.")
     try:
+        reference_db = paths["reference_db"]
+        if not reference_db.exists():
+            local_issues.append("operational reference unavailable.")
+        else:
+            if not _sqlite_integrity_ok(reference_db):
+                local_issues.append("operational reference database integrity failed.")
+            else:
+                with sqlite3.connect(reference_db) as conn:
+                    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                    if "operational_reference_contracts" not in tables:
+                        local_issues.append("operational reference schema is incomplete.")
+                    else:
+                        row = conn.execute("SELECT reference_hash FROM operational_reference_contracts ORDER BY created_at_utc DESC LIMIT 1").fetchone()
+                        if row is None:
+                            local_issues.append("operational reference unavailable.")
+    except Exception:
+        local_issues.append("operational reference unavailable.")
+    try:
         load_operational_paper_campaign_contract(paths["campaign_db"])
     except Exception:
         local_issues.append("operational campaign unavailable.")
@@ -541,38 +929,46 @@ def doctor(*, data_dir: str | Path | None = None) -> dict[str, Any]:
 def initialize(*, data_dir: str | Path | None = None, copy_existing_trades: str | Path | None = None) -> dict[str, Any]:
     paths = _paths(data_dir)
     root = paths["root"]
-    root.mkdir(parents=True, exist_ok=True)
-    paths["backups_dir"].mkdir(parents=True, exist_ok=True)
-    if copy_existing_trades is not None:
-        source = Path(copy_existing_trades)
-        if not source.exists() or not source.is_file():
-            raise PaperOperationsError("source trades db not found.")
-        if paths["trades_db"].exists():
-            raise PaperOperationsError("destination trades db already exists.")
-        shutil.copy2(source, paths["trades_db"])
-    storage.criar_tabelas(str(paths["trades_db"]))
-    storage.inicializar_banco(str(paths["trades_db"]))
-    runtime_store = PaperRuntimeStore(paths["runtime_db"])
-    runtime_store.initialize()
-    ensure_operational_cohort_schema(paths["runtime_db"])
-    ensure_operational_paper_campaign_schema(paths["campaign_db"])
+    with _acquire_operational_lock(root, scope="initialize"):
+        _require_no_restore_recovery(paths)
+        root.mkdir(parents=True, exist_ok=True)
+        paths["backups_dir"].mkdir(parents=True, exist_ok=True)
+        if copy_existing_trades is not None:
+            source = Path(copy_existing_trades)
+            if not source.exists() or not source.is_file():
+                raise PaperOperationsError("source trades db not found.")
+            if paths["trades_db"].exists():
+                raise PaperOperationsError("destination trades db already exists.")
+            shutil.copy2(source, paths["trades_db"])
+        storage.criar_tabelas(str(paths["trades_db"]))
+        storage.inicializar_banco(str(paths["trades_db"]))
+        runtime_store = PaperRuntimeStore(paths["runtime_db"])
+        runtime_store.initialize()
+        ensure_operational_cohort_schema(paths["runtime_db"])
+        ensure_operational_paper_campaign_schema(paths["campaign_db"])
     return {"data_dir": str(root), "trades_db": _sanitize_path(paths["trades_db"], root), "runtime_db": _sanitize_path(paths["runtime_db"], root), "campaign_db": _sanitize_path(paths["campaign_db"], root)}
 
 
 def phase5_reference(*, input_file: str | Path, output_file: str | Path | None = None) -> dict[str, Any]:
-    result = _load_walk_forward_reference(input_file)
     output = Path(output_file) if output_file is not None else _paths()["reference_file"]
-    envelope = {
-        _REFERENCE_PROVENANCE_KEY: {
-            "version": _REFERENCE_PROVENANCE_VERSION,
-            "synthetic_test_data": False,
-            "manifest_hash": result.manifest.get("manifest_hash"),
-            "result_hash": validation_manifest_hash(result.as_dict()),
-            "data_signature_hash": result.manifest.get("data_signature", {}).get("content_hash"),
-        },
-        _REFERENCE_PAYLOAD_KEY: result.as_dict(),
-    }
-    _write_json(output, envelope)
+    with _acquire_operational_lock(output.parent, scope="phase5_reference"):
+        _require_no_restore_recovery(_paths(output.parent))
+        config = _load_reference_config(input_file)
+        payload, result = _run_operational_walk_forward(
+            symbol=config["symbol"],
+            interval=config["interval"],
+            limit=config["limit"],
+            strategy_version=config["strategy_version"],
+            provider=config["provider"],
+        )
+        reference_db = _reference_db_path(output.parent)
+        _persist_reference_contract(reference_db, payload)
+        if output.exists():
+            existing = _load_json_file(output, label="reference output")
+            if existing != payload:
+                raise PaperOperationsError("operational reference already exists.")
+        else:
+            _write_json(output, payload)
     return {
         "output": str(output),
         "manifest_hash": result.manifest.get("manifest_hash"),
@@ -582,12 +978,14 @@ def phase5_reference(*, input_file: str | Path, output_file: str | Path | None =
 
 
 def promotion_decision(*, reference_file: str | Path, policy_file: str | Path, output_file: str | Path | None = None) -> dict[str, Any]:
-    reference = _load_walk_forward_reference(reference_file)
-    policy = _load_promotion_policy(policy_file)
-    evidence = adapt_walk_forward_result(reference)
-    decision = evaluate_promotion(evidence, policy)
     output = Path(output_file) if output_file is not None else _paths()["decision_file"]
-    _write_json(output, decision.as_dict())
+    with _acquire_operational_lock(output.parent, scope="promotion_decision"):
+        _require_no_restore_recovery(_paths(output.parent))
+        reference = _load_walk_forward_reference(reference_file)
+        policy = _load_promotion_policy(policy_file)
+        evidence = adapt_walk_forward_result(reference)
+        decision = evaluate_promotion(evidence, policy)
+        _write_json(output, decision.as_dict())
     return {"output": str(output), "status": decision.status.value, "decision_hash": decision.decision_hash, "paper_limits_hash": decision.paper_limits_hash}
 
 
@@ -603,6 +1001,7 @@ def cohort_prepare(
 ) -> dict[str, Any]:
     runtime_db_path = Path(runtime_db) if runtime_db is not None else _db_paths()["runtime_db"]
     with _acquire_operational_lock(runtime_db_path.parent, scope=f"cohort_prepare:{strategy_version}:{symbol}:{interval}"):
+        _require_no_restore_recovery(_paths(runtime_db_path.parent))
         contract = persist_operational_cohort_contract(
             runtime_db_path,
             strategy_version=strategy_version,
@@ -637,10 +1036,11 @@ def campaign_prepare(
     campaign_db: str | Path | None = None,
 ) -> dict[str, Any]:
     policy = _load_campaign_policy(policy_file)
-    reference = _load_walk_forward_reference(reference_file)
     runtime_db_path = Path(runtime_db) if runtime_db is not None else _db_paths()["runtime_db"]
     campaign_db_path = Path(campaign_db) if campaign_db is not None else _db_paths()["campaign_db"]
     with _acquire_operational_lock(campaign_db_path.parent, scope=f"campaign_prepare:{campaign_id}"):
+        _require_no_restore_recovery(_paths(campaign_db_path.parent))
+        reference = _load_walk_forward_reference(reference_file)
         contract = create_operational_paper_campaign(
             campaign_id=campaign_id,
             cohort_hash=cohort_hash,
@@ -695,6 +1095,7 @@ def session_start(
         raise PaperOperationsError("promotion decision diverges from campaign scope.")
     session_id = new_session_id()
     with _acquire_operational_lock(_paths(data_dir)["root"], scope=f"session_start:{campaign_id}"):
+        _require_no_restore_recovery(_paths(data_dir))
         session = create_monitored_session(
             decision,
             session_id=session_id,
@@ -725,7 +1126,10 @@ def session_complete(*, session_id: str, reason: str = "completed via paper_oper
     session = _load_runtime_session(session_id=session_id, data_dir=data_dir)
     if session is None:
         raise PaperOperationsError("runtime session not found.")
-    record = session.complete(reason)
+    paths = _paths(data_dir)
+    with _acquire_operational_lock(paths["root"], scope=f"session_complete:{session_id}"):
+        _require_no_restore_recovery(paths)
+        record = session.complete(reason)
     return {"session_id": record.session_id, "state": record.state.value, "reason": reason}
 
 
@@ -733,7 +1137,10 @@ def runtime_resume(*, session_id: str | None = None, data_dir: str | Path | None
     session = _load_runtime_session(session_id=session_id, data_dir=data_dir)
     if session is None:
         raise PaperOperationsError("runtime session not found.")
-    session.require_running()
+    paths = _paths(data_dir)
+    with _acquire_operational_lock(paths["root"], scope="runtime_resume"):
+        _require_no_restore_recovery(paths)
+        session.require_running()
     return {"session_id": session.record.session_id, "state": session.record.state.value, "version": session.record.version}
 
 
@@ -816,6 +1223,7 @@ def backup_create(*, data_dir: str | Path | None = None, backup_name: str | None
     if final_backup_dir.exists():
         raise PaperOperationsError("backup directory already exists.")
     with _acquire_operational_lock(paths["root"], scope="backup_create"):
+        _require_no_restore_recovery(paths)
         db_files = [paths["trades_db"], paths["runtime_db"], paths["campaign_db"]]
         if not all(db_file.exists() for db_file in db_files):
             raise PaperOperationsError("all operational databases must exist before backup.")
@@ -961,7 +1369,15 @@ def _load_last_restore_verify_report(backup_root: Path) -> dict[str, Any] | None
         return None
     if verification["files"] != report["files"]:
         return None
+    expected_hashes = {
+        file_name: _hash_file(backup_dir / file_name)
+        for file_name in report["files"]
+    }
+    if report["database_hashes"] != expected_hashes:
+        return None
     if report["backup_manifest_hash"] != _hash_file(backup_dir / "manifest.json"):
+        return None
+    if report["result"] != verification:
         return None
     return report
 
@@ -1015,6 +1431,17 @@ def _paper_activity_snapshot(paths: Mapping[str, Path]) -> dict[str, Any]:
             if candidate:
                 last_activity = candidate
                 break
+    if issues:
+        return {
+            "open_positions": None,
+            "closed_trades": None,
+            "distinct_days": None,
+            "regimes": tuple(),
+            "outbox_pending": None,
+            "last_activity": None,
+            "issues": tuple(issues),
+            "status": "UNAVAILABLE",
+        }
 
     return {
         "open_positions": len(open_trades),
@@ -1059,36 +1486,41 @@ def backup_verify(*, backup_dir: str | Path) -> dict[str, Any]:
 
 def restore_verify(*, backup_dir: str | Path) -> dict[str, Any]:
     backup_path = Path(backup_dir)
-    verification = backup_verify(backup_dir=backup_path)
-    temp_dir = Path(tempfile.mkdtemp(prefix="paper_restore_verify_"))
-    try:
-        restored_files = []
-        restored_hashes: dict[str, str] = {}
-        for file_name in _BACKUP_REQUIRED_FILES:
-            src = backup_path / file_name
-            if not src.exists():
-                raise PaperOperationsError("restore verification file missing.")
-            target = temp_dir / file_name
-            shutil.copy2(src, target)
-            if not _sqlite_integrity_ok(target):
-                raise PaperOperationsError("restore verification integrity failed.")
-            restored_files.append(file_name)
-            restored_hashes[file_name] = _hash_file(target)
-        verification_report = {
-            "backup_dir": backup_path.name,
-            "backup_manifest_hash": _hash_file(backup_path / "manifest.json"),
-            "created_at_utc": _utcnow().isoformat().replace("+00:00", "Z"),
-            "database_hashes": restored_hashes,
-            "expires_at_utc": (_utcnow() + timedelta(hours=_RESTORE_REPORT_TTL_HOURS)).isoformat().replace("+00:00", "Z"),
-            "files": sorted(restored_files),
-            "result": verification,
-            "verified": True,
-            "verification_version": _RESTORE_REPORT_VERSION,
-        }
-        _write_json(backup_path.parent / ".last_restore_verify.json", verification_report)
-        return verification_report
-    finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)
+    with _acquire_operational_lock(backup_path.parent, scope="restore_verify"):
+        _require_no_restore_recovery(_paths(backup_path.parent))
+        verification = backup_verify(backup_dir=backup_path)
+        temp_dir = Path(tempfile.mkdtemp(prefix="paper_restore_verify_"))
+        try:
+            restored_files = []
+            restored_hashes: dict[str, str] = {}
+            for file_name in _BACKUP_REQUIRED_FILES:
+                src = backup_path / file_name
+                if not src.exists():
+                    raise PaperOperationsError("restore verification file missing.")
+                target = temp_dir / file_name
+                shutil.copy2(src, target)
+                if not _sqlite_integrity_ok(target):
+                    raise PaperOperationsError("restore verification integrity failed.")
+                restored_files.append(file_name)
+                restored_hashes[file_name] = _hash_file(target)
+            verification_report = {
+                "backup_dir": backup_path.name,
+                "backup_manifest_hash": _hash_file(backup_path / "manifest.json"),
+                "created_at_utc": _utcnow().isoformat().replace("+00:00", "Z"),
+                "database_hashes": restored_hashes,
+                "expires_at_utc": (_utcnow() + timedelta(hours=_RESTORE_REPORT_TTL_HOURS)).isoformat().replace("+00:00", "Z"),
+                "files": sorted(restored_files),
+                "result": verification,
+                "verified": True,
+                "verification_version": _RESTORE_REPORT_VERSION,
+            }
+            existing_report = _load_last_restore_verify_report(backup_path.parent)
+            if existing_report is not None and existing_report != verification_report:
+                raise PaperOperationsError("restore verification report already exists.")
+            _write_json(backup_path.parent / ".last_restore_verify.json", verification_report)
+            return verification_report
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 def _restore_sqlite_file(source: Path, target: Path) -> None:
@@ -1164,18 +1596,26 @@ def restore_apply(*, backup_dir: str | Path, data_dir: str | Path | None = None,
     backup_verify(backup_dir=backup_path)
     paths = _paths(data_dir)
     root = paths["root"]
-    runtime_store = PaperRuntimeStore(paths["runtime_db"])
-    try:
-        active_sessions = runtime_store.list_active_sessions() if paths["runtime_db"].exists() else []
-    except Exception as exc:
-        raise PaperOperationsError("restore apply requires a confirmable inactive runtime.") from exc
-    if active_sessions:
-        raise PaperOperationsError("restore apply requires an inactive runtime.")
     with _acquire_operational_lock(root, scope="restore_apply"):
+        _require_no_restore_recovery(paths)
+        runtime_store = PaperRuntimeStore(paths["runtime_db"])
+        try:
+            active_sessions = runtime_store.list_active_sessions() if paths["runtime_db"].exists() else []
+        except Exception as exc:
+            raise PaperOperationsError("restore apply requires a confirmable inactive runtime.") from exc
+        if active_sessions:
+            raise PaperOperationsError("restore apply requires an inactive runtime.")
         pre_restore_snapshot = _backup_current_state(paths, prefix=".restore_prebackup.")
         staging_dir = Path(tempfile.mkdtemp(prefix=".restore_stage.", dir=paths["backups_dir"]))
         copied_files: list[str] = []
+        rollback_required = False
         try:
+            try:
+                active_sessions = runtime_store.list_active_sessions() if paths["runtime_db"].exists() else []
+            except Exception as exc:
+                raise PaperOperationsError("restore apply requires a confirmable inactive runtime.") from exc
+            if active_sessions:
+                raise PaperOperationsError("restore apply requires an inactive runtime.")
             for file_name in _BACKUP_REQUIRED_FILES:
                 src = backup_path / file_name
                 if not src.exists():
@@ -1193,15 +1633,49 @@ def restore_apply(*, backup_dir: str | Path, data_dir: str | Path | None = None,
             }
             _write_json(paths["backups_dir"] / ".last_restore_apply.json", result)
             return result
-        except Exception:
+        except Exception as exc:
             try:
                 _restore_snapshot_into_paths(pre_restore_snapshot, paths)
-            except Exception:
-                pass
-            shutil.rmtree(staging_dir, ignore_errors=True)
+                _clear_restore_recovery_state(paths)
+            except Exception as rollback_exc:
+                rollback_required = True
+                _write_restore_recovery_state(paths, snapshot_dir=pre_restore_snapshot, operation="restore_apply", reason=_sanitize_error(rollback_exc))
+                raise PaperOperationsError(
+                    f"restore rollback failed at {_sanitize_path(pre_restore_snapshot, root)}: {_sanitize_error(rollback_exc)}"
+                ) from rollback_exc
             raise
         finally:
-            shutil.rmtree(pre_restore_snapshot, ignore_errors=True)
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            if not rollback_required:
+                shutil.rmtree(pre_restore_snapshot, ignore_errors=True)
+
+
+def restore_recover(*, data_dir: str | Path | None = None, confirm: bool = False) -> dict[str, Any]:
+    if not confirm:
+        raise PaperOperationsError("restore recover requires explicit confirmation.")
+    paths = _paths(data_dir)
+    state = _load_restore_recovery_state(paths)
+    if state is None:
+        raise PaperOperationsError("restore recovery is not required.")
+    snapshot_dir = paths["backups_dir"] / str(state["snapshot_dir"])
+    if not snapshot_dir.exists():
+        raise PaperOperationsError("restore recovery snapshot not found.")
+    with _acquire_operational_lock(paths["root"], scope="restore_recover"):
+        runtime_store = PaperRuntimeStore(paths["runtime_db"])
+        try:
+            active_sessions = runtime_store.list_active_sessions() if paths["runtime_db"].exists() else []
+        except Exception as exc:
+            raise PaperOperationsError("restore recover requires a confirmable inactive runtime.") from exc
+        if active_sessions:
+            raise PaperOperationsError("restore recover requires an inactive runtime.")
+        _restore_snapshot_into_paths(snapshot_dir, paths)
+        for file_name in _BACKUP_REQUIRED_FILES:
+            target = paths["root"] / file_name
+            if not target.exists() or not _sqlite_integrity_ok(target):
+                raise PaperOperationsError("restore recovery integrity failed.")
+        _clear_restore_recovery_state(paths)
+        shutil.rmtree(snapshot_dir, ignore_errors=True)
+    return {"status": "RECOVERED", "snapshot_dir": _sanitize_path(snapshot_dir, paths["root"]) }
 
 
 def report(*, data_dir: str | Path | None = None, campaign_id: str | None = None, session_id: str | None = None) -> dict[str, Any]:
@@ -1360,6 +1834,9 @@ def build_parser() -> argparse.ArgumentParser:
     restore_apply_parser.add_argument("--backup-dir", required=True)
     restore_apply_parser.add_argument("--data-dir", default=None)
     restore_apply_parser.add_argument("--confirm", action="store_true", help="Explicitly confirm restore application.")
+    restore_recover_parser = restore_sub.add_parser("recover", help="Recover a failed restore using the preserved snapshot.")
+    restore_recover_parser.add_argument("--data-dir", default=None)
+    restore_recover_parser.add_argument("--confirm", action="store_true", help="Explicitly confirm restore recovery.")
 
     report_parser = subparsers.add_parser("report", help="Show the local paper operation report.")
     report_parser.add_argument("--data-dir", default=None)
@@ -1476,6 +1953,9 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "restore" and args.restore_command == "apply":
             _print_result(restore_apply(backup_dir=args.backup_dir, data_dir=args.data_dir, confirm=args.confirm))
+            return 0
+        if args.command == "restore" and args.restore_command == "recover":
+            _print_result(restore_recover(data_dir=args.data_dir, confirm=args.confirm))
             return 0
         if args.command == "report":
             _print_result(report(data_dir=args.data_dir, campaign_id=args.campaign_id, session_id=args.session_id))
