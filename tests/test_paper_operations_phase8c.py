@@ -16,6 +16,7 @@ from domain import Candle
 from domain.serialization import serialize_value
 from market_data import MarketDataPackage, candles_to_market_snapshot
 from paper_evaluation import PaperEvaluationPolicy
+from paper_evaluation.errors import PaperCampaignManifestError
 from promotion import (
     PromotionCriterionResult,
     PromotionDecision,
@@ -46,8 +47,10 @@ from paper_operations import (
     session_complete,
     session_start,
     session_status,
+    promotion_decision,
     PaperOperationsError,
 )
+from promotion.errors import PromotionEvidenceError
 from paper_runtime.errors import PaperRuntimeSessionError
 import storage
 
@@ -218,7 +221,7 @@ def _sqlite_table_count(path: Path, table: str) -> int:
         return conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
 
 
-def _prepare_full_operational_flow(tmp_path: Path, monkeypatch, sample_btc_data):
+def _prepare_test_only_local_operations_fixture(tmp_path: Path, monkeypatch, sample_btc_data):
     _enable_operational_tmp_dirs(monkeypatch)
     monkeypatch.setattr("paper_operations.live_trading_permitted", lambda: False)
     monkeypatch.setattr(decisor, "obter_funding_rate", lambda symbol="BTCUSDT": None)
@@ -374,6 +377,7 @@ def _prepare_full_operational_flow(tmp_path: Path, monkeypatch, sample_btc_data)
         "reference_output": reference_output,
         "decision_file": decision_file,
         "campaign_id": campaign["campaign_id"],
+        "synthetic_test_data": True,
     }
 
 
@@ -403,8 +407,95 @@ def test_phase5_reference_rejects_synthetic_fixture(tmp_path, monkeypatch):
         phase5_reference(input_file=synthetic_reference, output_file=tmp_path / "output.json")
 
 
+def test_phase8c_honest_operational_flow_rejects_unsatisfied_strategy_without_adulteration(tmp_path, monkeypatch, sample_btc_data):
+    _enable_operational_tmp_dirs(monkeypatch)
+    monkeypatch.setattr("paper_operations.live_trading_permitted", lambda: False)
+    monkeypatch.setattr(decisor, "obter_funding_rate", lambda symbol="BTCUSDT": None)
+    monkeypatch.setattr(decisor, "log_decisao", lambda *args, **kwargs: None)
+    data_dir = tmp_path / "paper_data"
+    initialize(data_dir=data_dir)
+
+    package = _operational_reference_package(sample_btc_data)
+    monkeypatch.setattr(
+        paper_ops.trusted_market_data_service,
+        "fetch",
+        lambda symbol="BTCUSDT", interval="1h", limit=500: package,
+    )
+
+    reference_input = tmp_path / "reference_config.json"
+    _write_json(
+        reference_input,
+        {
+            "symbol": "BTCUSDT",
+            "interval": "1h",
+            "limit": 1000,
+            "strategy_version": "v4_walk_forward",
+            "provider": "trusted_market_data_service",
+        },
+    )
+    reference_output = data_dir / "reference.json"
+    reference_result = phase5_reference(input_file=reference_input, output_file=reference_output)
+    assert reference_result["runner_trusted"] is True
+    assert reference_result["synthetic_test_data"] is False
+
+    reference_payload = json.loads(reference_output.read_text(encoding="utf-8"))
+    assert all(window.get("approved") is not True for window in reference_payload["walk_forward"]["windows"])
+
+    policy_file = tmp_path / "promotion_policy.json"
+    _write_json(
+        policy_file,
+        PromotionPolicy(
+            min_oos_windows=1,
+            min_oos_trades=1,
+            min_oos_net_return_percent=0,
+            min_oos_expectancy=0,
+            min_oos_profit_factor=0.1,
+            max_oos_drawdown_percent=100,
+            min_profitable_window_ratio_percent=0,
+            max_validation_degradation_percent=100,
+            require_nonzero_costs=True,
+        ).as_dict(),
+    )
+    campaign_policy_file = tmp_path / "campaign_policy.json"
+    _write_json(campaign_policy_file, PaperEvaluationPolicy().as_dict())
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    period_start = now + timedelta(days=1)
+    period_end = period_start + timedelta(days=1)
+    cohort = cohort_prepare(
+        strategy_version="v4_walk_forward",
+        symbol="BTCUSDT",
+        interval="1h",
+        inclusion_rule="sessions-with-valid-paper-evidence",
+        period_start_utc=period_start.isoformat().replace("+00:00", "Z"),
+        period_end_utc=period_end.isoformat().replace("+00:00", "Z"),
+        runtime_db=data_dir / "paper_runtime.db",
+    )
+    with pytest.raises(PromotionEvidenceError):
+        promotion_decision(
+            reference_file=reference_output,
+            policy_file=policy_file,
+            output_file=tmp_path / "rejected_decision.json",
+        )
+
+    with pytest.raises(PaperCampaignManifestError):
+        campaign_prepare(
+            campaign_id="campaign-phase8c-honest",
+            policy_file=campaign_policy_file,
+            reference_file=reference_output,
+            strategy_version="v4_walk_forward",
+            symbol="BTCUSDT",
+            interval="1h",
+            inclusion_rule="sessions-with-valid-paper-evidence",
+            period_start_utc=period_start.isoformat().replace("+00:00", "Z"),
+            period_end_utc=period_end.isoformat().replace("+00:00", "Z"),
+            cohort_hash=cohort["cohort_hash"],
+            runtime_db=data_dir / "paper_runtime.db",
+            campaign_db=data_dir / "paper_evaluation_campaign.db",
+        )
+
+
 def test_phase8c_full_local_operations_flow_uses_real_reference_and_sanitized_reports(tmp_path, monkeypatch, sample_btc_data):
-    flow = _prepare_full_operational_flow(tmp_path, monkeypatch, sample_btc_data)
+    flow = _prepare_test_only_local_operations_fixture(tmp_path, monkeypatch, sample_btc_data)
     data_dir = flow["data_dir"]
 
     session = session_start(
@@ -466,7 +557,7 @@ def test_phase8c_full_local_operations_flow_uses_real_reference_and_sanitized_re
 
 
 def test_promotion_decision_requires_status_and_session_start_fails_closed(tmp_path, monkeypatch, sample_btc_data):
-    flow = _prepare_full_operational_flow(tmp_path, monkeypatch, sample_btc_data)
+    flow = _prepare_test_only_local_operations_fixture(tmp_path, monkeypatch, sample_btc_data)
     data_dir = flow["data_dir"]
     bad_decision = tmp_path / "bad_decision.json"
     payload = json.loads(flow["decision_file"].read_text(encoding="utf-8"))
@@ -483,7 +574,7 @@ def test_promotion_decision_requires_status_and_session_start_fails_closed(tmp_p
 
 
 def test_session_start_does_not_fallback_to_other_active_session(tmp_path, monkeypatch, sample_btc_data):
-    flow = _prepare_full_operational_flow(tmp_path, monkeypatch, sample_btc_data)
+    flow = _prepare_test_only_local_operations_fixture(tmp_path, monkeypatch, sample_btc_data)
     data_dir = flow["data_dir"]
     session = session_start(
         campaign_id=flow["campaign_id"],
@@ -504,7 +595,7 @@ def test_session_start_does_not_fallback_to_other_active_session(tmp_path, monke
 
 
 def test_lock_malformed_blocks_and_requires_admin_recovery(tmp_path, monkeypatch, sample_btc_data):
-    flow = _prepare_full_operational_flow(tmp_path, monkeypatch, sample_btc_data)
+    flow = _prepare_test_only_local_operations_fixture(tmp_path, monkeypatch, sample_btc_data)
     data_dir = flow["data_dir"]
     lock_path = _lock_file_path(data_dir, scope=f"session_start:{flow['campaign_id']}")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -528,7 +619,7 @@ def test_lock_malformed_blocks_and_requires_admin_recovery(tmp_path, monkeypatch
 
 
 def test_lock_blocks_live_process_and_recovers_stale_lock(tmp_path, monkeypatch, sample_btc_data):
-    flow = _prepare_full_operational_flow(tmp_path, monkeypatch, sample_btc_data)
+    flow = _prepare_test_only_local_operations_fixture(tmp_path, monkeypatch, sample_btc_data)
     data_dir = flow["data_dir"]
     lock_path = _lock_file_path(data_dir, scope=f"session_start:{flow['campaign_id']}")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -563,7 +654,7 @@ def test_lock_blocks_live_process_and_recovers_stale_lock(tmp_path, monkeypatch,
 
 
 def test_backup_manifest_and_restore_apply_hardened(tmp_path, monkeypatch, sample_btc_data):
-    flow = _prepare_full_operational_flow(tmp_path, monkeypatch, sample_btc_data)
+    flow = _prepare_test_only_local_operations_fixture(tmp_path, monkeypatch, sample_btc_data)
     data_dir = flow["data_dir"]
     backup = backup_create(data_dir=data_dir, backup_name="valid-backup")
     manifest_path = Path(backup["backup_dir"]) / "manifest.json"
@@ -588,7 +679,7 @@ def test_backup_manifest_and_restore_apply_hardened(tmp_path, monkeypatch, sampl
 
 
 def test_backup_retention_keeps_latest_valid_backups(tmp_path, monkeypatch, sample_btc_data):
-    flow = _prepare_full_operational_flow(tmp_path, monkeypatch, sample_btc_data)
+    flow = _prepare_test_only_local_operations_fixture(tmp_path, monkeypatch, sample_btc_data)
     data_dir = flow["data_dir"]
     names = []
     for index in range(8):
@@ -600,7 +691,7 @@ def test_backup_retention_keeps_latest_valid_backups(tmp_path, monkeypatch, samp
 
 
 def test_doctor_requires_backup_and_restore_verify_and_report_includes_activity(tmp_path, monkeypatch, sample_btc_data):
-    flow = _prepare_full_operational_flow(tmp_path, monkeypatch, sample_btc_data)
+    flow = _prepare_test_only_local_operations_fixture(tmp_path, monkeypatch, sample_btc_data)
     data_dir = flow["data_dir"]
     backup = backup_create(data_dir=data_dir, backup_name="doctor-backup")
     restore_verify(backup_dir=backup["backup_dir"])
@@ -631,7 +722,7 @@ def test_cli_rejects_temporary_paths_and_missing_status(tmp_path, monkeypatch, s
     captured = capsys.readouterr()
     assert "temporary directory" in captured.err or "error:" in captured.err
 
-    flow = _prepare_full_operational_flow(tmp_path, monkeypatch, sample_btc_data)
+    flow = _prepare_test_only_local_operations_fixture(tmp_path, monkeypatch, sample_btc_data)
     bad_decision = tmp_path / "bad_decision_cli.json"
     payload = json.loads(flow["decision_file"].read_text(encoding="utf-8"))
     payload.pop("status", None)
@@ -652,7 +743,7 @@ def test_cli_rejects_temporary_paths_and_missing_status(tmp_path, monkeypatch, s
 
 
 def test_report_uses_selected_database_for_decision_logs(tmp_path, monkeypatch, sample_btc_data):
-    flow = _prepare_full_operational_flow(tmp_path, monkeypatch, sample_btc_data)
+    flow = _prepare_test_only_local_operations_fixture(tmp_path, monkeypatch, sample_btc_data)
     data_dir = flow["data_dir"]
     db_a = data_dir / "trades.db"
     db_b = tmp_path / "other" / "trades.db"
@@ -676,7 +767,7 @@ def test_report_uses_selected_database_for_decision_logs(tmp_path, monkeypatch, 
 
 
 def test_backup_verify_is_read_only(tmp_path, monkeypatch, sample_btc_data):
-    flow = _prepare_full_operational_flow(tmp_path, monkeypatch, sample_btc_data)
+    flow = _prepare_test_only_local_operations_fixture(tmp_path, monkeypatch, sample_btc_data)
     data_dir = flow["data_dir"]
     backup = backup_create(data_dir=data_dir, backup_name="readonly-backup")
     backup_dir = Path(backup["backup_dir"])
@@ -689,7 +780,7 @@ def test_backup_verify_is_read_only(tmp_path, monkeypatch, sample_btc_data):
 
 
 def test_backup_retention_ignores_corrupted_backups(tmp_path, monkeypatch, sample_btc_data):
-    flow = _prepare_full_operational_flow(tmp_path, monkeypatch, sample_btc_data)
+    flow = _prepare_test_only_local_operations_fixture(tmp_path, monkeypatch, sample_btc_data)
     data_dir = flow["data_dir"]
     for index in range(6):
         backup_create(data_dir=data_dir, backup_name=f"backup-{index:02d}")
@@ -702,7 +793,7 @@ def test_backup_retention_ignores_corrupted_backups(tmp_path, monkeypatch, sampl
 
 
 def test_restore_apply_rolls_back_on_intermediate_failure(tmp_path, monkeypatch, sample_btc_data):
-    flow = _prepare_full_operational_flow(tmp_path, monkeypatch, sample_btc_data)
+    flow = _prepare_test_only_local_operations_fixture(tmp_path, monkeypatch, sample_btc_data)
     data_dir = flow["data_dir"]
     backup = backup_create(data_dir=data_dir, backup_name="rollback-backup")
     _seed_decision_log(data_dir / "trades.db", modo="PAPER_SOL", decisao="ERRO", symbol="BTCUSDT")
@@ -739,7 +830,7 @@ def test_restore_apply_rolls_back_on_intermediate_failure(tmp_path, monkeypatch,
 
 
 def test_restore_apply_recovery_required_and_restore_recover_restores_snapshot(tmp_path, monkeypatch, sample_btc_data):
-    flow = _prepare_full_operational_flow(tmp_path, monkeypatch, sample_btc_data)
+    flow = _prepare_test_only_local_operations_fixture(tmp_path, monkeypatch, sample_btc_data)
     data_dir = flow["data_dir"]
     backup = backup_create(data_dir=data_dir, backup_name="recovery-backup")
     before_trade_rows = _sqlite_table_rows(data_dir / "trades.db", "decision_logs")
@@ -780,7 +871,7 @@ def test_restore_apply_recovery_required_and_restore_recover_restores_snapshot(t
 
 
 def test_restore_verify_receipt_expires_and_blocks_doctor(tmp_path, monkeypatch, sample_btc_data):
-    flow = _prepare_full_operational_flow(tmp_path, monkeypatch, sample_btc_data)
+    flow = _prepare_test_only_local_operations_fixture(tmp_path, monkeypatch, sample_btc_data)
     data_dir = flow["data_dir"]
     backup = backup_create(data_dir=data_dir, backup_name="expiry-backup")
     receipt = restore_verify(backup_dir=backup["backup_dir"])
