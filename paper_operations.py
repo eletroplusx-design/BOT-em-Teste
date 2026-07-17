@@ -66,9 +66,8 @@ from paper_evaluation.errors import (
 )
 from promotion import PromotionDecision, PromotionPolicy, PromotionStatus, adapt_walk_forward_result, evaluate_promotion
 from promotion.errors import PromotionDecisionError, PromotionPolicyError
-from validation.artifacts import build_manifest, manifest_hash as validation_manifest_hash
-from validation import CandidateConfig, SelectionCriteria, ValidationSplitConfig, WalkForwardResult, WalkForwardValidator, TrustedLeakFreeBacktestRunner, WindowBounds
-from validation.statistics import aggregate_run_statistics
+from validation.artifacts import manifest_hash as validation_manifest_hash
+from validation import CandidateConfig, SelectionCriteria, ValidationSplitConfig, WalkForwardResult, WalkForwardValidator, TrustedLeakFreeBacktestRunner
 
 import storage
 
@@ -601,7 +600,6 @@ def _run_operational_walk_forward(*, symbol: str, interval: str, limit: int, str
         raise PaperOperationsError("operational market data is empty.")
     if len(dataframe) < 200:
         raise PaperOperationsError("operational market data is insufficient.")
-    bootstrap_frame = dataframe.iloc[: min(len(dataframe), 600)].copy()
 
     candidate = CandidateConfig.from_mapping(
         "tomar_decisao_real",
@@ -619,12 +617,10 @@ def _run_operational_walk_forward(*, symbol: str, interval: str, limit: int, str
     }
 
     def strategy_factory(_candidate: CandidateConfig):
-        signal_counter = {"count": 0}
-
         def strategy(history, snapshot):
             if len(history) < 2:
                 return None
-            frame = pd.concat([bootstrap_frame, _history_to_dataframe(history)], ignore_index=True)
+            frame = _history_to_dataframe(history)
             with _paper_decisor_side_effects_disabled():
                 decision = tomar_decisao(
                     frame,
@@ -633,63 +629,23 @@ def _run_operational_walk_forward(*, symbol: str, interval: str, limit: int, str
                     fonte_dados=provider,
                     strategy_version=strategy_version,
                 )
-            direction_name = None
-            entry = None
-            stop_loss = None
-            take_profit = None
-            rr = None
-            score = None
-            regime = None
-            volume_status = None
-            reason = ""
-            if isinstance(decision, Mapping) and decision.get("direcao") in {"COMPRA", "VENDA"}:
-                entry = decision.get("entrada")
-                stop_loss = decision.get("stop_loss")
-                take_profit = decision.get("take_profit")
-                if entry is not None and stop_loss is not None and take_profit is not None:
-                    direction_name = str(decision["direcao"])
-                    rr = decision.get("rr")
-                    score = decision.get("score", 0)
-                    regime = decision.get("regime")
-                    volume_status = decision.get("volume_status")
-                    reason = str(decision.get("motivo", ""))
-            if direction_name is None:
-                if len(history) < 60:
-                    return None
-                last = history[-1]
-                first = history[0]
-                direction_name = "COMPRA" if float(last.close) >= float(first.close) else "VENDA"
-                entry = Decimal(str(last.close))
-                base_distance = max(Decimal("20"), (entry * Decimal("0.005")).quantize(Decimal("0.01")))
-                if direction_name == "COMPRA":
-                    stop_loss = entry - base_distance
-                    take_profit = entry + (base_distance * Decimal("1.5"))
-                    regime = "BULL"
-                else:
-                    stop_loss = entry + base_distance
-                    take_profit = entry - (base_distance * Decimal("1.5"))
-                    regime = "BEAR"
-                rr = Decimal("1.5")
-                score = Decimal("5")
-                volume_status = "NEUTRO"
-                reason = "synthetic fallback"
-            signal_counter["count"] += 1
-            if signal_counter["count"] % 10 == 0:
+            if not isinstance(decision, Mapping):
+                return None
+            direction_name = str(decision.get("direcao", "")).strip().upper()
+            if direction_name not in {"COMPRA", "VENDA"}:
+                return None
+            entry = decision.get("entrada")
+            stop_loss = decision.get("stop_loss")
+            take_profit = decision.get("take_profit")
+            if entry is None or stop_loss is None or take_profit is None:
+                return None
+            rr = decision.get("rr")
+            if rr is None:
                 entry_dec = Decimal(str(entry))
                 stop_dec = Decimal(str(stop_loss))
                 take_dec = Decimal(str(take_profit))
-                if direction_name == "COMPRA":
-                    direction_name = "VENDA"
-                    stop_loss = entry_dec + (entry_dec - stop_dec)
-                    take_profit = entry_dec - (take_dec - entry_dec)
-                else:
-                    direction_name = "COMPRA"
-                    stop_loss = entry_dec - (stop_dec - entry_dec)
-                    take_profit = entry_dec + (entry_dec - take_dec)
-            rr = decision.get("rr")
-            if rr is None:
-                risco = abs(Decimal(str(entry)) - Decimal(str(stop_loss)))
-                recompensa = abs(Decimal(str(take_profit)) - Decimal(str(entry)))
+                risco = abs(entry_dec - stop_dec)
+                recompensa = abs(take_dec - entry_dec)
                 rr = (recompensa / risco) if risco > 0 else Decimal("0")
             return Signal(
                 symbol=symbol,
@@ -700,10 +656,10 @@ def _run_operational_walk_forward(*, symbol: str, interval: str, limit: int, str
                 rr=Decimal(str(rr)),
                 timestamp=snapshot.timestamp,
                 source=DataSource.PAPER,
-                score=Decimal(str(score)),
-                regime=regime,
-                volume_status=volume_status,
-                reason=reason,
+                score=Decimal(str(decision.get("score", 0))),
+                regime=decision.get("regime"),
+                volume_status=decision.get("volume_status"),
+                reason=str(decision.get("motivo", "")),
                 strategy_version=strategy_version,
             )
 
@@ -747,45 +703,6 @@ def _run_operational_walk_forward(*, symbol: str, interval: str, limit: int, str
         require_trusted_runner=True,
     )
     result = validator.run(dataframe, [candidate], runner=runner)
-    approved_windows = tuple(window for window in result.windows if window.approved)
-    if approved_windows and len(approved_windows) != len(result.windows):
-        manifest = dict(result.manifest or {})
-        approved_indices = [index for index, window in enumerate(result.windows) if window.approved]
-        window_signatures = dict(manifest.get("window_signatures") or {})
-        all_window_signatures = list(window_signatures.get("windows") or [])
-        filtered_signatures = [all_window_signatures[index] for index in approved_indices if index < len(all_window_signatures)]
-        window_signatures["windows"] = filtered_signatures
-        candidate_grid = [
-            candidate_item if isinstance(candidate_item, CandidateConfig) else CandidateConfig.from_mapping(
-                candidate_item.get("name", ""),
-                candidate_item.get("parameters", {}),
-            )
-            for candidate_item in manifest.get("candidate_grid", [])
-        ]
-        split_config = manifest.get("split_config")
-        filtered_manifest = build_manifest(
-            symbol=str(manifest.get("symbol", symbol)),
-            interval=str(manifest.get("interval", interval)),
-            strategy_version=str(manifest.get("strategy_version", strategy_version)),
-            costs=manifest.get("costs", {}),
-            split_config=split_config,
-            candidate_grid=candidate_grid,
-            windows=[WindowBounds(**window.bounds.as_dict()) for window in approved_windows],
-            data_signature=manifest.get("data_signature", {}),
-            selection_criteria=manifest.get("selection_criteria", {}),
-            execution_contract=manifest.get("execution_contract", {}),
-            window_signatures=window_signatures,
-            runner_trusted=bool(manifest.get("runner_trusted", False)),
-            seed=manifest.get("seed"),
-        )
-        filtered_summary = aggregate_run_statistics(approved_windows)
-        filtered_summary["manifest_hash"] = filtered_manifest["manifest_hash"]
-        filtered_summary["strategy_version"] = str(manifest.get("strategy_version", strategy_version))
-        filtered_summary["symbol"] = str(manifest.get("symbol", symbol))
-        filtered_summary["interval"] = str(manifest.get("interval", interval))
-        filtered_summary["mode"] = str(manifest.get("mode", "rolling"))
-        filtered_summary["runner_trusted"] = bool(manifest.get("runner_trusted", False))
-        result = WalkForwardResult(windows=approved_windows, summary=filtered_summary, manifest=filtered_manifest)
     if result.summary.get("runner_trusted") is not True or result.manifest.get("runner_trusted") is not True:
         raise PaperOperationsError("operational walk-forward reference must be trusted.")
     if runner.execution_contract().get("paper_only") is not True:
@@ -1910,12 +1827,7 @@ def report(*, data_dir: str | Path | None = None, campaign_id: str | None = None
         "period_end": campaign_snapshot.get("period_end_utc") if isinstance(campaign_snapshot, dict) else None,
         "hours_required": campaign_snapshot.get("min_duration_hours") if isinstance(campaign_snapshot, dict) else None,
         "hours_observed": activity.get("hours_observed", 0),
-        "sessions_observed": max(
-            1,
-            activity.get("session_count", 0),
-            activity.get("closed_trades", 0),
-            activity.get("open_positions", 0),
-        ),
+        "sessions_observed": activity.get("session_count", 0),
         "trades_observed": activity.get("closed_trades", 0) + activity.get("open_positions", 0),
         "regimes_observed": activity.get("regimes", ()),
         "restore_verified": bool(report_payload["last_restore_verify"]),

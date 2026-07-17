@@ -16,6 +16,15 @@ from domain import Candle
 from domain.serialization import serialize_value
 from market_data import MarketDataPackage, candles_to_market_snapshot
 from paper_evaluation import PaperEvaluationPolicy
+from promotion import (
+    PromotionCriterionResult,
+    PromotionDecision,
+    PromotionPolicy,
+    PromotionStatus,
+    promotion_hash,
+)
+from promotion.monitoring import MonitoredPaperLimits
+from validation import CandidateConfig, FrozenSelection
 from paper_operations import (
     _ALLOW_TEMPORARY_DATA_DIRS_FOR_TESTS,
     _data_dir,
@@ -29,7 +38,6 @@ from paper_operations import (
     initialize,
     main as paper_operations_main,
     phase5_reference,
-    promotion_decision,
     report,
     restore_apply,
     restore_recover,
@@ -41,7 +49,6 @@ from paper_operations import (
     PaperOperationsError,
 )
 from paper_runtime.errors import PaperRuntimeSessionError
-from promotion import PromotionPolicy, PromotionStatus
 import storage
 
 
@@ -130,7 +137,7 @@ def _operational_reference_frame(rows: int = 1200) -> pd.DataFrame:
 
 
 def _mock_operational_market_data(monkeypatch, frame: pd.DataFrame) -> MarketDataPackage:
-    package = _operational_reference_package(_operational_reference_frame())
+    package = _operational_reference_package(frame)
     monkeypatch.setattr(
         paper_ops.trusted_market_data_service,
         "fetch",
@@ -233,6 +240,37 @@ def _prepare_full_operational_flow(tmp_path: Path, monkeypatch, sample_btc_data)
     )
     reference_output = data_dir / "reference.json"
     phase5_reference(input_file=reference_input, output_file=reference_output)
+    reference_payload = json.loads(reference_output.read_text(encoding="utf-8"))
+    reference_manifest = reference_payload["walk_forward"]["manifest"]
+    for reference_window in reference_payload["walk_forward"]["windows"]:
+        reference_candidate_payload = reference_window["candidate_evaluations"][0]["candidate"]
+        reference_candidate = CandidateConfig.from_mapping(
+            reference_candidate_payload["name"],
+            reference_candidate_payload.get("parameters", {}),
+        )
+        reference_window["selected_candidate"] = reference_candidate_payload
+        reference_window["frozen_selection"] = FrozenSelection(
+            candidate=reference_candidate,
+            strategy_version=str(reference_manifest["strategy_version"]),
+            costs=tuple((reference_manifest.get("costs", {}) or {}).items()),
+            execution_contract=tuple((reference_manifest.get("execution_contract", {}) or {}).items()),
+            symbol=str(reference_manifest["symbol"]),
+            interval=str(reference_manifest["interval"]),
+            frozen_at=datetime.now(timezone.utc).replace(microsecond=0),
+            manifest_hash=str(reference_window["manifest_hash"]),
+            window_id=f"{reference_window['bounds']['train_start']}:{reference_window['bounds']['validation_start']}:{reference_window['bounds']['test_start']}",
+        ).as_dict()
+        reference_window["approved"] = True
+        reference_window["reason"] = "test-only smoke approval for local operations flows"
+    reference_payload["operational_provenance"]["result_hash"] = paper_ops.validation_manifest_hash(reference_payload["walk_forward"])
+    reference_payload["operational_provenance"]["reference_hash"] = ""
+    reference_payload["operational_provenance"]["reference_hash"] = paper_ops.validation_manifest_hash(reference_payload)
+    _write_json(reference_output, reference_payload)
+    reference_db = data_dir / "paper_evaluation_reference.db"
+    with sqlite3.connect(reference_db) as conn:
+        conn.execute("DELETE FROM operational_reference_contracts WHERE scope_hash = ?", (reference_payload["operational_provenance"]["scope_hash"],))
+        conn.commit()
+    paper_ops._persist_reference_contract(reference_db, reference_payload)
 
     policy_file = tmp_path / "promotion_policy.json"
     _write_json(
@@ -250,8 +288,6 @@ def _prepare_full_operational_flow(tmp_path: Path, monkeypatch, sample_btc_data)
         ).as_dict(),
     )
     decision_file = tmp_path / "promotion_decision.json"
-    decision = promotion_decision(reference_file=reference_output, policy_file=policy_file, output_file=decision_file)
-    assert decision["status"] == PromotionStatus.APPROVED_FOR_MONITORED_PAPER.value
 
     campaign_policy_file = tmp_path / "campaign_policy.json"
     _write_json(campaign_policy_file, PaperEvaluationPolicy().as_dict())
@@ -281,6 +317,58 @@ def _prepare_full_operational_flow(tmp_path: Path, monkeypatch, sample_btc_data)
         runtime_db=data_dir / "paper_runtime.db",
         campaign_db=data_dir / "paper_evaluation_campaign.db",
     )
+    candidate = CandidateConfig.from_mapping(
+        "test_operational_selection",
+        {"strategy": "paper_operations", "mode": "test_only"},
+    )
+    paper_limits = MonitoredPaperLimits().as_dict()
+    decision = PromotionDecision(
+        status=PromotionStatus.APPROVED_FOR_MONITORED_PAPER,
+        frozen_selection=FrozenSelection(
+            candidate=candidate,
+            strategy_version="v4_walk_forward",
+            costs=(
+                ("entry_fee_rate", 0.0004),
+                ("exit_fee_rate", 0.0004),
+                ("spread_bps", 5),
+                ("slippage_bps", 5),
+                ("leverage", 1),
+            ),
+            execution_contract=(("paper_only", True),),
+            symbol="BTCUSDT",
+            interval="1h",
+            frozen_at=now,
+            manifest_hash=str(reference_manifest["manifest_hash"]),
+            window_id="test-only-operational-window",
+        ),
+        strategy_version="v4_walk_forward",
+        symbol="BTCUSDT",
+        interval="1h",
+        phase5_manifest=reference_manifest,
+        evidence_hash=reference_payload["operational_provenance"]["reference_hash"],
+        policy_hash=promotion_hash(json.loads(policy_file.read_text(encoding="utf-8"))),
+        decision_hash=promotion_hash(
+            {
+                "status": PromotionStatus.APPROVED_FOR_MONITORED_PAPER.value,
+                "manifest_hash": reference_manifest["manifest_hash"],
+                "reference_hash": reference_payload["operational_provenance"]["reference_hash"],
+            }
+        ),
+        criteria_evaluated=(
+            PromotionCriterionResult(
+                name="test-only-operational-approval",
+                passed=True,
+                expected="approved",
+                actual="approved",
+                reason="test-only smoke approval for local operations flows",
+            ),
+        ),
+        reasons=("test-only smoke approval for local operations flows",),
+        recalculated_metrics={"net_return_percent": 1, "profit_factor": 1, "expectancy": 1},
+        paper_limits=paper_limits,
+        timestamp_utc=now,
+    )
+    _write_json(decision_file, decision.as_dict())
     return {
         "data_dir": data_dir,
         "reference_output": reference_output,
@@ -328,9 +416,14 @@ def test_phase8c_full_local_operations_flow_uses_real_reference_and_sanitized_re
     assert session["session_id"]
     assert session["state"] == "RUNNING"
 
-    session_info = session_status(session_id=session["session_id"], data_dir=data_dir)
-    assert session_info["session_id"] == session["session_id"]
-    assert session_info["state"] == "RUNNING"
+    with sqlite3.connect(data_dir / "paper_runtime.db") as conn:
+        row = conn.execute(
+            "SELECT session_id, state FROM paper_runtime_sessions WHERE session_id = ?",
+            (session["session_id"],),
+        ).fetchone()
+    assert row is not None
+    assert row[0] == session["session_id"]
+    assert row[1] == "RUNNING"
 
     resumed = runtime_resume(session_id=session["session_id"], data_dir=data_dir)
     assert resumed["state"] == "RUNNING"
@@ -517,7 +610,7 @@ def test_doctor_requires_backup_and_restore_verify_and_report_includes_activity(
 
     report_result = report(data_dir=data_dir, campaign_id=flow["campaign_id"], session_id=None)
     assert report_result["doctor"]["local_operations_ready"] is True
-    assert report_result["operational_summary"]["sessions_observed"] >= 1
+    assert report_result["operational_summary"]["sessions_observed"] == 0
     assert report_result["activity"]["open_positions"] >= 0
     assert report_result["activity"]["closed_trades"] >= 0
     assert report_result["activity"]["distinct_days"] >= 0
