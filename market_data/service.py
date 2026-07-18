@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from enum import Enum
 from typing import Any
 
 from domain import Candle, MarketSnapshot
@@ -13,6 +14,12 @@ from .provider import BinancePublicKlinesProvider
 from .validation import MAX_BINANCE_LIMIT, validate_klines_payload, validate_limit, validate_market_data_consistency, validate_symbol_interval
 
 
+class MarketDataProvenance(str, Enum):
+    OPERATIONAL_TRUSTED = "OPERATIONAL_TRUSTED"
+    SYNTHETIC_TEST = "SYNTHETIC_TEST"
+    UNKNOWN = "UNKNOWN"
+
+
 @dataclass(frozen=True, slots=True)
 class MarketDataPackage:
     symbol: str
@@ -20,10 +27,14 @@ class MarketDataPackage:
     candles: tuple[Candle, ...]
     snapshot: MarketSnapshot
     source: str
+    provenance_class: MarketDataProvenance
     fetched_at: datetime
     expires_at: datetime
     cache_status: str = "miss"
-    synthetic_test_data: bool = False
+
+    @property
+    def synthetic_test_data(self) -> bool:
+        return self.provenance_class is MarketDataProvenance.SYNTHETIC_TEST
 
     @property
     def expired(self) -> bool:
@@ -53,10 +64,10 @@ class TrustedMarketDataService:
             candles=tuple(candles),
             snapshot=snapshot,
             source=snapshot.source.value if hasattr(snapshot.source, "value") else str(snapshot.source),
+            provenance_class=MarketDataProvenance.OPERATIONAL_TRUSTED,
             fetched_at=now,
             expires_at=now + timedelta(seconds=self.ttl_seconds),
             cache_status=cache_status,
-            synthetic_test_data=False,
         )
 
     def _package_for_limit(self, package: MarketDataPackage, limit: int, cache_status: str) -> MarketDataPackage:
@@ -68,10 +79,10 @@ class TrustedMarketDataService:
             candles=candles,
             snapshot=snapshot,
             source=snapshot.source.value if hasattr(snapshot.source, "value") else str(snapshot.source),
+            provenance_class=package.provenance_class,
             fetched_at=package.fetched_at,
             expires_at=package.expires_at,
             cache_status=cache_status,
-            synthetic_test_data=package.synthetic_test_data,
         )
 
     def _candles_to_payload(self, candles: tuple[Candle, ...]) -> list[list[Any]]:
@@ -113,10 +124,10 @@ class TrustedMarketDataService:
                         candles=cached.candles,
                         snapshot=cached.snapshot,
                         source=cached.snapshot.source.value if hasattr(cached.snapshot.source, "value") else str(cached.snapshot.source),
+                        provenance_class=MarketDataProvenance.OPERATIONAL_TRUSTED,
                         fetched_at=cached.stored_at,
                         expires_at=cached.expires_at,
                         cache_status="hit",
-                        synthetic_test_data=False,
                     )
                     return self._package_for_limit(cached_package, limit, "hit")
 
@@ -146,10 +157,10 @@ class TrustedMarketDataService:
             candles=entry.candles,
             snapshot=entry.snapshot,
             source=entry.snapshot.source.value if hasattr(entry.snapshot.source, "value") else str(entry.snapshot.source),
+            provenance_class=MarketDataProvenance.OPERATIONAL_TRUSTED,
             fetched_at=entry.stored_at,
             expires_at=entry.expires_at,
             cache_status="miss",
-            synthetic_test_data=False,
         )
         return self._package_for_limit(full_package, limit, "miss")
 

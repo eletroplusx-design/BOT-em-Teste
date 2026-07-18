@@ -14,11 +14,14 @@ import decisor
 import paper_operations as paper_ops
 from domain import Candle
 from domain.serialization import serialize_value
-from market_data import MarketDataPackage, candles_to_market_snapshot
+from market_data import MarketDataPackage, MarketDataProvenance, candles_to_market_snapshot
 from paper_evaluation import PaperEvaluationPolicy
+from paper_evaluation._operational import OperationalCohortContract
 from paper_evaluation.errors import PaperCampaignManifestError
+from paper_evaluation.artifacts import paper_evaluation_hash
+from paper_evaluation import OperationalPaperCampaignContract
 from paper_evaluation.campaign import _campaign_load_mode
-from paper_evaluation import OperationalPaperCampaignContract, persist_operational_paper_campaign_contract
+from paper_runtime import PaperRuntimeContract, PaperRuntimeState, PaperRuntimeStore
 from promotion import (
     PromotionCriterionResult,
     PromotionDecision,
@@ -97,10 +100,10 @@ def _operational_reference_package(frame: pd.DataFrame, *, symbol: str = "BTCUSD
         candles=candles_tuple,
         snapshot=snapshot,
         source=snapshot.source.value if hasattr(snapshot.source, "value") else str(snapshot.source),
+        provenance_class=MarketDataProvenance.SYNTHETIC_TEST,
         fetched_at=now,
         expires_at=now + timedelta(minutes=5),
         cache_status="miss",
-        synthetic_test_data=True,
     )
 
 
@@ -223,6 +226,139 @@ def _sqlite_table_count(path: Path, table: str) -> int:
         return conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
 
 
+def _seed_reference_registry(reference_db: Path, reference_payload: dict[str, object]) -> dict[str, str]:
+    paper_ops._ensure_reference_schema(reference_db)
+    provenance = reference_payload["operational_provenance"]
+    reference_hash = paper_ops.validation_manifest_hash(reference_payload)
+    scope_hash = paper_ops.validation_manifest_hash(
+        {
+            "symbol": provenance["symbol"],
+            "interval": provenance["interval"],
+            "strategy_version": provenance["strategy_version"],
+            "provider": provenance["provider"],
+            "limit_value": provenance["limit_value"],
+            "data_period_start_utc": provenance["data_period_start_utc"],
+            "data_period_end_utc": provenance["data_period_end_utc"],
+        }
+    )
+    provenance["reference_hash"] = reference_hash
+    provenance["scope_hash"] = scope_hash
+    reference_payload["operational_provenance"] = provenance
+    payload_json = json.dumps(serialize_value(reference_payload), ensure_ascii=False, sort_keys=True)
+    with sqlite3.connect(reference_db) as conn:
+        conn.execute(
+            """
+            INSERT INTO operational_reference_contracts (
+                reference_hash, scope_hash, symbol, interval, strategy_version, provider, limit_value,
+                data_period_start_utc, data_period_end_utc, data_content_hash, manifest_hash, result_hash,
+                created_at_utc, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                reference_hash,
+                scope_hash,
+                provenance["symbol"],
+                provenance["interval"],
+                provenance["strategy_version"],
+                provenance["provider"],
+                provenance["limit_value"],
+                provenance["data_period_start_utc"],
+                provenance["data_period_end_utc"],
+                provenance["data_content_hash"],
+                provenance["manifest_hash"],
+                provenance["result_hash"],
+                provenance["created_at_utc"],
+                payload_json,
+            ),
+        )
+        conn.commit()
+    return {"reference_hash": reference_hash, "scope_hash": scope_hash, "payload_json": payload_json}
+
+
+def _seed_campaign_registry(campaign_db: Path, contract: OperationalPaperCampaignContract) -> str:
+    paper_ops.ensure_operational_paper_campaign_schema(campaign_db)
+    contract_hash = contract.campaign_hash
+    payload_json = json.dumps(contract.as_dict(), ensure_ascii=False, sort_keys=True)
+    with sqlite3.connect(campaign_db) as conn:
+        conn.execute(
+            """
+            INSERT INTO paper_evaluation_campaign_contracts (
+                campaign_hash, campaign_id, cohort_hash, strategy_version, symbol, interval, inclusion_rule,
+                period_start_utc, period_end_utc, policy_payload_json, reference_payload_json, policy_hash, walk_forward_manifest_hash,
+                walk_forward_result_hash, evaluator_version, created_at_utc, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                contract_hash,
+                contract.campaign_id,
+                contract.cohort_hash,
+                contract.strategy_version,
+                contract.symbol,
+                contract.interval,
+                contract.inclusion_rule,
+                contract.period_start_utc.isoformat().replace("+00:00", "Z"),
+                contract.period_end_utc.isoformat().replace("+00:00", "Z"),
+                json.dumps(serialize_value(dict(contract.policy_payload)), ensure_ascii=False, sort_keys=True),
+                json.dumps(serialize_value(dict(contract.reference_payload_json)), ensure_ascii=False, sort_keys=True),
+                contract.policy_hash,
+                contract.walk_forward_manifest_hash,
+                contract.walk_forward_result_hash,
+                contract.evaluator_version,
+                contract.created_at_utc.isoformat().replace("+00:00", "Z"),
+                payload_json,
+            ),
+        )
+        conn.commit()
+    return contract_hash
+
+
+def _seed_promotion_decision_registry(reference_db: Path, decision: PromotionDecision) -> None:
+    paper_ops._ensure_promotion_decision_schema(reference_db)
+    payload_json = json.dumps(serialize_value(decision.as_dict()), ensure_ascii=False, sort_keys=True)
+    with sqlite3.connect(reference_db) as conn:
+        conn.execute(
+            """
+            INSERT INTO operational_promotion_decision_contracts (
+                decision_hash, reference_hash, policy_hash, paper_limits_hash, status,
+                strategy_version, symbol, interval, created_at_utc, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                decision.decision_hash,
+                decision.evidence_hash,
+                decision.policy_hash,
+                decision.paper_limits_hash,
+                decision.status.value,
+                decision.strategy_version,
+                decision.symbol,
+                decision.interval,
+                decision.timestamp_utc.isoformat().replace("+00:00", "Z"),
+                payload_json,
+            ),
+        )
+        conn.commit()
+
+
+def _seed_runtime_session(runtime_db: Path, *, session_id: str, decision_hash: str, strategy_version: str, symbol: str, interval: str, started_at: datetime) -> None:
+    store = PaperRuntimeStore(runtime_db)
+    store.initialize()
+    contract = PaperRuntimeContract(
+        session_id=session_id,
+        session_started_utc=started_at,
+        decision_hash=decision_hash,
+        evidence_hash="test-evidence-hash",
+        paper_limits_hash="test-paper-limits-hash",
+        paper_limits={"paper_capital_max": "10000", "risk_per_trade_max_percent": "1"},
+        configuration={"test_only": True},
+        strategy_version=strategy_version,
+        symbol=symbol,
+        interval=interval,
+        execution_contract={"paper_only": True},
+        paper_only=True,
+    )
+    store.create_session(contract, session_state=PaperRuntimeState.RUNNING)
+
+
 def _prepare_test_only_local_operations_fixture(tmp_path: Path, monkeypatch, sample_btc_data):
     _enable_operational_tmp_dirs(monkeypatch)
     monkeypatch.setattr("paper_operations.live_trading_permitted", lambda: False)
@@ -230,133 +366,166 @@ def _prepare_test_only_local_operations_fixture(tmp_path: Path, monkeypatch, sam
     monkeypatch.setattr(decisor, "log_decisao", lambda *args, **kwargs: None)
     data_dir = tmp_path / "paper_data"
     initialize(data_dir=data_dir)
-
-    _mock_operational_market_data(monkeypatch, sample_btc_data)
-    reference_input = tmp_path / "reference_config.json"
-    _write_json(
-        reference_input,
-        {
+    reference_payload = {
+        "operational_provenance": {
+            "version": 1,
+            "synthetic_test_data": True,
+            "evidence_class": "SYNTHETIC_TEST",
+            "provider_identity": "tests.synthetic.provider",
+            "source": "tests",
+            "provider_contract_hash": "test-provider-contract-hash",
             "symbol": "BTCUSDT",
             "interval": "1h",
-            "limit": 1000,
             "strategy_version": "v4_walk_forward",
-            "provider": "trusted_market_data_service",
+            "provider": "tests.synthetic.provider",
+            "limit_value": 1000,
+            "data_period_start_utc": "2025-01-01T00:00:00Z",
+            "data_period_end_utc": "2025-02-19T23:59:59Z",
+            "data_content_hash": "synthetic-content-hash",
+            "data_signature_hash": "synthetic-signature-hash",
+            "manifest_hash": "synthetic-manifest-hash",
+            "result_hash": "synthetic-result-hash",
+            "created_at_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+            "reference_hash": "",
+            "scope_hash": "",
         },
-    )
+        "walk_forward": {
+            "manifest": {
+                "manifest_hash": "synthetic-manifest-hash",
+                "runner_trusted": False,
+                "paper_only": True,
+            },
+            "summary": {"net_return_percent": 0, "profit_factor": 0, "expectancy": 0},
+            "windows": [],
+        },
+    }
+    reference_info = _seed_reference_registry(data_dir / "paper_evaluation_reference.db", reference_payload)
     reference_output = data_dir / "reference.json"
-    reference_result = phase5_reference(input_file=reference_input, output_file=reference_output)
-    reference_payload = json.loads(reference_output.read_text(encoding="utf-8"))
-    reference_manifest = reference_payload["walk_forward"]["manifest"]
+    _write_json(reference_output, reference_payload)
 
     policy_file = tmp_path / "promotion_policy.json"
-    _write_json(
-        policy_file,
-        PromotionPolicy(
-            min_oos_windows=1,
-            min_oos_trades=1,
-            min_oos_net_return_percent=0,
-            min_oos_expectancy=0,
-            min_oos_profit_factor=0.1,
-            max_oos_drawdown_percent=100,
-            min_profitable_window_ratio_percent=0,
-            max_validation_degradation_percent=100,
-            require_nonzero_costs=True,
-        ).as_dict(),
-    )
+    campaign_policy = PaperEvaluationPolicy()
+    policy_payload = campaign_policy.as_dict()
+    policy_hash_value = promotion_hash(policy_payload)
+    _write_json(policy_file, policy_payload)
     decision_file = tmp_path / "promotion_decision.json"
+    frozen_selection = FrozenSelection(
+        candidate=CandidateConfig.from_mapping("test_only", {"strategy": "paper_operations"}),
+        strategy_version="v4_walk_forward",
+        costs=(("entry_fee_rate", 0.0004), ("exit_fee_rate", 0.0004)),
+        execution_contract=(("paper_only", True),),
+        symbol="BTCUSDT",
+        interval="1h",
+        frozen_at=datetime.now(timezone.utc).replace(microsecond=0),
+        manifest_hash="synthetic-manifest-hash",
+        window_id="test-only-window",
+    )
+    approval_reason = "test-only approval for local runtime flows"
+    reference_hash = reference_info["reference_hash"]
+    approved_decision = PromotionDecision(
+        status=PromotionStatus.APPROVED_FOR_MONITORED_PAPER,
+        frozen_selection=frozen_selection,
+        strategy_version="v4_walk_forward",
+        symbol="BTCUSDT",
+        interval="1h",
+        phase5_manifest={"manifest_hash": "synthetic-manifest-hash", "runner_trusted": True, "paper_only": True},
+        evidence_hash=reference_hash,
+        policy_hash=policy_hash_value,
+        decision_hash=promotion_hash(
+            {
+                "status": PromotionStatus.APPROVED_FOR_MONITORED_PAPER.value,
+                "evidence_hash": reference_hash,
+                "policy_hash": policy_hash_value,
+                "criteria_evaluated": [
+                    {
+                        "name": "test-only",
+                        "passed": True,
+                        "expected": "approve",
+                        "actual": "approve",
+                        "reason": "test-only approval for local runtime flows",
+                    }
+                ],
+                "reasons": ["test-only approval for local runtime flows"],
+                "recalculated_metrics": {"net_return_percent": 1, "profit_factor": 1, "expectancy": 1},
+                "paper_limits": MonitoredPaperLimits().as_dict(),
+                "frozen_selection": frozen_selection.as_dict(),
+                "strategy_version": "v4_walk_forward",
+                "symbol": "BTCUSDT",
+                "interval": "1h",
+            }
+        ),
+        criteria_evaluated=(PromotionCriterionResult(name="test-only", passed=True, expected="approve", actual="approve", reason="test-only approval for local runtime flows"),),
+        reasons=(approval_reason,),
+        recalculated_metrics={"net_return_percent": 1, "profit_factor": 1, "expectancy": 1},
+        paper_limits=MonitoredPaperLimits().as_dict(),
+        timestamp_utc=datetime.now(timezone.utc).replace(microsecond=0),
+    )
+    _write_json(decision_file, approved_decision.as_dict())
 
     campaign_policy_file = tmp_path / "campaign_policy.json"
-    _write_json(campaign_policy_file, PaperEvaluationPolicy().as_dict())
+    _write_json(campaign_policy_file, policy_payload)
     now = datetime.now(timezone.utc).replace(microsecond=0)
     period_start = now + timedelta(days=1)
     period_end = period_start + timedelta(days=1)
-    cohort = cohort_prepare(
+    cohort_db = data_dir / "paper_runtime.db"
+    paper_ops.ensure_operational_cohort_schema(cohort_db)
+    cohort_contract = OperationalCohortContract(
         strategy_version="v4_walk_forward",
         symbol="BTCUSDT",
         interval="1h",
         inclusion_rule="sessions-with-valid-paper-evidence",
-        period_start_utc=period_start.isoformat().replace("+00:00", "Z"),
-        period_end_utc=period_end.isoformat().replace("+00:00", "Z"),
-        runtime_db=data_dir / "paper_runtime.db",
+        period_start_utc=period_start,
+        period_end_utc=period_end,
+        created_at_utc=now,
     )
-    candidate = CandidateConfig.from_mapping(
-        "test_operational_selection",
-        {"strategy": "paper_operations", "mode": "test_only"},
-    )
-    paper_limits = MonitoredPaperLimits().as_dict()
-    decision = PromotionDecision(
-        status=PromotionStatus.APPROVED_FOR_MONITORED_PAPER,
-        frozen_selection=FrozenSelection(
-            candidate=candidate,
-            strategy_version="v4_walk_forward",
-            costs=(
-                ("entry_fee_rate", 0.0004),
-                ("exit_fee_rate", 0.0004),
-                ("spread_bps", 5),
-                ("slippage_bps", 5),
-                ("leverage", 1),
+    cohort_hash = cohort_contract.cohort_hash
+    with sqlite3.connect(cohort_db) as conn:
+        conn.execute(
+            """
+            INSERT INTO paper_evaluation_cohort_contracts (
+                cohort_hash, strategy_version, symbol, interval, inclusion_rule, period_start_utc, period_end_utc, created_at_utc, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                cohort_hash,
+                cohort_contract.strategy_version,
+                cohort_contract.symbol,
+                cohort_contract.interval,
+                cohort_contract.inclusion_rule,
+                cohort_contract.period_start_utc.isoformat().replace("+00:00", "Z"),
+                cohort_contract.period_end_utc.isoformat().replace("+00:00", "Z"),
+                cohort_contract.created_at_utc.isoformat().replace("+00:00", "Z"),
+                json.dumps(cohort_contract.as_dict(), ensure_ascii=False, sort_keys=True),
             ),
-            execution_contract=(("paper_only", True),),
-            symbol="BTCUSDT",
-            interval="1h",
-            frozen_at=now,
-            manifest_hash=str(reference_manifest["manifest_hash"]),
-            window_id="test-only-operational-window",
-        ),
-        strategy_version="v4_walk_forward",
-        symbol="BTCUSDT",
-        interval="1h",
-        phase5_manifest=reference_manifest,
-        evidence_hash=reference_payload["operational_provenance"]["reference_hash"],
-        policy_hash=promotion_hash(json.loads(policy_file.read_text(encoding="utf-8"))),
-        decision_hash=promotion_hash(
-            {
-                "status": PromotionStatus.APPROVED_FOR_MONITORED_PAPER.value,
-                "manifest_hash": reference_manifest["manifest_hash"],
-                "reference_hash": reference_payload["operational_provenance"]["reference_hash"],
-            }
-        ),
-        criteria_evaluated=(
-            PromotionCriterionResult(
-                name="test-only-operational-approval",
-                passed=True,
-                expected="approved",
-                actual="approved",
-                reason="test-only smoke approval for local operations flows",
-            ),
-        ),
-        reasons=("test-only smoke approval for local operations flows",),
-        recalculated_metrics={"net_return_percent": 1, "profit_factor": 1, "expectancy": 1},
-        paper_limits=paper_limits,
-        timestamp_utc=now,
-    )
-    reference_db = data_dir / "paper_evaluation_reference.db"
-    paper_ops._persist_promotion_decision(reference_db, decision, reference_hash=reference_payload["operational_provenance"]["reference_hash"])
+        )
+        conn.commit()
     with _campaign_load_mode():
         campaign_contract = OperationalPaperCampaignContract(
             campaign_id="campaign-phase8c",
-            cohort_hash=cohort["cohort_hash"],
+            cohort_hash=cohort_hash,
             strategy_version="v4_walk_forward",
             symbol="BTCUSDT",
             interval="1h",
             inclusion_rule="sessions-with-valid-paper-evidence",
             period_start_utc=period_start,
             period_end_utc=period_end,
-            policy_payload=PaperEvaluationPolicy().as_dict(),
+            policy_payload=policy_payload,
             reference_payload_json=reference_payload,
-            policy_hash=promotion_hash(json.loads(campaign_policy_file.read_text(encoding="utf-8"))),
-            walk_forward_manifest_hash=str(reference_manifest["manifest_hash"]),
-            walk_forward_result_hash=str(reference_payload["operational_provenance"]["result_hash"]),
+            policy_hash=policy_hash_value,
+            walk_forward_manifest_hash="synthetic-manifest-hash",
+            walk_forward_result_hash="synthetic-result-hash",
             evaluator_version="v8_paper_evaluation",
             created_at_utc=now,
-        )
-    persist_operational_paper_campaign_contract(data_dir / "paper_evaluation_campaign.db", campaign_contract)
-    _write_json(decision_file, decision.as_dict())
+    )
+    _seed_campaign_registry(data_dir / "paper_evaluation_campaign.db", campaign_contract)
+    _seed_promotion_decision_registry(data_dir / "paper_evaluation_reference.db", approved_decision)
     return {
         "data_dir": data_dir,
         "reference_output": reference_output,
         "decision_file": decision_file,
-        "campaign_id": campaign_contract.campaign_id,
+        "campaign_id": "campaign-phase8c",
+        "cohort_hash": cohort_hash,
+        "reference_hash": reference_info["reference_hash"],
         "synthetic_test_data": True,
     }
 

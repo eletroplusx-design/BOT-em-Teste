@@ -82,6 +82,7 @@ _REFERENCE_PROVENANCE_KEY = "operational_provenance"
 _REFERENCE_PAYLOAD_KEY = "walk_forward"
 _REFERENCE_PROVENANCE_VERSION = 1
 _REFERENCE_DB_FILE = "paper_evaluation_reference.db"
+_PROMOTION_DECISION_PERSIST_TOKEN = object()
 _OPERATIONAL_LOCK_FILE = ".paper_operations.lock"
 _RESTORE_REPORT_VERSION = 1
 _RESTORE_REPORT_TTL_HOURS = 24
@@ -550,11 +551,52 @@ def _promotion_decision_from_payload(payload: Mapping[str, Any]) -> PromotionDec
     )
 
 
-def _persist_promotion_decision(reference_db: Path, decision: PromotionDecision, *, reference_hash: str) -> dict[str, Any]:
+def _decision_hash_payload(decision: PromotionDecision) -> dict[str, Any]:
+    return {
+        "status": decision.status.value,
+        "evidence_hash": decision.evidence_hash,
+        "policy_hash": decision.policy_hash,
+        "criteria_evaluated": [criterion.as_dict() for criterion in decision.criteria_evaluated],
+        "reasons": list(decision.reasons),
+        "recalculated_metrics": serialize_value(dict(decision.recalculated_metrics)),
+        "paper_limits": serialize_value(dict(decision.paper_limits)),
+        "frozen_selection": decision.frozen_selection.as_dict(),
+        "strategy_version": decision.strategy_version,
+        "symbol": decision.symbol,
+        "interval": decision.interval,
+    }
+
+
+def _persist_promotion_decision(
+    reference_db: Path,
+    decision: PromotionDecision,
+    *,
+    reference_payload: Mapping[str, Any],
+    token: object | None = None,
+) -> dict[str, Any]:
+    if token is not _PROMOTION_DECISION_PERSIST_TOKEN:
+        raise PaperOperationsError("promotion decision persistence requires internal authorization.")
     _ensure_reference_schema(reference_db)
     _ensure_promotion_decision_schema(reference_db)
+    provenance, walk_forward_payload = _require_reference_envelope(reference_payload)
+    if provenance.get("synthetic_test_data") is not False:
+        raise PaperOperationsError("promotion decision cannot be persisted for synthetic test data.")
+    reference_hash = provenance.get("reference_hash")
     if type(reference_hash) is not str or not reference_hash.strip():
         raise PaperOperationsError("promotion decision reference hash is invalid.")
+    reference_record = _load_reference_contract(reference_db, reference_hash)
+    canonical_reference_json = json.dumps(serialize_value(reference_payload), ensure_ascii=False, sort_keys=True)
+    if reference_record["payload_json"] != canonical_reference_json:
+        raise PaperOperationsError("promotion decision reference registry mismatch.")
+    if reference_record["scope_hash"] != provenance.get("scope_hash"):
+        raise PaperOperationsError("promotion decision reference scope mismatch.")
+    if provenance.get("manifest_hash") != walk_forward_payload.get("manifest", {}).get("manifest_hash"):
+        raise PaperOperationsError("promotion decision reference manifest mismatch.")
+    if provenance.get("result_hash") != validation_manifest_hash(_walk_forward_from_payload(walk_forward_payload).as_dict()):
+        raise PaperOperationsError("promotion decision reference result mismatch.")
+    decision_hash_value = promotion_hash(_decision_hash_payload(decision))
+    if decision_hash_value != decision.decision_hash:
+        raise PaperOperationsError("promotion decision hash mismatch.")
     payload_json = json.dumps(serialize_value(decision.as_dict()), ensure_ascii=False, sort_keys=True)
     with sqlite3.connect(reference_db) as conn:
         conn.row_factory = sqlite3.Row
@@ -708,17 +750,7 @@ def _sanitize_error(exc: Exception) -> str:
 
 
 def _load_walk_forward_reference(path: str | Path) -> WalkForwardResult:
-    payload = _load_json_file(path, label="walk-forward reference")
-    provenance, walk_forward_payload = _require_reference_envelope(payload)
-    reference_db = _reference_db_path(Path(path).resolve().parent)
-    reference_hash = provenance.get("reference_hash")
-    if type(reference_hash) is not str or not reference_hash.strip():
-        raise PaperOperationsError("walk-forward reference hash is invalid.")
-    record = _load_reference_contract(reference_db, reference_hash)
-    if record["payload_json"] != json.dumps(serialize_value(payload), ensure_ascii=False, sort_keys=True):
-        raise PaperOperationsError("walk-forward reference registry mismatch.")
-    if record["scope_hash"] != provenance.get("scope_hash"):
-        raise PaperOperationsError("walk-forward reference scope mismatch.")
+    payload, provenance, walk_forward_payload = _load_walk_forward_reference_envelope(path)
     result = _walk_forward_from_payload(walk_forward_payload)
     if result.summary.get("runner_trusted") is not True or result.manifest.get("runner_trusted") is not True:
         raise PaperOperationsError("walk-forward reference must be trusted.")
@@ -732,6 +764,24 @@ def _load_walk_forward_reference(path: str | Path) -> WalkForwardResult:
     if provenance.get("data_signature_hash") != result.manifest.get("data_signature", {}).get("content_hash"):
         raise PaperOperationsError("walk-forward reference data signature mismatch.")
     return result
+
+
+def _load_walk_forward_reference_envelope(path: str | Path) -> tuple[dict[str, Any], Mapping[str, Any], Mapping[str, Any]]:
+    payload = _load_json_file(path, label="walk-forward reference")
+    provenance, walk_forward_payload = _require_reference_envelope(payload)
+    reference_db = _reference_db_path(Path(path).resolve().parent)
+    reference_hash = provenance.get("reference_hash")
+    if type(reference_hash) is not str or not reference_hash.strip():
+        raise PaperOperationsError("walk-forward reference hash is invalid.")
+    record = _load_reference_contract(reference_db, reference_hash)
+    canonical_payload_json = json.dumps(serialize_value(payload), ensure_ascii=False, sort_keys=True)
+    if record["payload_json"] != canonical_payload_json:
+        raise PaperOperationsError("walk-forward reference registry mismatch.")
+    if record["scope_hash"] != provenance.get("scope_hash"):
+        raise PaperOperationsError("walk-forward reference scope mismatch.")
+    if provenance.get("synthetic_test_data") is not False:
+        raise PaperOperationsError("walk-forward reference must be operational provenance, not synthetic test data.")
+    return payload, provenance, walk_forward_payload
 
 
 def _history_to_dataframe(history: list[Any]) -> pd.DataFrame:
@@ -1145,13 +1195,16 @@ def promotion_decision(*, reference_file: str | Path, policy_file: str | Path, o
     output = Path(output_file) if output_file is not None else _paths()["decision_file"]
     with _acquire_operational_lock(output.parent, scope="promotion_decision"):
         _require_no_restore_recovery(_paths(output.parent))
-        reference = _load_walk_forward_reference(reference_file)
+        reference_payload, provenance, walk_forward_payload = _load_walk_forward_reference_envelope(reference_file)
+        reference = _walk_forward_from_payload(walk_forward_payload)
         policy = _load_promotion_policy(policy_file)
         evidence = adapt_walk_forward_result(reference)
         decision = evaluate_promotion(evidence, policy)
+        if provenance.get("synthetic_test_data") is not False:
+            raise PaperOperationsError("promotion decision cannot be created from synthetic test data.")
         _write_json(output, decision.as_dict())
     reference_db = _reference_db_path(output.parent)
-    _persist_promotion_decision(reference_db, decision, reference_hash=decision.evidence_hash)
+    _persist_promotion_decision(reference_db, decision, reference_payload=reference_payload, token=_PROMOTION_DECISION_PERSIST_TOKEN)
     return {"output": str(output), "status": decision.status.value, "decision_hash": decision.decision_hash, "paper_limits_hash": decision.paper_limits_hash}
 
 
@@ -1262,8 +1315,24 @@ def session_start(
     decision = decision_registry
     if decision.status is not PromotionStatus.APPROVED_FOR_MONITORED_PAPER:
         raise PaperOperationsError("promotion decision is not approved for monitored paper.")
+    reference_payload = contract.reference_payload_json
+    if not isinstance(reference_payload, Mapping):
+        raise PaperOperationsError("campaign reference payload is invalid.")
+    provenance = reference_payload.get(_REFERENCE_PROVENANCE_KEY)
+    if not isinstance(provenance, Mapping):
+        raise PaperOperationsError("campaign reference provenance is invalid.")
+    if provenance.get("reference_hash") != decision.evidence_hash:
+        raise PaperOperationsError("promotion decision diverges from the campaign reference.")
+    if provenance.get("manifest_hash") != contract.walk_forward_manifest_hash or provenance.get("result_hash") != contract.walk_forward_result_hash:
+        raise PaperOperationsError("promotion decision diverges from the campaign reference.")
     if decision.strategy_version != contract.strategy_version or decision.symbol != contract.symbol or decision.interval != contract.interval:
         raise PaperOperationsError("promotion decision diverges from campaign scope.")
+    if decision.policy_hash != contract.policy_hash:
+        raise PaperOperationsError("promotion decision diverges from campaign policy.")
+    if decision.frozen_selection.strategy_version != contract.strategy_version or decision.frozen_selection.symbol != contract.symbol or decision.frozen_selection.interval != contract.interval:
+        raise PaperOperationsError("promotion decision frozen selection diverges from campaign scope.")
+    if decision.frozen_selection.manifest_hash != contract.walk_forward_manifest_hash:
+        raise PaperOperationsError("promotion decision frozen selection manifest mismatch.")
     session_id = new_session_id()
     with _acquire_operational_lock(paths["root"], scope=f"session_start:{campaign_id}"):
         _require_no_restore_recovery(paths)
