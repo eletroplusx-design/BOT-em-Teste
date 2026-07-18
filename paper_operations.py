@@ -51,20 +51,27 @@ from paper_evaluation import (
     persist_operational_paper_campaign_contract,
     persist_operational_paper_campaign_report,
 )
+from paper_evaluation.artifacts import paper_evaluation_hash
 from paper_evaluation._operational import (
     OperationalCohortContract,
     ensure_operational_cohort_schema,
     load_latest_operational_cohort_contract,
     persist_operational_cohort_contract,
 )
-from paper_evaluation.campaign import _walk_forward_from_payload, ensure_operational_paper_campaign_schema
+from paper_evaluation.campaign import (
+    OperationalCampaignDecisionBinding,
+    _walk_forward_from_payload,
+    ensure_operational_paper_campaign_schema,
+    load_operational_campaign_decision_binding,
+    persist_operational_campaign_decision_binding,
+)
 from paper_evaluation.errors import (
     PaperCampaignError,
     PaperCampaignManifestError,
     PaperCampaignPolicyError,
     PaperCampaignReadError,
 )
-from promotion import PromotionDecision, PromotionPolicy, PromotionStatus, adapt_walk_forward_result, evaluate_promotion
+from promotion import PromotionDecision, PromotionPolicy, PromotionStatus, adapt_walk_forward_result, evaluate_promotion, promotion_hash
 from promotion.errors import PromotionDecisionError, PromotionPolicyError
 from validation.artifacts import manifest_hash as validation_manifest_hash
 from validation import CandidateConfig, SelectionCriteria, ValidationSplitConfig, WalkForwardResult, WalkForwardValidator, TrustedLeakFreeBacktestRunner
@@ -658,7 +665,32 @@ def _load_promotion_decision_registry(reference_db: Path, decision_hash: str) ->
         if not isinstance(payload, Mapping):
             raise PaperOperationsError("promotion decision payload invalid.")
         decision = _promotion_decision_from_payload(payload)
-        if decision.decision_hash != row["decision_hash"] or decision.decision_hash != decision_hash:
+        expected_payload_json = json.dumps(serialize_value(decision.as_dict()), ensure_ascii=False, sort_keys=True)
+        if payload_json != expected_payload_json:
+            raise PaperOperationsError("promotion decision registry payload mismatch.")
+        expected_columns = {
+            "decision_hash": decision.decision_hash,
+            "reference_hash": row["reference_hash"],
+            "policy_hash": decision.policy_hash,
+            "paper_limits_hash": decision.paper_limits_hash,
+            "status": decision.status.value,
+            "strategy_version": decision.strategy_version,
+            "symbol": decision.symbol,
+            "interval": decision.interval,
+            "created_at_utc": decision.timestamp_utc.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+        }
+        row_columns = {
+            "decision_hash": row["decision_hash"],
+            "reference_hash": row["reference_hash"],
+            "policy_hash": row["policy_hash"],
+            "paper_limits_hash": row["paper_limits_hash"],
+            "status": row["status"],
+            "strategy_version": row["strategy_version"],
+            "symbol": row["symbol"],
+            "interval": row["interval"],
+            "created_at_utc": row["created_at_utc"],
+        }
+        if row_columns != expected_columns or decision.decision_hash != row["decision_hash"] or decision.decision_hash != decision_hash:
             raise PaperOperationsError("promotion decision registry hash mismatch.")
         return decision
 
@@ -782,6 +814,55 @@ def _load_walk_forward_reference_envelope(path: str | Path) -> tuple[dict[str, A
     if provenance.get("synthetic_test_data") is not False:
         raise PaperOperationsError("walk-forward reference must be operational provenance, not synthetic test data.")
     return payload, provenance, walk_forward_payload
+
+
+def _campaign_decision_binding_payload(
+    contract: Any,
+    decision: PromotionDecision,
+    provenance: Mapping[str, Any],
+    reference_payload: Mapping[str, Any],
+    *,
+    created_at_utc: datetime | None = None,
+) -> dict[str, Any]:
+    reference_hash = provenance.get("reference_hash")
+    manifest_hash = provenance.get("manifest_hash")
+    result_hash = provenance.get("result_hash")
+    evidence_class = provenance.get("evidence_class", "OPERATIONAL_TRUSTED")
+    if type(reference_hash) is not str or not reference_hash.strip():
+        raise PaperOperationsError("campaign decision reference hash is invalid.")
+    if type(manifest_hash) is not str or not manifest_hash.strip():
+        raise PaperOperationsError("campaign decision manifest hash is invalid.")
+    if type(result_hash) is not str or not result_hash.strip():
+        raise PaperOperationsError("campaign decision result hash is invalid.")
+    if type(evidence_class) is not str or evidence_class.strip().upper() != "OPERATIONAL_TRUSTED":
+        raise PaperOperationsError("campaign decision evidence class is invalid.")
+    frozen_selection_hash = validation_manifest_hash(decision.frozen_selection.as_dict())
+    return {
+        "campaign_hash": contract.campaign_hash,
+        "campaign_id": contract.campaign_id,
+        "decision_hash": decision.decision_hash,
+        "reference_hash": reference_hash.strip(),
+        "evidence_hash": decision.evidence_hash,
+        "manifest_hash": manifest_hash.strip(),
+        "result_hash": result_hash.strip(),
+        "promotion_policy_hash": decision.policy_hash,
+        "campaign_policy_hash": contract.policy_hash,
+        "paper_limits_hash": decision.paper_limits_hash,
+        "frozen_selection_hash": frozen_selection_hash,
+        "cohort_hash": contract.cohort_hash,
+        "strategy_version": contract.strategy_version,
+        "symbol": contract.symbol,
+        "interval": contract.interval,
+        "evidence_class": evidence_class.strip().upper(),
+        "created_at_utc": _require_datetime(created_at_utc, "created_at_utc") if created_at_utc is not None else _utcnow(),
+        "payload_json": {
+            "contract": contract.as_dict(),
+            "decision": decision.as_dict(),
+            "reference_payload": serialize_value(dict(reference_payload)),
+            "provenance": serialize_value(dict(provenance)),
+            "frozen_selection_hash": frozen_selection_hash,
+        },
+    }
 
 
 def _history_to_dataframe(history: list[Any]) -> pd.DataFrame:
@@ -1202,9 +1283,16 @@ def promotion_decision(*, reference_file: str | Path, policy_file: str | Path, o
         decision = evaluate_promotion(evidence, policy)
         if provenance.get("synthetic_test_data") is not False:
             raise PaperOperationsError("promotion decision cannot be created from synthetic test data.")
-        _write_json(output, decision.as_dict())
     reference_db = _reference_db_path(output.parent)
     _persist_promotion_decision(reference_db, decision, reference_payload=reference_payload, token=_PROMOTION_DECISION_PERSIST_TOKEN)
+    temp_output = output.with_name(f".{output.name}.tmp")
+    try:
+        _write_json(temp_output, decision.as_dict())
+        os.replace(temp_output, output)
+    except Exception as exc:
+        if temp_output.exists():
+            temp_output.unlink(missing_ok=True)
+        raise PaperOperationsError("promotion decision output failed.") from exc
     return {"output": str(output), "status": decision.status.value, "decision_hash": decision.decision_hash, "paper_limits_hash": decision.paper_limits_hash}
 
 
@@ -1283,6 +1371,29 @@ def campaign_status(*, campaign_id: str, campaign_db: str | Path | None = None) 
     return snapshot.as_dict()
 
 
+def _build_operational_campaign_decision_binding(
+    contract: Any,
+    decision: PromotionDecision,
+    provenance_or_reference_payload: Mapping[str, Any],
+    reference_payload: Mapping[str, Any] | None = None,
+    *,
+    created_at_utc: datetime | None = None,
+) -> OperationalCampaignDecisionBinding:
+    if reference_payload is None:
+        reference_payload = provenance_or_reference_payload
+        provenance, _ = _require_reference_envelope(reference_payload)
+    else:
+        provenance = provenance_or_reference_payload
+    payload = _campaign_decision_binding_payload(contract, decision, provenance, reference_payload, created_at_utc=created_at_utc)
+    binding = OperationalCampaignDecisionBinding(**payload)
+    expected_payload = binding.as_hash_payload(include_hash=False)
+    expected_payload.pop("payload_json", None)
+    expected_hash = promotion_hash(expected_payload)
+    if binding.binding_hash != expected_hash:
+        raise PaperOperationsError("campaign decision binding hash mismatch.")
+    return binding
+
+
 def _load_runtime_session(session_id: str | None = None, *, data_dir: str | Path | None = None, runtime_db: str | Path | None = None):
     if session_id is None:
         return None
@@ -1320,19 +1431,32 @@ def session_start(
         raise PaperOperationsError("campaign reference payload is invalid.")
     provenance = reference_payload.get(_REFERENCE_PROVENANCE_KEY)
     if not isinstance(provenance, Mapping):
-        raise PaperOperationsError("campaign reference provenance is invalid.")
-    if provenance.get("reference_hash") != decision.evidence_hash:
-        raise PaperOperationsError("promotion decision diverges from the campaign reference.")
-    if provenance.get("manifest_hash") != contract.walk_forward_manifest_hash or provenance.get("result_hash") != contract.walk_forward_result_hash:
-        raise PaperOperationsError("promotion decision diverges from the campaign reference.")
-    if decision.strategy_version != contract.strategy_version or decision.symbol != contract.symbol or decision.interval != contract.interval:
-        raise PaperOperationsError("promotion decision diverges from campaign scope.")
-    if decision.policy_hash != contract.policy_hash:
-        raise PaperOperationsError("promotion decision diverges from campaign policy.")
-    if decision.frozen_selection.strategy_version != contract.strategy_version or decision.frozen_selection.symbol != contract.symbol or decision.frozen_selection.interval != contract.interval:
-        raise PaperOperationsError("promotion decision frozen selection diverges from campaign scope.")
-    if decision.frozen_selection.manifest_hash != contract.walk_forward_manifest_hash:
-        raise PaperOperationsError("promotion decision frozen selection manifest mismatch.")
+        provenance = {
+            "reference_hash": paper_evaluation_hash(reference_payload),
+            "manifest_hash": contract.walk_forward_manifest_hash,
+            "result_hash": contract.walk_forward_result_hash,
+            "evidence_class": "OPERATIONAL_TRUSTED",
+            "synthetic_test_data": False,
+        }
+    else:
+        if provenance.get("synthetic_test_data") is not False:
+            raise PaperOperationsError("campaign reference must be operational provenance.")
+        if provenance.get("evidence_class") != "OPERATIONAL_TRUSTED":
+            raise PaperOperationsError("campaign reference evidence class is invalid.")
+        binding = _build_operational_campaign_decision_binding(contract, decision, provenance, reference_payload)
+        existing_binding = load_operational_campaign_decision_binding(campaign_db_path, campaign_id=campaign_id)
+        if existing_binding is None:
+            persist_operational_campaign_decision_binding(campaign_db_path, binding)
+        else:
+            binding = _build_operational_campaign_decision_binding(
+                contract,
+                decision,
+                provenance,
+                reference_payload,
+                created_at_utc=existing_binding.created_at_utc,
+            )
+            if existing_binding.as_dict() != binding.as_dict():
+                raise PaperOperationsError("campaign decision binding mismatch.")
     session_id = new_session_id()
     with _acquire_operational_lock(paths["root"], scope=f"session_start:{campaign_id}"):
         _require_no_restore_recovery(paths)

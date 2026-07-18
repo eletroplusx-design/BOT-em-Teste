@@ -112,6 +112,19 @@ def evaluate_promotion(evidence: PromotionEvidence | WalkForwardResult, policy: 
     except Exception as exc:
         reasons.append(str(exc))
         policy_hash_value = _policy_hash(policy, monitoring)
+        decision_hash_value = _decision_hash(
+            status=PromotionStatus.REJECTED,
+            evidence_hash=evidence.evidence_hash,
+            policy_hash=policy_hash_value,
+            criteria_evaluated=tuple(criteria),
+            reasons=tuple(reasons),
+            recalculated_metrics=evidence.recalculated_metrics,
+            paper_limits=monitoring.as_dict(),
+            frozen_selection=evidence.windows[0].frozen_selection if evidence.windows else raise_missing_selection(),
+            strategy_version=evidence.strategy_version,
+            symbol=evidence.symbol,
+            interval=evidence.interval,
+        )
         return PromotionDecision(
             status=PromotionStatus.REJECTED,
             frozen_selection=evidence.windows[0].frozen_selection if evidence.windows else raise_missing_selection(),
@@ -121,7 +134,7 @@ def evaluate_promotion(evidence: PromotionEvidence | WalkForwardResult, policy: 
             phase5_manifest=evidence.manifest,
             evidence_hash=evidence.evidence_hash,
             policy_hash=policy_hash_value,
-            decision_hash=promotion_hash({"rejected": reasons, "evidence_hash": evidence.evidence_hash, "policy_hash": policy_hash_value}),
+            decision_hash=decision_hash_value,
             criteria_evaluated=tuple(criteria),
             reasons=tuple(reasons),
             recalculated_metrics=evidence.recalculated_metrics,

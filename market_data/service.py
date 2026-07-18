@@ -55,6 +55,12 @@ class TrustedMarketDataService:
         self.ttl_seconds = ttl_seconds
         self.max_age_seconds = max_age_seconds
 
+    def _provider_provenance_class(self) -> MarketDataProvenance:
+        provider = self.provider
+        if type(provider) is BinancePublicKlinesProvider and getattr(provider, "trusted_market_data_provider", False) is True:
+            return MarketDataProvenance.OPERATIONAL_TRUSTED
+        return MarketDataProvenance.UNKNOWN
+
     def _build_package(self, candles: list[Candle], symbol: str, interval: str, cache_status: str = "miss") -> MarketDataPackage:
         snapshot = candles_to_market_snapshot(candles)
         now = datetime.now(timezone.utc)
@@ -64,7 +70,7 @@ class TrustedMarketDataService:
             candles=tuple(candles),
             snapshot=snapshot,
             source=snapshot.source.value if hasattr(snapshot.source, "value") else str(snapshot.source),
-            provenance_class=MarketDataProvenance.OPERATIONAL_TRUSTED,
+            provenance_class=self._provider_provenance_class(),
             fetched_at=now,
             expires_at=now + timedelta(seconds=self.ttl_seconds),
             cache_status=cache_status,
@@ -124,7 +130,7 @@ class TrustedMarketDataService:
                         candles=cached.candles,
                         snapshot=cached.snapshot,
                         source=cached.snapshot.source.value if hasattr(cached.snapshot.source, "value") else str(cached.snapshot.source),
-                        provenance_class=MarketDataProvenance.OPERATIONAL_TRUSTED,
+                        provenance_class=self._provider_provenance_class(),
                         fetched_at=cached.stored_at,
                         expires_at=cached.expires_at,
                         cache_status="hit",
@@ -157,7 +163,7 @@ class TrustedMarketDataService:
             candles=entry.candles,
             snapshot=entry.snapshot,
             source=entry.snapshot.source.value if hasattr(entry.snapshot.source, "value") else str(entry.snapshot.source),
-            provenance_class=MarketDataProvenance.OPERATIONAL_TRUSTED,
+            provenance_class=self._provider_provenance_class(),
             fetched_at=entry.stored_at,
             expires_at=entry.expires_at,
             cache_status="miss",
