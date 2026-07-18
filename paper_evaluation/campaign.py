@@ -671,6 +671,89 @@ def _migrate_operational_campaign_decision_bindings(conn: sqlite3.Connection) ->
             stored_payload = json.loads(row["payload_json"]) if row["payload_json"] else None
             if not isinstance(stored_payload, Mapping):
                 raise PaperCampaignReadError("campaign decision binding payload mismatch.")
+            legacy_payload = "payload_hash" not in stored_payload or row["payload_hash"] in (None, "")
+            if legacy_payload:
+                legacy_hash_payload = dict(stored_payload)
+                legacy_hash_payload.pop("payload_json", None)
+                if paper_evaluation_hash(serialize_value(legacy_hash_payload)) != row["binding_hash"]:
+                    raise PaperCampaignReadError("campaign decision binding payload hash mismatch.")
+                payload_json = stored_payload.get("payload_json")
+                if not isinstance(payload_json, Mapping):
+                    raise PaperCampaignReadError("campaign decision binding payload mismatch.")
+                contract_payload = payload_json.get("contract")
+                decision_payload = payload_json.get("decision")
+                if not isinstance(contract_payload, Mapping) or not isinstance(decision_payload, Mapping):
+                    raise PaperCampaignReadError("campaign decision binding payload mismatch.")
+                expected_contract_fields = {
+                    "campaign_hash": row["campaign_hash"],
+                    "campaign_id": row["campaign_id"],
+                    "cohort_hash": row["cohort_hash"],
+                    "strategy_version": row["strategy_version"],
+                    "symbol": row["symbol"],
+                    "interval": row["interval"],
+                    "policy_hash": row["campaign_policy_hash"],
+                    "walk_forward_manifest_hash": row["manifest_hash"],
+                    "walk_forward_result_hash": row["result_hash"],
+                }
+                for field, expected_value in expected_contract_fields.items():
+                    if str(contract_payload.get(field)) != str(expected_value):
+                        raise PaperCampaignReadError("campaign decision binding payload mismatch.")
+                expected_decision_fields = {
+                    "decision_hash": row["decision_hash"],
+                    "evidence_hash": row["evidence_hash"],
+                    "policy_hash": row["promotion_policy_hash"],
+                    "paper_limits_hash": row["paper_limits_hash"],
+                    "strategy_version": row["strategy_version"],
+                    "symbol": row["symbol"],
+                    "interval": row["interval"],
+                }
+                for field, expected_value in expected_decision_fields.items():
+                    if str(decision_payload.get(field)) != str(expected_value):
+                        raise PaperCampaignReadError("campaign decision binding payload mismatch.")
+                frozen_selection = decision_payload.get("frozen_selection")
+                if not isinstance(frozen_selection, Mapping):
+                    raise PaperCampaignReadError("campaign decision binding payload mismatch.")
+                if validation_manifest_hash(frozen_selection) != row["frozen_selection_hash"]:
+                    raise PaperCampaignReadError("campaign decision binding payload mismatch.")
+                payload_hash = paper_evaluation_hash(serialize_value(dict(payload_json)))
+                binding = OperationalCampaignDecisionBinding(
+                    binding_hash="",
+                    campaign_hash=row["campaign_hash"],
+                    campaign_id=row["campaign_id"],
+                    decision_hash=row["decision_hash"],
+                    reference_hash=row["reference_hash"],
+                    evidence_hash=row["evidence_hash"],
+                    manifest_hash=row["manifest_hash"],
+                    result_hash=row["result_hash"],
+                    promotion_policy_hash=row["promotion_policy_hash"],
+                    campaign_policy_hash=row["campaign_policy_hash"],
+                    paper_limits_hash=row["paper_limits_hash"],
+                    frozen_selection_hash=row["frozen_selection_hash"],
+                    cohort_hash=row["cohort_hash"],
+                    strategy_version=row["strategy_version"],
+                    symbol=row["symbol"],
+                    interval=row["interval"],
+                    evidence_class=row["evidence_class"],
+                    created_at_utc=datetime.fromisoformat(str(row["created_at_utc"]).replace("Z", "+00:00")),
+                    payload_hash=payload_hash,
+                    payload_json=payload_json,
+                )
+                expected_payload = binding.as_hash_payload(include_hash=False)
+                if expected_payload["payload_json"] != serialize_value(dict(payload_json)):
+                    raise PaperCampaignReadError("campaign decision binding payload mismatch.")
+                normalized_payload_json = json.dumps(expected_payload, ensure_ascii=False, sort_keys=True)
+                conn.execute(
+                    "UPDATE operational_campaign_decision_bindings SET binding_hash = ?, payload_hash = ?, payload_json = ? WHERE rowid = ?",
+                    (binding.binding_hash, binding.payload_hash, normalized_payload_json, row["rowid"]),
+                )
+                migrated = conn.execute(
+                    "SELECT * FROM operational_campaign_decision_bindings WHERE rowid = ?",
+                    (row["rowid"],),
+                ).fetchone()
+                if migrated is None:
+                    raise PaperCampaignReadError("campaign decision binding migration failed.")
+                _binding_from_row(migrated)
+                continue
             payload_json = stored_payload.get("payload_json")
             if not isinstance(payload_json, Mapping):
                 raise PaperCampaignReadError("campaign decision binding payload mismatch.")
@@ -684,7 +767,6 @@ def _migrate_operational_campaign_decision_bindings(conn: sqlite3.Connection) ->
             for field in ("decision_hash", "evidence_hash", "paper_limits_hash", "strategy_version", "symbol", "interval"):
                 if str(decision_payload.get(field)) != str(row[field]):
                     raise PaperCampaignReadError("campaign decision binding payload mismatch.")
-            legacy_payload = "payload_hash" not in stored_payload or row["payload_hash"] in (None, "")
             binding = OperationalCampaignDecisionBinding(
                 binding_hash=row["binding_hash"],
                 campaign_hash=row["campaign_hash"],
@@ -713,12 +795,7 @@ def _migrate_operational_campaign_decision_bindings(conn: sqlite3.Connection) ->
             if normalized_payload != expected_payload:
                 raise PaperCampaignReadError("campaign decision binding payload mismatch.")
             normalized_payload_json = json.dumps(expected_payload, ensure_ascii=False, sort_keys=True)
-            if legacy_payload:
-                conn.execute(
-                    "UPDATE operational_campaign_decision_bindings SET binding_hash = ?, payload_hash = ?, payload_json = ? WHERE rowid = ?",
-                    (binding.binding_hash, binding.payload_hash, normalized_payload_json, row["rowid"]),
-                )
-            elif row["binding_hash"] != binding.binding_hash or row["payload_hash"] != binding.payload_hash or row["payload_json"] != normalized_payload_json:
+            if row["binding_hash"] != binding.binding_hash or row["payload_hash"] != binding.payload_hash or row["payload_json"] != normalized_payload_json:
                 raise PaperCampaignReadError("campaign decision binding payload hash mismatch.")
         except PaperCampaignReadError:
             raise

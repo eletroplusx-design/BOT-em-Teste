@@ -697,6 +697,9 @@ def _create_legacy_campaign_binding_db(path: Path, binding, *, payload_mutator=N
         payload.pop("payload_hash", None)
         if payload_mutator is not None:
             payload = payload_mutator(payload)
+        legacy_hash_payload = dict(payload)
+        legacy_hash_payload.pop("payload_json", None)
+        old_binding_hash = paper_evaluation_hash(serialize_value(legacy_hash_payload))
         conn.execute(
             """
             INSERT INTO operational_campaign_decision_bindings (
@@ -707,7 +710,7 @@ def _create_legacy_campaign_binding_db(path: Path, binding, *, payload_mutator=N
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                binding.binding_hash,
+                old_binding_hash,
                 binding.campaign_hash,
                 binding.campaign_id,
                 binding.decision_hash,
