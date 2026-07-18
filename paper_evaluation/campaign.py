@@ -652,91 +652,171 @@ def _connect_ro(db_path: str | Path):
             pass
 
 
+def _migrate_operational_campaign_decision_bindings(conn: sqlite3.Connection) -> None:
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(operational_campaign_decision_bindings)")}
+    if "payload_hash" not in columns:
+        conn.execute("ALTER TABLE operational_campaign_decision_bindings ADD COLUMN payload_hash TEXT")
+    rows = conn.execute(
+        """
+        SELECT rowid, binding_hash, campaign_hash, campaign_id, decision_hash, reference_hash, evidence_hash,
+               manifest_hash, result_hash, promotion_policy_hash, campaign_policy_hash, paper_limits_hash,
+               frozen_selection_hash, cohort_hash, strategy_version, symbol, interval, evidence_class, created_at_utc,
+               payload_hash, payload_json
+        FROM operational_campaign_decision_bindings
+        ORDER BY created_at_utc, binding_hash
+        """
+    ).fetchall()
+    for row in rows:
+        try:
+            stored_payload = json.loads(row["payload_json"]) if row["payload_json"] else None
+            if not isinstance(stored_payload, Mapping):
+                raise PaperCampaignReadError("campaign decision binding payload mismatch.")
+            payload_json = stored_payload.get("payload_json")
+            if not isinstance(payload_json, Mapping):
+                raise PaperCampaignReadError("campaign decision binding payload mismatch.")
+            contract_payload = payload_json.get("contract")
+            decision_payload = payload_json.get("decision")
+            if not isinstance(contract_payload, Mapping) or not isinstance(decision_payload, Mapping):
+                raise PaperCampaignReadError("campaign decision binding payload mismatch.")
+            for field in ("campaign_hash", "campaign_id", "cohort_hash", "strategy_version", "symbol", "interval"):
+                if str(contract_payload.get(field)) != str(row[field]):
+                    raise PaperCampaignReadError("campaign decision binding payload mismatch.")
+            for field in ("decision_hash", "evidence_hash", "paper_limits_hash", "strategy_version", "symbol", "interval"):
+                if str(decision_payload.get(field)) != str(row[field]):
+                    raise PaperCampaignReadError("campaign decision binding payload mismatch.")
+            legacy_payload = "payload_hash" not in stored_payload or row["payload_hash"] in (None, "")
+            binding = OperationalCampaignDecisionBinding(
+                binding_hash=row["binding_hash"],
+                campaign_hash=row["campaign_hash"],
+                campaign_id=row["campaign_id"],
+                decision_hash=row["decision_hash"],
+                reference_hash=row["reference_hash"],
+                evidence_hash=row["evidence_hash"],
+                manifest_hash=row["manifest_hash"],
+                result_hash=row["result_hash"],
+                promotion_policy_hash=row["promotion_policy_hash"],
+                campaign_policy_hash=row["campaign_policy_hash"],
+                paper_limits_hash=row["paper_limits_hash"],
+                frozen_selection_hash=row["frozen_selection_hash"],
+                cohort_hash=row["cohort_hash"],
+                strategy_version=row["strategy_version"],
+                symbol=row["symbol"],
+                interval=row["interval"],
+                evidence_class=row["evidence_class"],
+                created_at_utc=datetime.fromisoformat(str(row["created_at_utc"]).replace("Z", "+00:00")),
+                payload_hash=paper_evaluation_hash(serialize_value(dict(payload_json))),
+                payload_json=payload_json,
+            )
+            expected_payload = binding.as_hash_payload(include_hash=False)
+            normalized_payload = dict(stored_payload)
+            normalized_payload["payload_hash"] = binding.payload_hash
+            if normalized_payload != expected_payload:
+                raise PaperCampaignReadError("campaign decision binding payload mismatch.")
+            normalized_payload_json = json.dumps(expected_payload, ensure_ascii=False, sort_keys=True)
+            if legacy_payload:
+                conn.execute(
+                    "UPDATE operational_campaign_decision_bindings SET binding_hash = ?, payload_hash = ?, payload_json = ? WHERE rowid = ?",
+                    (binding.binding_hash, binding.payload_hash, normalized_payload_json, row["rowid"]),
+                )
+            elif row["binding_hash"] != binding.binding_hash or row["payload_hash"] != binding.payload_hash or row["payload_json"] != normalized_payload_json:
+                raise PaperCampaignReadError("campaign decision binding payload hash mismatch.")
+        except PaperCampaignReadError:
+            raise
+        except Exception as exc:
+            raise PaperCampaignReadError("campaign decision binding migration failed.") from exc
+
+
 def ensure_operational_paper_campaign_schema(db_path: str | Path) -> None:
     with _connect_rw(db_path) as conn:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS paper_evaluation_campaign_contracts (
-                campaign_hash TEXT PRIMARY KEY,
-                campaign_id TEXT NOT NULL UNIQUE,
-                cohort_hash TEXT NOT NULL,
-                strategy_version TEXT NOT NULL,
-                symbol TEXT NOT NULL,
-                interval TEXT NOT NULL,
-                inclusion_rule TEXT NOT NULL,
-                period_start_utc TEXT NOT NULL,
-                period_end_utc TEXT NOT NULL,
-                policy_payload_json TEXT NOT NULL,
-                reference_payload_json TEXT NOT NULL,
-                policy_hash TEXT NOT NULL,
-                walk_forward_manifest_hash TEXT NOT NULL,
-                walk_forward_result_hash TEXT NOT NULL,
-                evaluator_version TEXT NOT NULL,
-                created_at_utc TEXT NOT NULL,
-                payload_json TEXT NOT NULL
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS paper_evaluation_campaign_contracts (
+                    campaign_hash TEXT PRIMARY KEY,
+                    campaign_id TEXT NOT NULL UNIQUE,
+                    cohort_hash TEXT NOT NULL,
+                    strategy_version TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    interval TEXT NOT NULL,
+                    inclusion_rule TEXT NOT NULL,
+                    period_start_utc TEXT NOT NULL,
+                    period_end_utc TEXT NOT NULL,
+                    policy_payload_json TEXT NOT NULL,
+                    reference_payload_json TEXT NOT NULL,
+                    policy_hash TEXT NOT NULL,
+                    walk_forward_manifest_hash TEXT NOT NULL,
+                    walk_forward_result_hash TEXT NOT NULL,
+                    evaluator_version TEXT NOT NULL,
+                    created_at_utc TEXT NOT NULL,
+                    payload_json TEXT NOT NULL
+                )
+                """
             )
-            """
-        )
-        conn.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_campaign_contracts_id ON paper_evaluation_campaign_contracts(campaign_id)"
-        )
-        conn.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_campaign_contracts_window ON paper_evaluation_campaign_contracts(strategy_version, symbol, interval, inclusion_rule, period_start_utc, period_end_utc)"
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS operational_campaign_decision_bindings (
-                binding_hash TEXT PRIMARY KEY,
-                campaign_hash TEXT NOT NULL UNIQUE,
-                campaign_id TEXT NOT NULL UNIQUE,
-                decision_hash TEXT NOT NULL UNIQUE,
-                reference_hash TEXT NOT NULL UNIQUE,
-                evidence_hash TEXT NOT NULL,
-                manifest_hash TEXT NOT NULL,
-                result_hash TEXT NOT NULL,
-                promotion_policy_hash TEXT NOT NULL,
-                campaign_policy_hash TEXT NOT NULL,
-                paper_limits_hash TEXT NOT NULL,
-                frozen_selection_hash TEXT NOT NULL,
-                cohort_hash TEXT NOT NULL,
-                strategy_version TEXT NOT NULL,
-                symbol TEXT NOT NULL,
-                interval TEXT NOT NULL,
-                evidence_class TEXT NOT NULL,
-                created_at_utc TEXT NOT NULL,
-                payload_hash TEXT NOT NULL,
-                payload_json TEXT NOT NULL
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_campaign_contracts_id ON paper_evaluation_campaign_contracts(campaign_id)"
             )
-            """
-        )
-        conn.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_campaign_decision_bindings_campaign_hash ON operational_campaign_decision_bindings(campaign_hash)"
-        )
-        conn.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_campaign_decision_bindings_campaign_id ON operational_campaign_decision_bindings(campaign_id)"
-        )
-        conn.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_campaign_decision_bindings_decision_hash ON operational_campaign_decision_bindings(decision_hash)"
-        )
-        conn.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_campaign_decision_bindings_reference_hash ON operational_campaign_decision_bindings(reference_hash)"
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS paper_evaluation_campaign_reports (
-                campaign_hash TEXT PRIMARY KEY,
-                campaign_state TEXT NOT NULL,
-                decision_status TEXT NOT NULL,
-                operational_evidence INTEGER NOT NULL,
-                report_json TEXT NOT NULL,
-                report_hash TEXT NOT NULL,
-                evaluated_at_utc TEXT NOT NULL
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_campaign_contracts_window ON paper_evaluation_campaign_contracts(strategy_version, symbol, interval, inclusion_rule, period_start_utc, period_end_utc)"
             )
-            """
-        )
-        conn.commit()
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS operational_campaign_decision_bindings (
+                    binding_hash TEXT PRIMARY KEY,
+                    campaign_hash TEXT NOT NULL UNIQUE,
+                    campaign_id TEXT NOT NULL UNIQUE,
+                    decision_hash TEXT NOT NULL UNIQUE,
+                    reference_hash TEXT NOT NULL UNIQUE,
+                    evidence_hash TEXT NOT NULL,
+                    manifest_hash TEXT NOT NULL,
+                    result_hash TEXT NOT NULL,
+                    promotion_policy_hash TEXT NOT NULL,
+                    campaign_policy_hash TEXT NOT NULL,
+                    paper_limits_hash TEXT NOT NULL,
+                    frozen_selection_hash TEXT NOT NULL,
+                    cohort_hash TEXT NOT NULL,
+                    strategy_version TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    interval TEXT NOT NULL,
+                    evidence_class TEXT NOT NULL,
+                    created_at_utc TEXT NOT NULL,
+                    payload_hash TEXT NOT NULL,
+                    payload_json TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_campaign_decision_bindings_campaign_hash ON operational_campaign_decision_bindings(campaign_hash)"
+            )
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_campaign_decision_bindings_campaign_id ON operational_campaign_decision_bindings(campaign_id)"
+            )
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_campaign_decision_bindings_decision_hash ON operational_campaign_decision_bindings(decision_hash)"
+            )
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_campaign_decision_bindings_reference_hash ON operational_campaign_decision_bindings(reference_hash)"
+            )
+            _migrate_operational_campaign_decision_bindings(conn)
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS paper_evaluation_campaign_reports (
+                    campaign_hash TEXT PRIMARY KEY,
+                    campaign_state TEXT NOT NULL,
+                    decision_status TEXT NOT NULL,
+                    operational_evidence INTEGER NOT NULL,
+                    report_json TEXT NOT NULL,
+                    report_hash TEXT NOT NULL,
+                    evaluated_at_utc TEXT NOT NULL
+                )
+                """
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
 
 
 def _campaign_from_row(row: sqlite3.Row) -> OperationalPaperCampaignContract:

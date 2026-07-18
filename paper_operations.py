@@ -1489,15 +1489,31 @@ def campaign_bind(
             raise PaperOperationsError("campaign reference must be operational provenance.")
         if provenance.get("evidence_class") != "OPERATIONAL_TRUSTED":
             raise PaperOperationsError("campaign reference evidence class is invalid.")
-        binding = _build_operational_campaign_decision_binding(contract, decision, provenance, reference_envelope)
         existing_binding = load_operational_campaign_decision_binding(campaign_db_path, campaign_id=campaign_id)
-        if existing_binding is None:
-            binding = persist_operational_campaign_decision_binding(campaign_db_path, binding)
-        else:
+        if existing_binding is not None:
+            binding = _build_operational_campaign_decision_binding(
+                contract,
+                decision,
+                provenance,
+                reference_envelope,
+                created_at_utc=existing_binding.created_at_utc,
+            )
             if existing_binding.as_dict() != binding.as_dict():
                 raise PaperOperationsError("campaign decision binding mismatch.")
-            binding = existing_binding
-    return {"binding_hash": binding.binding_hash, "campaign_hash": binding.campaign_hash, "campaign_id": binding.campaign_id}
+            return {
+                "binding_hash": existing_binding.binding_hash,
+                "campaign_hash": existing_binding.campaign_hash,
+                "campaign_id": existing_binding.campaign_id,
+                "created_at_utc": existing_binding.created_at_utc.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+            }
+        binding = _build_operational_campaign_decision_binding(contract, decision, provenance, reference_envelope)
+        binding = persist_operational_campaign_decision_binding(campaign_db_path, binding)
+    return {
+        "binding_hash": binding.binding_hash,
+        "campaign_hash": binding.campaign_hash,
+        "campaign_id": binding.campaign_id,
+        "created_at_utc": binding.created_at_utc.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
 
 
 def _build_operational_campaign_decision_binding(
@@ -1544,41 +1560,41 @@ def session_start(
 ) -> dict[str, Any]:
     paths = _paths(data_dir)
     campaign_db_path = Path(campaign_db) if campaign_db is not None else _db_paths(data_dir)["campaign_db"]
-    contract = load_operational_paper_campaign_contract(campaign_db_path, campaign_id=campaign_id)
-    if not contract.campaign_id:
-        raise PaperOperationsError("campaign is invalid.")
-    decision_file_payload = _load_promotion_decision(decision_file)
-    decision_registry = _load_promotion_decision_registry(_reference_db_path(paths["root"]), decision_file_payload.decision_hash)
-    if decision_registry.as_dict() != decision_file_payload.as_dict():
-        raise PaperOperationsError("promotion decision registry mismatch.")
-    decision = decision_registry
-    if decision.status is not PromotionStatus.APPROVED_FOR_MONITORED_PAPER:
-        raise PaperOperationsError("promotion decision is not approved for monitored paper.")
-    reference_file = paths["reference_file"]
-    reference_envelope, provenance, walk_forward_payload = _load_walk_forward_reference_envelope(reference_file)
-    if walk_forward_payload != contract.reference_payload_json:
-        raise PaperOperationsError("campaign reference payload mismatch.")
-    if not isinstance(provenance, Mapping):
-        raise PaperOperationsError("campaign reference provenance is missing.")
-    if provenance.get("synthetic_test_data") is not False:
-        raise PaperOperationsError("campaign reference must be operational provenance.")
-    if provenance.get("evidence_class") != "OPERATIONAL_TRUSTED":
-        raise PaperOperationsError("campaign reference evidence class is invalid.")
-    existing_binding = load_operational_campaign_decision_binding(campaign_db_path, campaign_id=campaign_id)
-    if existing_binding is None:
-        raise PaperOperationsError("campaign decision binding not found.")
-    binding = _build_operational_campaign_decision_binding(
-        contract,
-        decision,
-        provenance,
-        reference_envelope,
-        created_at_utc=existing_binding.created_at_utc,
-    )
-    if existing_binding.as_dict() != binding.as_dict():
-        raise PaperOperationsError("campaign decision binding mismatch.")
-    session_id = new_session_id()
     with _acquire_operational_lock(paths["root"], scope=f"session_start:{campaign_id}"):
         _require_no_restore_recovery(paths)
+        contract = load_operational_paper_campaign_contract(campaign_db_path, campaign_id=campaign_id)
+        if not contract.campaign_id:
+            raise PaperOperationsError("campaign is invalid.")
+        decision_file_payload = _load_promotion_decision(decision_file)
+        decision_registry = _load_promotion_decision_registry(_reference_db_path(paths["root"]), decision_file_payload.decision_hash)
+        if decision_registry.as_dict() != decision_file_payload.as_dict():
+            raise PaperOperationsError("promotion decision registry mismatch.")
+        decision = decision_registry
+        if decision.status is not PromotionStatus.APPROVED_FOR_MONITORED_PAPER:
+            raise PaperOperationsError("promotion decision is not approved for monitored paper.")
+        reference_file = paths["reference_file"]
+        reference_envelope, provenance, walk_forward_payload = _load_walk_forward_reference_envelope(reference_file)
+        if walk_forward_payload != contract.reference_payload_json:
+            raise PaperOperationsError("campaign reference payload mismatch.")
+        if not isinstance(provenance, Mapping):
+            raise PaperOperationsError("campaign reference provenance is missing.")
+        if provenance.get("synthetic_test_data") is not False:
+            raise PaperOperationsError("campaign reference must be operational provenance.")
+        if provenance.get("evidence_class") != "OPERATIONAL_TRUSTED":
+            raise PaperOperationsError("campaign reference evidence class is invalid.")
+        existing_binding = load_operational_campaign_decision_binding(campaign_db_path, campaign_id=campaign_id)
+        if existing_binding is None:
+            raise PaperOperationsError("campaign decision binding not found.")
+        binding = _build_operational_campaign_decision_binding(
+            contract,
+            decision,
+            provenance,
+            reference_envelope,
+            created_at_utc=existing_binding.created_at_utc,
+        )
+        if existing_binding.as_dict() != binding.as_dict():
+            raise PaperOperationsError("campaign decision binding mismatch.")
+        session_id = new_session_id()
         session = create_monitored_session(
             decision,
             session_id=session_id,

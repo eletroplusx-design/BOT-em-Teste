@@ -6,6 +6,8 @@ import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from contextlib import contextmanager
+from types import SimpleNamespace
 from pathlib import Path
 
 import pandas as pd
@@ -18,7 +20,7 @@ from domain.serialization import serialize_value
 from market_data import candles_to_market_snapshot
 from paper_evaluation import PaperEvaluationPolicy
 from paper_evaluation._operational import OperationalCohortContract
-from paper_evaluation.errors import PaperCampaignManifestError
+from paper_evaluation.errors import PaperCampaignManifestError, PaperCampaignReadError
 from paper_evaluation.artifacts import paper_evaluation_hash
 from paper_evaluation import OperationalPaperCampaignContract
 from paper_evaluation.campaign import _campaign_load_mode
@@ -663,6 +665,72 @@ def _prepare_test_only_local_operations_fixture(tmp_path: Path, monkeypatch, sam
     }
 
 
+def _create_legacy_campaign_binding_db(path: Path, binding, *, payload_mutator=None) -> None:
+    with sqlite3.connect(path) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            """
+            CREATE TABLE operational_campaign_decision_bindings (
+                binding_hash TEXT PRIMARY KEY,
+                campaign_hash TEXT NOT NULL UNIQUE,
+                campaign_id TEXT NOT NULL UNIQUE,
+                decision_hash TEXT NOT NULL UNIQUE,
+                reference_hash TEXT NOT NULL UNIQUE,
+                evidence_hash TEXT NOT NULL,
+                manifest_hash TEXT NOT NULL,
+                result_hash TEXT NOT NULL,
+                promotion_policy_hash TEXT NOT NULL,
+                campaign_policy_hash TEXT NOT NULL,
+                paper_limits_hash TEXT NOT NULL,
+                frozen_selection_hash TEXT NOT NULL,
+                cohort_hash TEXT NOT NULL,
+                strategy_version TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                interval TEXT NOT NULL,
+                evidence_class TEXT NOT NULL,
+                created_at_utc TEXT NOT NULL,
+                payload_json TEXT NOT NULL
+            )
+            """
+        )
+        payload = dict(binding.as_hash_payload(include_hash=False))
+        payload.pop("payload_hash", None)
+        if payload_mutator is not None:
+            payload = payload_mutator(payload)
+        conn.execute(
+            """
+            INSERT INTO operational_campaign_decision_bindings (
+                binding_hash, campaign_hash, campaign_id, decision_hash, reference_hash, evidence_hash,
+                manifest_hash, result_hash, promotion_policy_hash, campaign_policy_hash, paper_limits_hash,
+                frozen_selection_hash, cohort_hash, strategy_version, symbol, interval, evidence_class,
+                created_at_utc, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                binding.binding_hash,
+                binding.campaign_hash,
+                binding.campaign_id,
+                binding.decision_hash,
+                binding.reference_hash,
+                binding.evidence_hash,
+                binding.manifest_hash,
+                binding.result_hash,
+                binding.promotion_policy_hash,
+                binding.campaign_policy_hash,
+                binding.paper_limits_hash,
+                binding.frozen_selection_hash,
+                binding.cohort_hash,
+                binding.strategy_version,
+                binding.symbol,
+                binding.interval,
+                binding.evidence_class,
+                binding.created_at_utc.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+                json.dumps(serialize_value(payload), ensure_ascii=False, sort_keys=True),
+            ),
+        )
+        conn.commit()
+
+
 def test_operational_data_dir_rejects_temporary_paths_by_default(tmp_path, monkeypatch):
     monkeypatch.setattr("paper_operations._ALLOW_TEMPORARY_DATA_DIRS_FOR_TESTS", False)
     with pytest.raises(ValueError, match="temporary directory"):
@@ -876,6 +944,76 @@ def test_phase8c_full_local_operations_flow_uses_real_reference_and_sanitized_re
     assert report_result["last_restore_verify"]["verified"] is True
 
 
+def test_campaign_bind_is_idempotent_and_preserves_created_at(tmp_path, monkeypatch, sample_btc_data):
+    flow = _prepare_test_only_local_operations_fixture(tmp_path, monkeypatch, sample_btc_data)
+    data_dir = flow["data_dir"]
+    campaign_db = data_dir / "paper_evaluation_campaign.db"
+    first_binding = paper_ops.load_operational_campaign_decision_binding(campaign_db, campaign_id=flow["campaign_id"])
+    assert first_binding is not None
+
+    repeated = campaign_bind(
+        campaign_id=flow["campaign_id"],
+        decision_file=flow["decision_file"],
+        campaign_db=campaign_db,
+        data_dir=data_dir,
+    )
+    assert repeated["binding_hash"] == first_binding.binding_hash
+    assert repeated["created_at_utc"] == first_binding.created_at_utc.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    second_binding = paper_ops.load_operational_campaign_decision_binding(campaign_db, campaign_id=flow["campaign_id"])
+    assert second_binding is not None
+    assert second_binding.as_dict() == first_binding.as_dict()
+
+
+def test_session_start_holds_lock_during_loading_and_creation(tmp_path, monkeypatch, sample_btc_data):
+    flow = _prepare_test_only_local_operations_fixture(tmp_path, monkeypatch, sample_btc_data)
+    data_dir = flow["data_dir"]
+    campaign_db = data_dir / "paper_evaluation_campaign.db"
+    contract = paper_ops.load_operational_paper_campaign_contract(campaign_db, campaign_id=flow["campaign_id"])
+    decision_payload = paper_ops._load_promotion_decision(flow["decision_file"])
+    reference_envelope = paper_ops._load_walk_forward_reference_envelope(flow["reference_output"])
+    binding = paper_ops.load_operational_campaign_decision_binding(campaign_db, campaign_id=flow["campaign_id"])
+    assert binding is not None
+    decision_registry = paper_ops._load_promotion_decision_registry(
+        data_dir / "paper_evaluation_reference.db",
+        decision_payload.decision_hash,
+    )
+
+    lock_state = {"active": False}
+
+    @contextmanager
+    def fake_lock(*args, **kwargs):
+        lock_state["active"] = True
+        try:
+            yield
+        finally:
+            lock_state["active"] = False
+
+    def _assert_locked(*args, **kwargs):
+        assert lock_state["active"] is True
+
+    monkeypatch.setattr(paper_ops, "_acquire_operational_lock", fake_lock)
+    monkeypatch.setattr(paper_ops, "load_operational_paper_campaign_contract", lambda *args, **kwargs: (_assert_locked(), contract)[1])
+    monkeypatch.setattr(paper_ops, "_load_promotion_decision", lambda *args, **kwargs: (_assert_locked(), decision_payload)[1])
+    monkeypatch.setattr(paper_ops, "_load_promotion_decision_registry", lambda *args, **kwargs: (_assert_locked(), decision_registry)[1])
+    monkeypatch.setattr(paper_ops, "_load_walk_forward_reference_envelope", lambda *args, **kwargs: (_assert_locked(), reference_envelope)[1])
+    monkeypatch.setattr(paper_ops, "load_operational_campaign_decision_binding", lambda *args, **kwargs: (_assert_locked(), binding)[1])
+    monkeypatch.setattr(
+        paper_ops,
+        "create_monitored_session",
+        lambda *args, **kwargs: (_assert_locked(), SimpleNamespace(record=SimpleNamespace(session_id="session-lock", state=PaperRuntimeState.RUNNING)))[1],
+    )
+
+    session = session_start(
+        campaign_id=flow["campaign_id"],
+        decision_file=flow["decision_file"],
+        campaign_db=campaign_db,
+        data_dir=data_dir,
+    )
+    assert session["session_id"] == "session-lock"
+    assert session["state"] == "RUNNING"
+
+
 def test_promotion_decision_requires_status_and_session_start_fails_closed(tmp_path, monkeypatch, sample_btc_data):
     flow = _prepare_test_only_local_operations_fixture(tmp_path, monkeypatch, sample_btc_data)
     data_dir = flow["data_dir"]
@@ -973,6 +1111,90 @@ def test_session_start_blocks_tampered_binding_payload_json(tmp_path, monkeypatc
             campaign_db=campaign_db,
             data_dir=data_dir,
         )
+
+
+def test_operational_campaign_binding_payload_hash_migrates_legacy_rows(tmp_path, monkeypatch, sample_btc_data):
+    flow = _prepare_test_only_local_operations_fixture(tmp_path, monkeypatch, sample_btc_data)
+    campaign_db = flow["data_dir"] / "legacy_campaign_bindings.db"
+    binding = paper_ops.load_operational_campaign_decision_binding(
+        flow["data_dir"] / "paper_evaluation_campaign.db",
+        campaign_id=flow["campaign_id"],
+    )
+    assert binding is not None
+    _create_legacy_campaign_binding_db(campaign_db, binding)
+
+    paper_ops.ensure_operational_paper_campaign_schema(campaign_db)
+    migrated = paper_ops.load_operational_campaign_decision_binding(campaign_db, campaign_id=binding.campaign_id)
+    assert migrated is not None
+    assert migrated.binding_hash == binding.binding_hash
+    assert migrated.payload_hash == paper_evaluation_hash(migrated.payload_json)
+    with sqlite3.connect(campaign_db) as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM operational_campaign_decision_bindings WHERE payload_hash IS NOT NULL AND payload_hash != ''",
+        ).fetchone()
+    assert row is not None
+    assert row[0] == 1
+
+
+def test_operational_campaign_binding_payload_mismatch_blocks_migration(tmp_path, monkeypatch, sample_btc_data):
+    flow = _prepare_test_only_local_operations_fixture(tmp_path, monkeypatch, sample_btc_data)
+    campaign_db = flow["data_dir"] / "legacy_campaign_bindings_invalid.db"
+    binding = paper_ops.load_operational_campaign_decision_binding(
+        flow["data_dir"] / "paper_evaluation_campaign.db",
+        campaign_id=flow["campaign_id"],
+    )
+    assert binding is not None
+    _create_legacy_campaign_binding_db(
+        campaign_db,
+        binding,
+        payload_mutator=lambda payload: {
+            **payload,
+            "payload_json": {
+                **payload["payload_json"],
+                "contract": {**payload["payload_json"]["contract"], "symbol": "ETHUSDT"},
+            },
+        },
+    )
+
+    with pytest.raises(PaperCampaignReadError, match="campaign decision binding payload mismatch"):
+        paper_ops.ensure_operational_paper_campaign_schema(campaign_db)
+
+
+def test_operational_campaign_binding_payload_hash_null_blocks_reading(tmp_path, monkeypatch, sample_btc_data):
+    flow = _prepare_test_only_local_operations_fixture(tmp_path, monkeypatch, sample_btc_data)
+    campaign_db = flow["data_dir"] / "legacy_campaign_bindings_null.db"
+    binding = paper_ops.load_operational_campaign_decision_binding(
+        flow["data_dir"] / "paper_evaluation_campaign.db",
+        campaign_id=flow["campaign_id"],
+    )
+    assert binding is not None
+    _create_legacy_campaign_binding_db(campaign_db, binding)
+    paper_ops.ensure_operational_paper_campaign_schema(campaign_db)
+    with sqlite3.connect(campaign_db) as conn:
+        conn.execute("UPDATE operational_campaign_decision_bindings SET payload_hash = NULL")
+        conn.commit()
+
+    with pytest.raises(PaperCampaignManifestError):
+        paper_ops.load_operational_campaign_decision_binding(campaign_db, campaign_id=binding.campaign_id)
+
+
+def test_operational_campaign_binding_migration_is_idempotent(tmp_path, monkeypatch, sample_btc_data):
+    flow = _prepare_test_only_local_operations_fixture(tmp_path, monkeypatch, sample_btc_data)
+    campaign_db = flow["data_dir"] / "legacy_campaign_bindings_idempotent.db"
+    binding = paper_ops.load_operational_campaign_decision_binding(
+        flow["data_dir"] / "paper_evaluation_campaign.db",
+        campaign_id=flow["campaign_id"],
+    )
+    assert binding is not None
+    _create_legacy_campaign_binding_db(campaign_db, binding)
+
+    paper_ops.ensure_operational_paper_campaign_schema(campaign_db)
+    first = paper_ops.load_operational_campaign_decision_binding(campaign_db, campaign_id=binding.campaign_id)
+    assert first is not None
+    paper_ops.ensure_operational_paper_campaign_schema(campaign_db)
+    second = paper_ops.load_operational_campaign_decision_binding(campaign_db, campaign_id=binding.campaign_id)
+    assert second is not None
+    assert first.as_dict() == second.as_dict()
 
 
 def test_lock_malformed_blocks_and_requires_admin_recovery(tmp_path, monkeypatch, sample_btc_data):
