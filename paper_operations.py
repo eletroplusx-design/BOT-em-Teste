@@ -1839,7 +1839,7 @@ def _apply_backup_retention(backup_root: Path, *, keep: int) -> None:
             backups.append((manifest["created_at_utc"], entry))
         except Exception:
             continue
-    backups.sort(key=lambda item: item[0])
+    backups.sort(key=lambda item: (item[0], item[1].name))
     while len(backups) > keep:
         _, entry = backups.pop(0)
         if entry.exists():

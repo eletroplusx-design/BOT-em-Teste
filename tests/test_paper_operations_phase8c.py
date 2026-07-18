@@ -1493,12 +1493,22 @@ def test_backup_manifest_and_restore_apply_hardened(tmp_path, monkeypatch, sampl
 def test_backup_retention_keeps_latest_valid_backups(tmp_path, monkeypatch, sample_btc_data):
     flow = _prepare_test_only_local_operations_fixture(tmp_path, monkeypatch, sample_btc_data)
     data_dir = flow["data_dir"]
-    names = []
+    backup_root = data_dir / "backups"
+    original_iterdir = type(backup_root).iterdir
+
+    def reversed_backup_iterdir(self):
+        if self == backup_root:
+            return iter([backup_root / f"backup-{index:02d}" for index in range(7, -1, -1)])
+        return original_iterdir(self)
+
+    monkeypatch.setattr(type(backup_root), "iterdir", reversed_backup_iterdir)
+
     for index in range(8):
         name = f"backup-{index:02d}"
-        names.append(backup_create(data_dir=data_dir, backup_name=name)["backup_dir"])
+        backup_create(data_dir=data_dir, backup_name=name)
     backups = backup_list(data_dir=data_dir)["backups"]
-    assert len(backups) <= 7
+    assert len(backups) == 7
+    assert backups == [f"backup-{index:02d}" for index in range(1, 8)]
     assert "backup-00" not in backups
 
 
