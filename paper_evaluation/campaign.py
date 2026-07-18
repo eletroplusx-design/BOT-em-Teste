@@ -431,6 +431,7 @@ class OperationalCampaignDecisionBinding:
     interval: str
     evidence_class: str
     created_at_utc: datetime
+    payload_hash: str
     payload_json: Mapping[str, Any]
     binding_hash: str = field(default="", compare=False)
 
@@ -453,9 +454,11 @@ class OperationalCampaignDecisionBinding:
         object.__setattr__(self, "evidence_class", _require_str(self.evidence_class, "evidence_class"))
         object.__setattr__(self, "created_at_utc", _require_datetime(self.created_at_utc, "created_at_utc"))
         object.__setattr__(self, "payload_json", dict(self.payload_json))
-        payload = self.as_hash_payload(include_hash=False)
-        payload_for_hash = dict(payload)
-        payload_for_hash.pop("payload_json", None)
+        payload_hash = _require_hash(self.payload_hash, "payload_hash")
+        object.__setattr__(self, "payload_hash", payload_hash)
+        if self.payload_hash != paper_evaluation_hash(serialize_value(dict(self.payload_json))):
+            raise PaperCampaignManifestError("payload hash mismatch.")
+        payload_for_hash = self.as_hash_payload(include_hash=False)
         binding_hash = self.binding_hash or paper_evaluation_hash(payload_for_hash)
         object.__setattr__(self, "binding_hash", _require_hash(binding_hash, "binding_hash"))
         if self.binding_hash != paper_evaluation_hash(payload_for_hash):
@@ -480,6 +483,7 @@ class OperationalCampaignDecisionBinding:
             "interval": self.interval,
             "evidence_class": self.evidence_class,
             "created_at_utc": self.created_at_utc.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "payload_hash": self.payload_hash,
             "payload_json": serialize_value(dict(self.payload_json)),
         }
         if include_hash:
@@ -609,6 +613,7 @@ _CAMPAIGN_BINDING_REQUIRED_COLUMNS = {
     "interval",
     "evidence_class",
     "created_at_utc",
+    "payload_hash",
     "payload_json",
 }
 
@@ -701,6 +706,7 @@ def ensure_operational_paper_campaign_schema(db_path: str | Path) -> None:
                 interval TEXT NOT NULL,
                 evidence_class TEXT NOT NULL,
                 created_at_utc TEXT NOT NULL,
+                payload_hash TEXT NOT NULL,
                 payload_json TEXT NOT NULL
             )
             """
@@ -775,8 +781,8 @@ def persist_operational_campaign_decision_binding(db_path: str | Path, binding: 
                 INSERT INTO operational_campaign_decision_bindings (
                     binding_hash, campaign_hash, campaign_id, decision_hash, reference_hash, evidence_hash,
                     manifest_hash, result_hash, promotion_policy_hash, campaign_policy_hash, paper_limits_hash,
-                    frozen_selection_hash, cohort_hash, strategy_version, symbol, interval, evidence_class, created_at_utc, payload_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    frozen_selection_hash, cohort_hash, strategy_version, symbol, interval, evidence_class, created_at_utc, payload_hash, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     binding.binding_hash,
@@ -797,6 +803,7 @@ def persist_operational_campaign_decision_binding(db_path: str | Path, binding: 
                     binding.interval,
                     binding.evidence_class,
                     binding.created_at_utc.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    binding.payload_hash,
                     payload,
                 ),
             )
@@ -832,6 +839,7 @@ def _binding_from_row(row: sqlite3.Row) -> OperationalCampaignDecisionBinding:
         interval=row["interval"],
         evidence_class=row["evidence_class"],
         created_at_utc=datetime.fromisoformat(str(row["created_at_utc"]).replace("Z", "+00:00")),
+        payload_hash=row["payload_hash"],
         payload_json=payload_json,
     )
     if stored_payload != binding.as_hash_payload(include_hash=False):

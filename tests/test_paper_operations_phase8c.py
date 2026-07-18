@@ -41,6 +41,7 @@ from paper_operations import (
     backup_list,
     backup_verify,
     campaign_prepare,
+    campaign_bind,
     cohort_prepare,
     doctor,
     initialize,
@@ -59,6 +60,7 @@ from paper_operations import (
 )
 from paper_runtime.errors import PaperRuntimeSessionError
 import storage
+from market_data import MarketDataPackage, MarketDataProvenance
 from validation.artifacts import build_data_signature, build_manifest, freeze_selection
 from validation.models import CandidateEvaluation, SegmentMetrics, ValidationSplitConfig, WalkForwardResult, WalkForwardWindowResult, WindowBounds
 from validation.splits import build_rolling_windows
@@ -486,7 +488,11 @@ def _seed_campaign_registry(campaign_db: Path, contract: OperationalPaperCampaig
 
 def _seed_promotion_decision_registry(reference_db: Path, decision: PromotionDecision) -> None:
     paper_ops._ensure_promotion_decision_schema(reference_db)
-    payload_json = json.dumps(serialize_value(decision.as_dict()), ensure_ascii=False, sort_keys=True)
+    payload_json = json.dumps(
+        serialize_value({"reference_hash": decision.evidence_hash, "decision": decision.as_dict()}),
+        ensure_ascii=False,
+        sort_keys=True,
+    )
     with sqlite3.connect(reference_db) as conn:
         conn.execute(
             """
@@ -638,12 +644,19 @@ def _prepare_test_only_local_operations_fixture(tmp_path: Path, monkeypatch, sam
         runtime_db=data_dir / "paper_runtime.db",
         campaign_db=data_dir / "paper_evaluation_campaign.db",
     )
+    binding = campaign_bind(
+        campaign_id="campaign-phase8c",
+        decision_file=decision_file,
+        campaign_db=data_dir / "paper_evaluation_campaign.db",
+        data_dir=data_dir,
+    )
     reference_payload = json.loads(reference_output.read_text(encoding="utf-8"))
     return {
         "data_dir": data_dir,
         "reference_output": reference_output,
         "decision_file": decision_file,
         "campaign_id": campaign["campaign_id"],
+        "binding_hash": binding["binding_hash"],
         "cohort_hash": cohort["cohort_hash"],
         "reference_hash": reference_payload["operational_provenance"]["reference_hash"],
         "synthetic_test_data": False,
@@ -674,6 +687,43 @@ def test_phase5_reference_rejects_synthetic_fixture(tmp_path, monkeypatch):
     )
     with pytest.raises(PaperOperationsError):
         phase5_reference(input_file=synthetic_reference, output_file=tmp_path / "output.json")
+
+
+def test_phase5_reference_rejects_unknown_market_data_provenance(tmp_path, monkeypatch, sample_btc_data):
+    _enable_operational_tmp_dirs(monkeypatch)
+    monkeypatch.setattr("paper_operations.live_trading_permitted", lambda: False)
+    monkeypatch.setattr(decisor, "obter_funding_rate", lambda symbol="BTCUSDT": None)
+    monkeypatch.setattr(decisor, "log_decisao", lambda *args, **kwargs: None)
+    data_dir = tmp_path / "paper_data"
+    initialize(data_dir=data_dir)
+
+    trusted_package = _trusted_operational_reference_package(monkeypatch, sample_btc_data)
+    unknown_package = MarketDataPackage(
+        symbol=trusted_package.symbol,
+        interval=trusted_package.interval,
+        candles=trusted_package.candles,
+        snapshot=trusted_package.snapshot,
+        source=trusted_package.source,
+        provenance_class=MarketDataProvenance.UNKNOWN,
+        fetched_at=trusted_package.fetched_at,
+        expires_at=trusted_package.expires_at,
+        cache_status="miss",
+    )
+    monkeypatch.setattr(paper_ops.trusted_market_data_service, "fetch", lambda **kwargs: unknown_package)
+
+    reference_input = tmp_path / "reference_config.json"
+    _write_json(
+        reference_input,
+        {
+            "symbol": "BTCUSDT",
+            "interval": "1h",
+            "limit": 1000,
+            "strategy_version": "v4_walk_forward",
+            "provider": "trusted_market_data_service",
+        },
+    )
+    with pytest.raises(PaperOperationsError, match="trusted operational market data"):
+        phase5_reference(input_file=reference_input, output_file=data_dir / "reference.json")
 
 
 def test_phase8c_honest_operational_flow_rejects_unsatisfied_strategy_without_adulteration(tmp_path, monkeypatch, sample_btc_data):
@@ -770,6 +820,12 @@ def test_phase8c_full_local_operations_flow_uses_real_reference_and_sanitized_re
     )
     assert session["session_id"]
     assert session["state"] == "RUNNING"
+    binding = paper_ops.load_operational_campaign_decision_binding(
+        data_dir / "paper_evaluation_campaign.db",
+        campaign_id=flow["campaign_id"],
+    )
+    assert binding is not None
+    assert binding.payload_hash == paper_evaluation_hash(binding.payload_json)
 
     with sqlite3.connect(data_dir / "paper_runtime.db") as conn:
         row = conn.execute(
@@ -871,6 +927,50 @@ def test_session_start_requires_registry_entry(tmp_path, monkeypatch, sample_btc
             campaign_id=flow["campaign_id"],
             decision_file=flow["decision_file"],
             campaign_db=data_dir / "paper_evaluation_campaign.db",
+            data_dir=data_dir,
+        )
+
+
+def test_session_start_requires_binding_entry(tmp_path, monkeypatch, sample_btc_data):
+    flow = _prepare_test_only_local_operations_fixture(tmp_path, monkeypatch, sample_btc_data)
+    data_dir = flow["data_dir"]
+    campaign_db = data_dir / "paper_evaluation_campaign.db"
+    with sqlite3.connect(campaign_db) as conn:
+        conn.execute("DELETE FROM operational_campaign_decision_bindings")
+        conn.commit()
+
+    with pytest.raises(PaperOperationsError, match="campaign decision binding not found"):
+        session_start(
+            campaign_id=flow["campaign_id"],
+            decision_file=flow["decision_file"],
+            campaign_db=campaign_db,
+            data_dir=data_dir,
+        )
+
+
+def test_session_start_blocks_tampered_binding_payload_json(tmp_path, monkeypatch, sample_btc_data):
+    flow = _prepare_test_only_local_operations_fixture(tmp_path, monkeypatch, sample_btc_data)
+    data_dir = flow["data_dir"]
+    campaign_db = data_dir / "paper_evaluation_campaign.db"
+    with sqlite3.connect(campaign_db) as conn:
+        row = conn.execute(
+            "SELECT payload_json FROM operational_campaign_decision_bindings WHERE campaign_id = ?",
+            (flow["campaign_id"],),
+        ).fetchone()
+        assert row is not None
+        payload = json.loads(row[0])
+        payload["payload_json"]["contract"]["symbol"] = "ETHUSDT"
+        conn.execute(
+            "UPDATE operational_campaign_decision_bindings SET payload_json = ? WHERE campaign_id = ?",
+            (json.dumps(payload, ensure_ascii=False, sort_keys=True), flow["campaign_id"]),
+        )
+        conn.commit()
+
+    with pytest.raises(PaperCampaignManifestError, match="payload hash mismatch"):
+        session_start(
+            campaign_id=flow["campaign_id"],
+            decision_file=flow["decision_file"],
+            campaign_db=campaign_db,
             data_dir=data_dir,
         )
 
