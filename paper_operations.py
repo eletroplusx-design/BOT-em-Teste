@@ -1621,6 +1621,26 @@ def session_status(*, session_id: str | None = None, data_dir: str | Path | None
     }
 
 
+def session_active(*, data_dir: str | Path | None = None) -> dict[str, Any]:
+    store = _runtime_store_for(data_dir)
+    active_sessions = store.list_active_sessions()
+    if not active_sessions:
+        return {"status": "NONE", "active_sessions": 0}
+    if len(active_sessions) > 1:
+        raise PaperOperationsError("more than one active runtime session found.")
+    record = active_sessions[0]
+    return {
+        "status": "FOUND",
+        "active_sessions": 1,
+        "session_id": record.session_id,
+        "state": record.state.value,
+        "decision_hash": record.decision_hash,
+        "contract_hash": record.contract_hash,
+        "created_at_utc": record.created_at_utc.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "session_started_utc": record.session_started_utc.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+
+
 def session_complete(*, session_id: str, reason: str = "completed via paper_operations", data_dir: str | Path | None = None) -> dict[str, Any]:
     session = _load_runtime_session(session_id=session_id, data_dir=data_dir)
     if session is None:
@@ -2290,9 +2310,9 @@ def build_parser() -> argparse.ArgumentParser:
     lock = subparsers.add_parser("lock", help="Inspect or recover the global operational lock.")
     lock_sub = lock.add_subparsers(dest="lock_command", required=True)
     lock_inspect = lock_sub.add_parser("inspect", help="Inspect the current operational lock.")
-    lock_inspect.add_argument("--data-dir", default=None)
+    lock_inspect.add_argument("--data-dir", default=argparse.SUPPRESS)
     lock_recover = lock_sub.add_parser("recover", help="Recover a stale or malformed operational lock.")
-    lock_recover.add_argument("--data-dir", default=None)
+    lock_recover.add_argument("--data-dir", default=argparse.SUPPRESS)
     lock_recover.add_argument("--confirm", action="store_true", help="Explicitly confirm lock recovery.")
 
     init_parser = subparsers.add_parser("initialize", help="Create the local operational directories and SQLite schemas.")
@@ -2343,7 +2363,7 @@ def build_parser() -> argparse.ArgumentParser:
     campaign_bind_parser.add_argument("--campaign-id", required=True)
     campaign_bind_parser.add_argument("--decision-file", required=True)
     campaign_bind_parser.add_argument("--campaign-db", default=None)
-    campaign_bind_parser.add_argument("--data-dir", default=None)
+    campaign_bind_parser.add_argument("--data-dir", default=argparse.SUPPRESS)
     campaign_evaluate = campaign_sub.add_parser("evaluate", help="Evaluate the operational paper campaign.")
     campaign_evaluate.add_argument("--campaign-id", required=True)
     campaign_evaluate.add_argument("--campaign-db", default=None)
@@ -2356,28 +2376,30 @@ def build_parser() -> argparse.ArgumentParser:
     session_start_parser.add_argument("--campaign-id", required=True)
     session_start_parser.add_argument("--decision-file", required=True)
     session_start_parser.add_argument("--campaign-db", default=None)
-    session_start_parser.add_argument("--data-dir", default=None)
+    session_start_parser.add_argument("--data-dir", default=argparse.SUPPRESS)
     session_status_parser = session_sub.add_parser("status", help="Show the current runtime session status.")
     session_status_parser.add_argument("--session-id", default=None)
-    session_status_parser.add_argument("--data-dir", default=None)
+    session_status_parser.add_argument("--data-dir", default=argparse.SUPPRESS)
+    session_active_parser = session_sub.add_parser("active", help="Show the currently active runtime session.")
+    session_active_parser.add_argument("--data-dir", default=argparse.SUPPRESS)
     session_complete_parser = session_sub.add_parser("complete", help="Complete a running session.")
     session_complete_parser.add_argument("--session-id", required=True)
     session_complete_parser.add_argument("--reason", default="completed via paper_operations")
-    session_complete_parser.add_argument("--data-dir", default=None)
+    session_complete_parser.add_argument("--data-dir", default=argparse.SUPPRESS)
 
     runtime = subparsers.add_parser("runtime", help="Resume or inspect the monitored runtime.")
     runtime_sub = runtime.add_subparsers(dest="runtime_command", required=True)
     runtime_resume = runtime_sub.add_parser("resume", help="Resume a monitored runtime session.")
     runtime_resume.add_argument("--session-id", default=None)
-    runtime_resume.add_argument("--data-dir", default=None)
+    runtime_resume.add_argument("--data-dir", default=argparse.SUPPRESS)
 
     backup = subparsers.add_parser("backup", help="Create or inspect local backups.")
     backup_sub = backup.add_subparsers(dest="backup_command", required=True)
     backup_create_parser = backup_sub.add_parser("create", help="Create a consistent backup of the operational databases.")
-    backup_create_parser.add_argument("--data-dir", default=None)
+    backup_create_parser.add_argument("--data-dir", default=argparse.SUPPRESS)
     backup_create_parser.add_argument("--backup-name", default=None)
     backup_list_parser = backup_sub.add_parser("list", help="List available backups.")
-    backup_list_parser.add_argument("--data-dir", default=None)
+    backup_list_parser.add_argument("--data-dir", default=argparse.SUPPRESS)
     backup_verify_parser = backup_sub.add_parser("verify", help="Verify a backup copy.")
     backup_verify_parser.add_argument("--backup-dir", required=True)
 
@@ -2387,14 +2409,14 @@ def build_parser() -> argparse.ArgumentParser:
     restore_verify_parser.add_argument("--backup-dir", required=True)
     restore_apply_parser = restore_sub.add_parser("apply", help="Apply a verified backup to the local operational data directory.")
     restore_apply_parser.add_argument("--backup-dir", required=True)
-    restore_apply_parser.add_argument("--data-dir", default=None)
+    restore_apply_parser.add_argument("--data-dir", default=argparse.SUPPRESS)
     restore_apply_parser.add_argument("--confirm", action="store_true", help="Explicitly confirm restore application.")
     restore_recover_parser = restore_sub.add_parser("recover", help="Recover a failed restore using the preserved snapshot.")
-    restore_recover_parser.add_argument("--data-dir", default=None)
+    restore_recover_parser.add_argument("--data-dir", default=argparse.SUPPRESS)
     restore_recover_parser.add_argument("--confirm", action="store_true", help="Explicitly confirm restore recovery.")
 
     report_parser = subparsers.add_parser("report", help="Show the local paper operation report.")
-    report_parser.add_argument("--data-dir", default=None)
+    report_parser.add_argument("--data-dir", default=argparse.SUPPRESS)
     report_parser.add_argument("--campaign-id", default=None)
     report_parser.add_argument("--session-id", default=None)
     return parser
@@ -2493,6 +2515,9 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
             if args.session_command == "status":
                 _print_result(session_status(session_id=args.session_id, data_dir=args.data_dir))
+                return 0
+            if args.session_command == "active":
+                _print_result(session_active(data_dir=args.data_dir))
                 return 0
             if args.session_command == "complete":
                 _print_result(session_complete(session_id=args.session_id, reason=args.reason, data_dir=args.data_dir))
