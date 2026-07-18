@@ -23,6 +23,7 @@ class MarketDataPackage:
     fetched_at: datetime
     expires_at: datetime
     cache_status: str = "miss"
+    synthetic_test_data: bool = False
 
     @property
     def expired(self) -> bool:
@@ -55,6 +56,7 @@ class TrustedMarketDataService:
             fetched_at=now,
             expires_at=now + timedelta(seconds=self.ttl_seconds),
             cache_status=cache_status,
+            synthetic_test_data=False,
         )
 
     def _package_for_limit(self, package: MarketDataPackage, limit: int, cache_status: str) -> MarketDataPackage:
@@ -69,6 +71,7 @@ class TrustedMarketDataService:
             fetched_at=package.fetched_at,
             expires_at=package.expires_at,
             cache_status=cache_status,
+            synthetic_test_data=package.synthetic_test_data,
         )
 
     def _candles_to_payload(self, candles: tuple[Candle, ...]) -> list[list[Any]]:
@@ -113,6 +116,7 @@ class TrustedMarketDataService:
                         fetched_at=cached.stored_at,
                         expires_at=cached.expires_at,
                         cache_status="hit",
+                        synthetic_test_data=False,
                     )
                     return self._package_for_limit(cached_package, limit, "hit")
 
@@ -145,6 +149,7 @@ class TrustedMarketDataService:
             fetched_at=entry.stored_at,
             expires_at=entry.expires_at,
             cache_status="miss",
+            synthetic_test_data=False,
         )
         return self._package_for_limit(full_package, limit, "miss")
 

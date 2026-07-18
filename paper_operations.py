@@ -355,6 +355,31 @@ def _ensure_reference_schema(db_path: str | Path) -> None:
         conn.commit()
 
 
+def _ensure_promotion_decision_schema(db_path: str | Path) -> None:
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS operational_promotion_decision_contracts (
+                decision_hash TEXT PRIMARY KEY,
+                reference_hash TEXT NOT NULL,
+                policy_hash TEXT NOT NULL,
+                paper_limits_hash TEXT NOT NULL,
+                status TEXT NOT NULL,
+                strategy_version TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                interval TEXT NOT NULL,
+                created_at_utc TEXT NOT NULL,
+                payload_json TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_operational_promotion_decision_reference ON operational_promotion_decision_contracts(reference_hash)"
+        )
+        conn.commit()
+
+
 def _reference_scope_hash(provenance: Mapping[str, Any]) -> str:
     scope_payload = {
         "symbol": provenance.get("symbol"),
@@ -444,6 +469,156 @@ def _load_reference_contract(reference_db: Path, reference_hash: str) -> dict[st
         if not isinstance(payload_json, str) or not payload_json.strip():
             raise PaperOperationsError("operational reference payload missing.")
         return dict(row)
+
+
+def _promotion_decision_from_payload(payload: Mapping[str, Any]) -> PromotionDecision:
+    required_keys = {
+        "status",
+        "frozen_selection",
+        "strategy_version",
+        "symbol",
+        "interval",
+        "phase5_manifest",
+        "evidence_hash",
+        "policy_hash",
+        "decision_hash",
+        "criteria_evaluated",
+        "reasons",
+        "recalculated_metrics",
+        "paper_limits",
+        "timestamp_utc",
+        "paper_limits_hash",
+    }
+    missing = sorted(required_keys - set(payload))
+    extra = sorted(set(payload) - required_keys)
+    if missing or extra:
+        problems = []
+        if missing:
+            problems.append(f"missing fields: {', '.join(missing)}")
+        if extra:
+            problems.append(f"unexpected fields: {', '.join(extra)}")
+        raise PaperOperationsError("promotion decision file is invalid: " + "; ".join(problems))
+    frozen_selection = payload.get("frozen_selection")
+    if not isinstance(frozen_selection, Mapping):
+        raise PaperOperationsError("promotion decision file is invalid.")
+    from validation.models import CandidateConfig, FrozenSelection
+    from promotion import PromotionCriterionResult
+
+    candidate_payload = frozen_selection.get("candidate") or {}
+    candidate = CandidateConfig.from_mapping(str(candidate_payload.get("name", "")).strip(), dict(candidate_payload.get("parameters", {}) or {}))
+    frozen = FrozenSelection(
+        candidate=candidate,
+        strategy_version=frozen_selection.get("strategy_version", ""),
+        costs=tuple((frozen_selection.get("costs", {}) or {}).items()),
+        execution_contract=tuple((frozen_selection.get("execution_contract", {}) or {}).items()),
+        symbol=frozen_selection.get("symbol", ""),
+        interval=frozen_selection.get("interval", ""),
+        frozen_at=datetime.fromisoformat(str(frozen_selection.get("frozen_at", "")).replace("Z", "+00:00")),
+        manifest_hash=frozen_selection.get("manifest_hash", ""),
+        window_id=frozen_selection.get("window_id", ""),
+    )
+    criteria = tuple(
+        PromotionCriterionResult(
+            name=str(item.get("name", "criterion")),
+            passed=bool(item.get("passed", False)) if type(item.get("passed")) is bool else False,
+            expected=item.get("expected"),
+            actual=item.get("actual"),
+            reason=str(item.get("reason", "")),
+        )
+        for item in payload.get("criteria_evaluated", []) or []
+    )
+    try:
+        status = PromotionStatus(payload["status"])
+    except Exception as exc:
+        raise PaperOperationsError("promotion decision status is invalid.") from exc
+    return PromotionDecision(
+        status=status,
+        frozen_selection=frozen,
+        strategy_version=payload["strategy_version"],
+        symbol=payload["symbol"],
+        interval=payload["interval"],
+        phase5_manifest=dict(payload["phase5_manifest"]),
+        evidence_hash=payload["evidence_hash"],
+        policy_hash=payload["policy_hash"],
+        decision_hash=payload["decision_hash"],
+        criteria_evaluated=criteria,
+        reasons=tuple(payload["reasons"]),
+        recalculated_metrics=dict(payload["recalculated_metrics"]),
+        paper_limits=dict(payload["paper_limits"]),
+        timestamp_utc=_parse_utc(payload["timestamp_utc"]),
+        paper_limits_hash=payload["paper_limits_hash"],
+    )
+
+
+def _persist_promotion_decision(reference_db: Path, decision: PromotionDecision, *, reference_hash: str) -> dict[str, Any]:
+    _ensure_reference_schema(reference_db)
+    _ensure_promotion_decision_schema(reference_db)
+    if type(reference_hash) is not str or not reference_hash.strip():
+        raise PaperOperationsError("promotion decision reference hash is invalid.")
+    payload_json = json.dumps(serialize_value(decision.as_dict()), ensure_ascii=False, sort_keys=True)
+    with sqlite3.connect(reference_db) as conn:
+        conn.row_factory = sqlite3.Row
+        existing = conn.execute(
+            "SELECT decision_hash, payload_json FROM operational_promotion_decision_contracts WHERE decision_hash = ?",
+            (decision.decision_hash,),
+        ).fetchone()
+        if existing is not None:
+            if existing["payload_json"] != payload_json:
+                raise PaperOperationsError("promotion decision already exists.")
+            return dict(existing)
+        try:
+            conn.execute(
+                """
+                INSERT INTO operational_promotion_decision_contracts (
+                    decision_hash, reference_hash, policy_hash, paper_limits_hash, status,
+                    strategy_version, symbol, interval, created_at_utc, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    decision.decision_hash,
+                    reference_hash,
+                    decision.policy_hash,
+                    decision.paper_limits_hash,
+                    decision.status.value,
+                    decision.strategy_version,
+                    decision.symbol,
+                    decision.interval,
+                    decision.timestamp_utc.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    payload_json,
+                ),
+            )
+            conn.commit()
+        except sqlite3.IntegrityError as exc:
+            raise PaperOperationsError("promotion decision already exists.") from exc
+    return {
+        "decision_hash": decision.decision_hash,
+        "reference_hash": reference_hash,
+        "payload_json": payload_json,
+    }
+
+
+def _load_promotion_decision_registry(reference_db: Path, decision_hash: str) -> PromotionDecision:
+    if not reference_db.exists():
+        raise PaperOperationsError("promotion decision registry not found.")
+    _ensure_promotion_decision_schema(reference_db)
+    with sqlite3.connect(reference_db) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM operational_promotion_decision_contracts WHERE decision_hash = ?",
+            (decision_hash,),
+        ).fetchone()
+        if row is None:
+            raise PaperOperationsError("promotion decision registry entry not found.")
+        payload_json = row["payload_json"]
+        if type(payload_json) is not str or not payload_json.strip():
+            raise PaperOperationsError("promotion decision payload missing.")
+        payload = json.loads(payload_json)
+        if not isinstance(payload, Mapping):
+            raise PaperOperationsError("promotion decision payload invalid.")
+        decision = _promotion_decision_from_payload(payload)
+        if decision.decision_hash != row["decision_hash"] or decision.decision_hash != decision_hash:
+            raise PaperOperationsError("promotion decision registry hash mismatch.")
+        return decision
 
 
 def _load_restore_recovery_state(paths: Mapping[str, Path]) -> dict[str, Any] | None:
@@ -739,7 +914,7 @@ def _run_operational_walk_forward(*, symbol: str, interval: str, limit: int, str
         raise PaperOperationsError("operational walk-forward reference data signature is invalid.")
     provenance = {
         "version": _REFERENCE_PROVENANCE_VERSION,
-        "synthetic_test_data": False,
+        "synthetic_test_data": bool(getattr(package, "synthetic_test_data", False)),
         "symbol": symbol,
         "interval": interval,
         "strategy_version": strategy_version,
@@ -767,82 +942,9 @@ def _run_operational_walk_forward(*, symbol: str, interval: str, limit: int, str
 
 def _load_promotion_decision(path: str | Path) -> PromotionDecision:
     payload = _load_json_file(path, label="promotion decision")
-    required_keys = {
-        "status",
-        "frozen_selection",
-        "strategy_version",
-        "symbol",
-        "interval",
-        "phase5_manifest",
-        "evidence_hash",
-        "policy_hash",
-        "decision_hash",
-        "criteria_evaluated",
-        "reasons",
-        "recalculated_metrics",
-        "paper_limits",
-        "timestamp_utc",
-        "paper_limits_hash",
-    }
-    missing = sorted(required_keys - set(payload))
-    extra = sorted(set(payload) - required_keys)
-    if missing or extra:
-        problems = []
-        if missing:
-            problems.append(f"missing fields: {', '.join(missing)}")
-        if extra:
-            problems.append(f"unexpected fields: {', '.join(extra)}")
-        raise PaperOperationsError("promotion decision file is invalid: " + "; ".join(problems))
-    frozen_selection = payload.get("frozen_selection")
-    if not isinstance(frozen_selection, Mapping):
+    if not isinstance(payload, Mapping):
         raise PaperOperationsError("promotion decision file is invalid.")
-    from validation.models import CandidateConfig, FrozenSelection
-    from promotion import PromotionCriterionResult
-
-    candidate_payload = frozen_selection.get("candidate") or {}
-    candidate = CandidateConfig.from_mapping(str(candidate_payload.get("name", "")).strip(), dict(candidate_payload.get("parameters", {}) or {}))
-    frozen = FrozenSelection(
-        candidate=candidate,
-        strategy_version=frozen_selection.get("strategy_version", ""),
-        costs=tuple((frozen_selection.get("costs", {}) or {}).items()),
-        execution_contract=tuple((frozen_selection.get("execution_contract", {}) or {}).items()),
-        symbol=frozen_selection.get("symbol", ""),
-        interval=frozen_selection.get("interval", ""),
-        frozen_at=datetime.fromisoformat(str(frozen_selection.get("frozen_at", "")).replace("Z", "+00:00")),
-        manifest_hash=frozen_selection.get("manifest_hash", ""),
-        window_id=frozen_selection.get("window_id", ""),
-    )
-    criteria = tuple(
-        PromotionCriterionResult(
-            name=str(item.get("name", "criterion")),
-            passed=bool(item.get("passed", False)) if type(item.get("passed")) is bool else False,
-            expected=item.get("expected"),
-            actual=item.get("actual"),
-            reason=str(item.get("reason", "")),
-        )
-        for item in payload.get("criteria_evaluated", []) or []
-    )
-    try:
-        status = PromotionStatus(payload["status"])
-    except Exception as exc:
-        raise PaperOperationsError("promotion decision status is invalid.") from exc
-    return PromotionDecision(
-        status=status,
-        frozen_selection=frozen,
-        strategy_version=payload["strategy_version"],
-        symbol=payload["symbol"],
-        interval=payload["interval"],
-        phase5_manifest=dict(payload["phase5_manifest"]),
-        evidence_hash=payload["evidence_hash"],
-        policy_hash=payload["policy_hash"],
-        decision_hash=payload["decision_hash"],
-        criteria_evaluated=criteria,
-        reasons=tuple(payload["reasons"]),
-        recalculated_metrics=dict(payload["recalculated_metrics"]),
-        paper_limits=dict(payload["paper_limits"]),
-        timestamp_utc=_parse_utc(payload["timestamp_utc"]),
-        paper_limits_hash=payload["paper_limits_hash"],
-    )
+    return _promotion_decision_from_payload(payload)
 
 
 def _load_promotion_policy(path: str | Path) -> PromotionPolicy:
@@ -1035,7 +1137,7 @@ def phase5_reference(*, input_file: str | Path, output_file: str | Path | None =
         "output": str(output),
         "manifest_hash": result.manifest.get("manifest_hash"),
         "runner_trusted": result.manifest.get("runner_trusted"),
-        "synthetic_test_data": False,
+        "synthetic_test_data": bool(payload.get(_REFERENCE_PROVENANCE_KEY, {}).get("synthetic_test_data", False)),
     }
 
 
@@ -1048,6 +1150,8 @@ def promotion_decision(*, reference_file: str | Path, policy_file: str | Path, o
         evidence = adapt_walk_forward_result(reference)
         decision = evaluate_promotion(evidence, policy)
         _write_json(output, decision.as_dict())
+    reference_db = _reference_db_path(output.parent)
+    _persist_promotion_decision(reference_db, decision, reference_hash=decision.evidence_hash)
     return {"output": str(output), "status": decision.status.value, "decision_hash": decision.decision_hash, "paper_limits_hash": decision.paper_limits_hash}
 
 
@@ -1146,18 +1250,23 @@ def session_start(
     campaign_db: str | Path | None = None,
     data_dir: str | Path | None = None,
 ) -> dict[str, Any]:
+    paths = _paths(data_dir)
     campaign_db_path = Path(campaign_db) if campaign_db is not None else _db_paths(data_dir)["campaign_db"]
     contract = load_operational_paper_campaign_contract(campaign_db_path, campaign_id=campaign_id)
     if not contract.campaign_id:
         raise PaperOperationsError("campaign is invalid.")
-    decision = _load_promotion_decision(decision_file)
+    decision_file_payload = _load_promotion_decision(decision_file)
+    decision_registry = _load_promotion_decision_registry(_reference_db_path(paths["root"]), decision_file_payload.decision_hash)
+    if decision_registry.as_dict() != decision_file_payload.as_dict():
+        raise PaperOperationsError("promotion decision registry mismatch.")
+    decision = decision_registry
     if decision.status is not PromotionStatus.APPROVED_FOR_MONITORED_PAPER:
         raise PaperOperationsError("promotion decision is not approved for monitored paper.")
     if decision.strategy_version != contract.strategy_version or decision.symbol != contract.symbol or decision.interval != contract.interval:
         raise PaperOperationsError("promotion decision diverges from campaign scope.")
     session_id = new_session_id()
-    with _acquire_operational_lock(_paths(data_dir)["root"], scope=f"session_start:{campaign_id}"):
-        _require_no_restore_recovery(_paths(data_dir))
+    with _acquire_operational_lock(paths["root"], scope=f"session_start:{campaign_id}"):
+        _require_no_restore_recovery(paths)
         session = create_monitored_session(
             decision,
             session_id=session_id,

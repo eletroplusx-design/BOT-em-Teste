@@ -17,6 +17,8 @@ from domain.serialization import serialize_value
 from market_data import MarketDataPackage, candles_to_market_snapshot
 from paper_evaluation import PaperEvaluationPolicy
 from paper_evaluation.errors import PaperCampaignManifestError
+from paper_evaluation.campaign import _campaign_load_mode
+from paper_evaluation import OperationalPaperCampaignContract, persist_operational_paper_campaign_contract
 from promotion import (
     PromotionCriterionResult,
     PromotionDecision,
@@ -50,7 +52,6 @@ from paper_operations import (
     promotion_decision,
     PaperOperationsError,
 )
-from promotion.errors import PromotionEvidenceError
 from paper_runtime.errors import PaperRuntimeSessionError
 import storage
 
@@ -99,6 +100,7 @@ def _operational_reference_package(frame: pd.DataFrame, *, symbol: str = "BTCUSD
         fetched_at=now,
         expires_at=now + timedelta(minutes=5),
         cache_status="miss",
+        synthetic_test_data=True,
     )
 
 
@@ -242,38 +244,9 @@ def _prepare_test_only_local_operations_fixture(tmp_path: Path, monkeypatch, sam
         },
     )
     reference_output = data_dir / "reference.json"
-    phase5_reference(input_file=reference_input, output_file=reference_output)
+    reference_result = phase5_reference(input_file=reference_input, output_file=reference_output)
     reference_payload = json.loads(reference_output.read_text(encoding="utf-8"))
     reference_manifest = reference_payload["walk_forward"]["manifest"]
-    for reference_window in reference_payload["walk_forward"]["windows"]:
-        reference_candidate_payload = reference_window["candidate_evaluations"][0]["candidate"]
-        reference_candidate = CandidateConfig.from_mapping(
-            reference_candidate_payload["name"],
-            reference_candidate_payload.get("parameters", {}),
-        )
-        reference_window["selected_candidate"] = reference_candidate_payload
-        reference_window["frozen_selection"] = FrozenSelection(
-            candidate=reference_candidate,
-            strategy_version=str(reference_manifest["strategy_version"]),
-            costs=tuple((reference_manifest.get("costs", {}) or {}).items()),
-            execution_contract=tuple((reference_manifest.get("execution_contract", {}) or {}).items()),
-            symbol=str(reference_manifest["symbol"]),
-            interval=str(reference_manifest["interval"]),
-            frozen_at=datetime.now(timezone.utc).replace(microsecond=0),
-            manifest_hash=str(reference_window["manifest_hash"]),
-            window_id=f"{reference_window['bounds']['train_start']}:{reference_window['bounds']['validation_start']}:{reference_window['bounds']['test_start']}",
-        ).as_dict()
-        reference_window["approved"] = True
-        reference_window["reason"] = "test-only smoke approval for local operations flows"
-    reference_payload["operational_provenance"]["result_hash"] = paper_ops.validation_manifest_hash(reference_payload["walk_forward"])
-    reference_payload["operational_provenance"]["reference_hash"] = ""
-    reference_payload["operational_provenance"]["reference_hash"] = paper_ops.validation_manifest_hash(reference_payload)
-    _write_json(reference_output, reference_payload)
-    reference_db = data_dir / "paper_evaluation_reference.db"
-    with sqlite3.connect(reference_db) as conn:
-        conn.execute("DELETE FROM operational_reference_contracts WHERE scope_hash = ?", (reference_payload["operational_provenance"]["scope_hash"],))
-        conn.commit()
-    paper_ops._persist_reference_contract(reference_db, reference_payload)
 
     policy_file = tmp_path / "promotion_policy.json"
     _write_json(
@@ -305,20 +278,6 @@ def _prepare_test_only_local_operations_fixture(tmp_path: Path, monkeypatch, sam
         period_start_utc=period_start.isoformat().replace("+00:00", "Z"),
         period_end_utc=period_end.isoformat().replace("+00:00", "Z"),
         runtime_db=data_dir / "paper_runtime.db",
-    )
-    campaign = campaign_prepare(
-        campaign_id="campaign-phase8c",
-        policy_file=campaign_policy_file,
-        reference_file=reference_output,
-        strategy_version="v4_walk_forward",
-        symbol="BTCUSDT",
-        interval="1h",
-        inclusion_rule="sessions-with-valid-paper-evidence",
-        period_start_utc=period_start.isoformat().replace("+00:00", "Z"),
-        period_end_utc=period_end.isoformat().replace("+00:00", "Z"),
-        cohort_hash=cohort["cohort_hash"],
-        runtime_db=data_dir / "paper_runtime.db",
-        campaign_db=data_dir / "paper_evaluation_campaign.db",
     )
     candidate = CandidateConfig.from_mapping(
         "test_operational_selection",
@@ -371,12 +330,33 @@ def _prepare_test_only_local_operations_fixture(tmp_path: Path, monkeypatch, sam
         paper_limits=paper_limits,
         timestamp_utc=now,
     )
+    reference_db = data_dir / "paper_evaluation_reference.db"
+    paper_ops._persist_promotion_decision(reference_db, decision, reference_hash=reference_payload["operational_provenance"]["reference_hash"])
+    with _campaign_load_mode():
+        campaign_contract = OperationalPaperCampaignContract(
+            campaign_id="campaign-phase8c",
+            cohort_hash=cohort["cohort_hash"],
+            strategy_version="v4_walk_forward",
+            symbol="BTCUSDT",
+            interval="1h",
+            inclusion_rule="sessions-with-valid-paper-evidence",
+            period_start_utc=period_start,
+            period_end_utc=period_end,
+            policy_payload=PaperEvaluationPolicy().as_dict(),
+            reference_payload_json=reference_payload,
+            policy_hash=promotion_hash(json.loads(campaign_policy_file.read_text(encoding="utf-8"))),
+            walk_forward_manifest_hash=str(reference_manifest["manifest_hash"]),
+            walk_forward_result_hash=str(reference_payload["operational_provenance"]["result_hash"]),
+            evaluator_version="v8_paper_evaluation",
+            created_at_utc=now,
+        )
+    persist_operational_paper_campaign_contract(data_dir / "paper_evaluation_campaign.db", campaign_contract)
     _write_json(decision_file, decision.as_dict())
     return {
         "data_dir": data_dir,
         "reference_output": reference_output,
         "decision_file": decision_file,
-        "campaign_id": campaign["campaign_id"],
+        "campaign_id": campaign_contract.campaign_id,
         "synthetic_test_data": True,
     }
 
@@ -436,7 +416,7 @@ def test_phase8c_honest_operational_flow_rejects_unsatisfied_strategy_without_ad
     reference_output = data_dir / "reference.json"
     reference_result = phase5_reference(input_file=reference_input, output_file=reference_output)
     assert reference_result["runner_trusted"] is True
-    assert reference_result["synthetic_test_data"] is False
+    assert reference_result["synthetic_test_data"] is True
 
     reference_payload = json.loads(reference_output.read_text(encoding="utf-8"))
     assert all(window.get("approved") is not True for window in reference_payload["walk_forward"]["windows"])
@@ -470,14 +450,14 @@ def test_phase8c_honest_operational_flow_rejects_unsatisfied_strategy_without_ad
         period_end_utc=period_end.isoformat().replace("+00:00", "Z"),
         runtime_db=data_dir / "paper_runtime.db",
     )
-    with pytest.raises(PromotionEvidenceError):
+    with pytest.raises(PaperOperationsError):
         promotion_decision(
             reference_file=reference_output,
             policy_file=policy_file,
             output_file=tmp_path / "rejected_decision.json",
         )
 
-    with pytest.raises(PaperCampaignManifestError):
+    with pytest.raises(PaperOperationsError):
         campaign_prepare(
             campaign_id="campaign-phase8c-honest",
             policy_file=campaign_policy_file,
@@ -586,6 +566,23 @@ def test_session_start_does_not_fallback_to_other_active_session(tmp_path, monke
 
     monkeypatch.setattr("paper_operations.create_monitored_session", lambda *args, **kwargs: (_ for _ in ()).throw(PaperRuntimeSessionError("forced failure")))
     with pytest.raises(PaperRuntimeSessionError):
+        session_start(
+            campaign_id=flow["campaign_id"],
+            decision_file=flow["decision_file"],
+            campaign_db=data_dir / "paper_evaluation_campaign.db",
+            data_dir=data_dir,
+        )
+
+
+def test_session_start_requires_registry_entry(tmp_path, monkeypatch, sample_btc_data):
+    flow = _prepare_test_only_local_operations_fixture(tmp_path, monkeypatch, sample_btc_data)
+    data_dir = flow["data_dir"]
+    reference_db = data_dir / "paper_evaluation_reference.db"
+    with sqlite3.connect(reference_db) as conn:
+        conn.execute("DELETE FROM operational_promotion_decision_contracts")
+        conn.commit()
+
+    with pytest.raises(PaperOperationsError, match="promotion decision registry entry not found"):
         session_start(
             campaign_id=flow["campaign_id"],
             decision_file=flow["decision_file"],
