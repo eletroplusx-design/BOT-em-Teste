@@ -19,6 +19,8 @@ from domain import Candle
 from domain.serialization import serialize_value
 from market_data import candles_to_market_snapshot
 from paper_evaluation import PaperEvaluationPolicy
+import paper_evaluation._operational as paper_eval_ops
+import paper_evaluation.campaign as paper_eval_campaign
 from paper_evaluation._operational import OperationalCohortContract
 from paper_evaluation.errors import PaperCampaignManifestError, PaperCampaignReadError
 from paper_evaluation.artifacts import paper_evaluation_hash
@@ -60,7 +62,7 @@ from paper_operations import (
     promotion_decision,
     PaperOperationsError,
 )
-from paper_runtime.errors import PaperRuntimeSessionError
+from paper_runtime.errors import PaperRuntimeSessionError, PaperRuntimeStoreError
 import storage
 from market_data import MarketDataPackage, MarketDataProvenance
 from validation.artifacts import build_data_signature, build_manifest, freeze_selection
@@ -539,6 +541,26 @@ def _seed_runtime_session(runtime_db: Path, *, session_id: str, decision_hash: s
     store.create_session(contract, session_state=PaperRuntimeState.RUNNING)
 
 
+def _seed_second_active_runtime_session(runtime_db: Path, *, session_id: str = "secondary-session") -> None:
+    store = PaperRuntimeStore(runtime_db)
+    started_at = datetime.now(timezone.utc).replace(microsecond=0)
+    contract = PaperRuntimeContract(
+        session_id=session_id,
+        session_started_utc=started_at,
+        decision_hash=f"decision-{session_id}",
+        evidence_hash=f"evidence-{session_id}",
+        paper_limits_hash=f"paper-limits-{session_id}",
+        paper_limits={"paper_capital_max": "10000", "risk_per_trade_max_percent": "1"},
+        configuration={"test_only": True, "session_tag": session_id},
+        strategy_version="v4_walk_forward",
+        symbol="BTCUSDT",
+        interval="1h",
+        execution_contract={"paper_only": True},
+        paper_only=True,
+    )
+    store.create_session(contract, session_state=PaperRuntimeState.RUNNING)
+
+
 def _prepare_test_only_local_operations_fixture(tmp_path: Path, monkeypatch, sample_btc_data):
     _enable_operational_tmp_dirs(monkeypatch)
     monkeypatch.setattr("paper_operations.live_trading_permitted", lambda: False)
@@ -621,13 +643,17 @@ def _prepare_test_only_local_operations_fixture(tmp_path: Path, monkeypatch, sam
     campaign_policy_file = tmp_path / "campaign_policy.json"
     _write_json(campaign_policy_file, PaperEvaluationPolicy().as_dict())
     now = datetime.now(timezone.utc).replace(microsecond=0)
-    period_start = now + timedelta(days=1)
+    period_start = now - timedelta(minutes=1)
     period_end = period_start + timedelta(days=1)
+    contract_created_at = period_start - timedelta(hours=1)
+    runtime_now = now
+    monkeypatch.setattr(paper_eval_ops, "_utcnow", lambda: contract_created_at)
+    monkeypatch.setattr(paper_eval_campaign, "_utcnow", lambda: contract_created_at)
     cohort = cohort_prepare(
         strategy_version="v4_walk_forward",
         symbol="BTCUSDT",
         interval="1h",
-        inclusion_rule="sessions-with-valid-paper-evidence",
+        inclusion_rule="sqlite_all_sessions",
         period_start_utc=period_start.isoformat().replace("+00:00", "Z"),
         period_end_utc=period_end.isoformat().replace("+00:00", "Z"),
         runtime_db=data_dir / "paper_runtime.db",
@@ -639,7 +665,7 @@ def _prepare_test_only_local_operations_fixture(tmp_path: Path, monkeypatch, sam
         strategy_version="v4_walk_forward",
         symbol="BTCUSDT",
         interval="1h",
-        inclusion_rule="sessions-with-valid-paper-evidence",
+        inclusion_rule="sqlite_all_sessions",
         period_start_utc=period_start.isoformat().replace("+00:00", "Z"),
         period_end_utc=period_end.isoformat().replace("+00:00", "Z"),
         cohort_hash=cohort["cohort_hash"],
@@ -652,6 +678,9 @@ def _prepare_test_only_local_operations_fixture(tmp_path: Path, monkeypatch, sam
         campaign_db=data_dir / "paper_evaluation_campaign.db",
         data_dir=data_dir,
     )
+    monkeypatch.setattr(paper_eval_ops, "_utcnow", lambda: runtime_now)
+    monkeypatch.setattr(paper_eval_campaign, "_utcnow", lambda: runtime_now)
+    monkeypatch.setattr(paper_ops, "_utcnow", lambda: runtime_now)
     reference_payload = json.loads(reference_output.read_text(encoding="utf-8"))
     return {
         "data_dir": data_dir,
@@ -850,7 +879,7 @@ def test_phase8c_honest_operational_flow_rejects_unsatisfied_strategy_without_ad
         strategy_version="v4_walk_forward",
         symbol="BTCUSDT",
         interval="1h",
-        inclusion_rule="sessions-with-valid-paper-evidence",
+        inclusion_rule="sqlite_all_sessions",
         period_start_utc=period_start.isoformat().replace("+00:00", "Z"),
         period_end_utc=period_end.isoformat().replace("+00:00", "Z"),
         runtime_db=data_dir / "paper_runtime.db",
@@ -870,7 +899,7 @@ def test_phase8c_honest_operational_flow_rejects_unsatisfied_strategy_without_ad
             strategy_version="v4_walk_forward",
             symbol="BTCUSDT",
             interval="1h",
-            inclusion_rule="sessions-with-valid-paper-evidence",
+            inclusion_rule="sqlite_all_sessions",
             period_start_utc=period_start.isoformat().replace("+00:00", "Z"),
             period_end_utc=period_end.isoformat().replace("+00:00", "Z"),
             cohort_hash=cohort["cohort_hash"],
@@ -1017,6 +1046,30 @@ def test_session_start_holds_lock_during_loading_and_creation(tmp_path, monkeypa
     assert session["state"] == "RUNNING"
 
 
+def test_session_start_blocks_outside_campaign_window_before_creating_session(tmp_path, monkeypatch, sample_btc_data):
+    flow = _prepare_test_only_local_operations_fixture(tmp_path, monkeypatch, sample_btc_data)
+    data_dir = flow["data_dir"]
+    contract = paper_ops.load_operational_paper_campaign_contract(data_dir / "paper_evaluation_campaign.db", campaign_id=flow["campaign_id"])
+    monkeypatch.setattr(paper_ops, "_utcnow", lambda: contract.period_end_utc + timedelta(seconds=1))
+
+    created = {"called": False}
+
+    def _boom(*args, **kwargs):
+        created["called"] = True
+        raise AssertionError("create_monitored_session should not run outside the campaign window.")
+
+    monkeypatch.setattr(paper_ops, "create_monitored_session", _boom)
+
+    with pytest.raises(PaperOperationsError, match="campaign window has already ended."):
+        session_start(
+            campaign_id=flow["campaign_id"],
+            decision_file=flow["decision_file"],
+            campaign_db=data_dir / "paper_evaluation_campaign.db",
+            data_dir=data_dir,
+        )
+    assert created["called"] is False
+
+
 def test_promotion_decision_requires_status_and_session_start_fails_closed(tmp_path, monkeypatch, sample_btc_data):
     flow = _prepare_test_only_local_operations_fixture(tmp_path, monkeypatch, sample_btc_data)
     data_dir = flow["data_dir"]
@@ -1053,6 +1106,159 @@ def test_session_start_does_not_fallback_to_other_active_session(tmp_path, monke
             campaign_db=data_dir / "paper_evaluation_campaign.db",
             data_dir=data_dir,
         )
+
+
+def test_session_active_reports_none_when_no_active_session(tmp_path, monkeypatch, sample_btc_data):
+    _enable_operational_tmp_dirs(monkeypatch)
+    data_dir = tmp_path / "paper_data"
+    initialize(data_dir=data_dir)
+
+    active = paper_ops.session_active(data_dir=data_dir)
+    assert active == {"status": "NONE", "active_sessions": 0}
+
+
+def test_session_active_reports_found_and_includes_session_started_utc(tmp_path, monkeypatch, sample_btc_data):
+    flow = _prepare_test_only_local_operations_fixture(tmp_path, monkeypatch, sample_btc_data)
+    data_dir = flow["data_dir"]
+    session_start(
+        campaign_id=flow["campaign_id"],
+        decision_file=flow["decision_file"],
+        campaign_db=data_dir / "paper_evaluation_campaign.db",
+        data_dir=data_dir,
+    )
+
+    active = paper_ops.session_active(data_dir=data_dir)
+    assert active["status"] == "FOUND"
+    assert active["active_sessions"] == 1
+    assert active["session_id"]
+    assert active["state"] == "RUNNING"
+    assert active["session_started_utc"].endswith("Z")
+    assert active["created_at_utc"].endswith("Z")
+
+
+def test_session_active_blocks_multiple_active_sessions(tmp_path, monkeypatch, sample_btc_data):
+    flow = _prepare_test_only_local_operations_fixture(tmp_path, monkeypatch, sample_btc_data)
+    data_dir = flow["data_dir"]
+    session_start(
+        campaign_id=flow["campaign_id"],
+        decision_file=flow["decision_file"],
+        campaign_db=data_dir / "paper_evaluation_campaign.db",
+        data_dir=data_dir,
+    )
+    _seed_second_active_runtime_session(data_dir / "paper_runtime.db")
+
+    with pytest.raises(PaperOperationsError, match="more than one active runtime session found"):
+        paper_ops.session_active(data_dir=data_dir)
+
+
+def test_session_active_blocks_on_store_error(tmp_path, monkeypatch, sample_btc_data):
+    flow = _prepare_test_only_local_operations_fixture(tmp_path, monkeypatch, sample_btc_data)
+    data_dir = flow["data_dir"]
+
+    def _boom(*args, **kwargs):
+        raise PaperRuntimeStoreError("boom")
+
+    monkeypatch.setattr(PaperRuntimeStore, "list_active_sessions", _boom)
+
+    with pytest.raises(PaperRuntimeStoreError, match="boom"):
+        paper_ops.session_active(data_dir=data_dir)
+
+
+def test_session_active_is_read_only_and_does_not_initialize_store(tmp_path, monkeypatch, sample_btc_data):
+    flow = _prepare_test_only_local_operations_fixture(tmp_path, monkeypatch, sample_btc_data)
+    data_dir = flow["data_dir"]
+    session_start(
+        campaign_id=flow["campaign_id"],
+        decision_file=flow["decision_file"],
+        campaign_db=data_dir / "paper_evaluation_campaign.db",
+        data_dir=data_dir,
+    )
+
+    before = _sqlite_logical_fingerprint(data_dir / "paper_runtime.db")
+
+    def _boom_initialize(*args, **kwargs):
+        raise AssertionError("session active should not initialize the runtime store.")
+
+    monkeypatch.setattr(PaperRuntimeStore, "initialize", _boom_initialize)
+
+    active = paper_ops.session_active(data_dir=data_dir)
+    after = _sqlite_logical_fingerprint(data_dir / "paper_runtime.db")
+
+    assert active["status"] == "FOUND"
+    assert active["active_sessions"] == 1
+    assert before == after
+
+
+def test_session_active_blocks_when_runtime_database_is_missing(tmp_path, monkeypatch):
+    _enable_operational_tmp_dirs(monkeypatch)
+    data_dir = tmp_path / "paper_data"
+
+    with pytest.raises(PaperRuntimeStoreError, match="runtime database not found"):
+        paper_ops.session_active(data_dir=data_dir)
+    assert not (data_dir / "paper_runtime.db").exists()
+
+
+def test_session_active_cli_reports_active_session(tmp_path, monkeypatch, sample_btc_data, capsys):
+    flow = _prepare_test_only_local_operations_fixture(tmp_path, monkeypatch, sample_btc_data)
+    data_dir = flow["data_dir"]
+    session_start(
+        campaign_id=flow["campaign_id"],
+        decision_file=flow["decision_file"],
+        campaign_db=data_dir / "paper_evaluation_campaign.db",
+        data_dir=data_dir,
+    )
+
+    exit_code = paper_operations_main(["--data-dir", str(data_dir), "session", "active"])
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "FOUND"
+    assert payload["active_sessions"] == 1
+
+
+def test_start_campaign_script_contains_session_active_recovery_and_atomic_write():
+    script = Path("start-paper-campaign.ps1").read_text(encoding="utf-8")
+    assert "session active" in script
+    assert "SESSION_STARTING" in script
+    assert "SESSION_STARTED" in script
+    assert "Assert-PlanConsistency" in script
+    assert "sqlite_all_sessions" in script
+    assert "sessions-with-valid-paper-evidence" not in script
+    assert "if ($nowUtc -ge $windowEndUtc)" in script
+    assert "Convert-ToUtcIso" in script
+    assert "File]::Replace" in script
+    assert "File]::Move" in script
+    assert '$env:PAPER_DATA_DIR = "C:\\Users\\Vitor\\BotTraderPaperData"' in script
+    assert "cohort status" in script
+    assert "campaign status" in script
+    assert "campaign bind" in script
+    assert "backup verify" in script
+    assert "restore verify" in script
+    assert "doctor is not ready." in script
+    assert "doctor.local_operations_ready" in script
+    assert "doctor.bot_runtime_ready" in script
+    assert "backup.verified" in script
+    assert "restore.verified" in script
+    assert "campaign window has not started yet." in script
+    assert "campaign window has already ended." in script
+    assert "session_starting state requires an active runtime session for recovery." in script
+    assert "session_started state requires a persisted session_id." in script
+    assert "Session already started:" in script
+    assert "Invoke-PaperOperations @('session', 'status', '--session-id', $plan.session_id" in script
+    assert "session start did not result in a running session." in script
+    assert "session start revalidation failed." in script
+    assert "active runtime session decision hash mismatch." in script
+    assert "persisted runtime session decision hash mismatch." in script
+    assert "recoveredPlan.session_state = 'RUNNING'" in script
+    assert "recoveredPlan.status = 'SESSION_STARTED'" in script
+    assert "cohort hash mismatch." in script
+    assert "campaign hash mismatch." in script
+    assert "campaign cohort_hash mismatch." in script
+    assert "campaign strategy_version mismatch." in script
+    assert "campaign symbol mismatch." in script
+    assert "campaign interval mismatch." in script
+    assert "campaign inclusion_rule mismatch." in script
+    assert "binding_hash mismatch." in script
+    assert "Recovered active session" in script
 
 
 def test_session_start_requires_registry_entry(tmp_path, monkeypatch, sample_btc_data):
@@ -1287,12 +1493,22 @@ def test_backup_manifest_and_restore_apply_hardened(tmp_path, monkeypatch, sampl
 def test_backup_retention_keeps_latest_valid_backups(tmp_path, monkeypatch, sample_btc_data):
     flow = _prepare_test_only_local_operations_fixture(tmp_path, monkeypatch, sample_btc_data)
     data_dir = flow["data_dir"]
-    names = []
+    backup_root = data_dir / "backups"
+    original_iterdir = type(backup_root).iterdir
+
+    def reversed_backup_iterdir(self):
+        if self == backup_root:
+            return iter([backup_root / f"backup-{index:02d}" for index in range(7, -1, -1)])
+        return original_iterdir(self)
+
+    monkeypatch.setattr(type(backup_root), "iterdir", reversed_backup_iterdir)
+
     for index in range(8):
         name = f"backup-{index:02d}"
-        names.append(backup_create(data_dir=data_dir, backup_name=name)["backup_dir"])
+        backup_create(data_dir=data_dir, backup_name=name)
     backups = backup_list(data_dir=data_dir)["backups"]
-    assert len(backups) <= 7
+    assert len(backups) == 7
+    assert backups == [f"backup-{index:02d}" for index in range(1, 8)]
     assert "backup-00" not in backups
 
 
