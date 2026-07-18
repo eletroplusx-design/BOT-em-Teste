@@ -557,6 +557,11 @@ class OperationalPaperCampaignStatusSnapshot:
     period_end_utc: datetime | None
     created_at_utc: datetime | None
     reason: str = ""
+    cohort_hash: str | None = None
+    strategy_version: str | None = None
+    symbol: str | None = None
+    interval: str | None = None
+    inclusion_rule: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return serialize_value(
@@ -566,6 +571,11 @@ class OperationalPaperCampaignStatusSnapshot:
                 "campaign_hash": self.campaign_hash,
                 "decision_status": self.decision_status.value if self.decision_status is not None else None,
                 "report_hash": self.report_hash,
+                "cohort_hash": self.cohort_hash,
+                "strategy_version": self.strategy_version,
+                "symbol": self.symbol,
+                "interval": self.interval,
+                "inclusion_rule": self.inclusion_rule,
                 "period_start_utc": self.period_start_utc,
                 "period_end_utc": self.period_end_utc,
                 "created_at_utc": self.created_at_utc,
@@ -1277,6 +1287,11 @@ def get_operational_paper_campaign_status(
             campaign_hash=None,
             decision_status=None,
             report_hash=None,
+            cohort_hash=None,
+            strategy_version=None,
+            symbol=None,
+            interval=None,
+            inclusion_rule=None,
             period_start_utc=None,
             period_end_utc=None,
             created_at_utc=None,
@@ -1290,6 +1305,11 @@ def get_operational_paper_campaign_status(
         campaign_hash=contract.campaign_hash,
         decision_status=report.decision_status if report is not None else None,
         report_hash=report.report_hash if report is not None else None,
+        cohort_hash=contract.cohort_hash,
+        strategy_version=contract.strategy_version,
+        symbol=contract.symbol,
+        interval=contract.interval,
+        inclusion_rule=contract.inclusion_rule,
         period_start_utc=contract.period_start_utc,
         period_end_utc=contract.period_end_utc,
         created_at_utc=contract.created_at_utc,

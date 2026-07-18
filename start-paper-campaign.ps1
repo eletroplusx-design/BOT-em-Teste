@@ -292,10 +292,15 @@ function Assert-PlanConsistency {
         if ($Cohort.period_end_utc -ne $Plan.window_end_utc) { Fail 'cohort period_end_utc mismatch.' }
     }
     if ($PSBoundParameters.ContainsKey('Campaign')) {
-        Assert-ObjectHasKeys -Object $Campaign -Keys @('campaign_hash', 'campaign_id', 'campaign_state', 'period_start_utc', 'period_end_utc') -Name 'campaign'
+        Assert-ObjectHasKeys -Object $Campaign -Keys @('campaign_hash', 'campaign_id', 'campaign_state', 'cohort_hash', 'strategy_version', 'symbol', 'interval', 'inclusion_rule', 'period_start_utc', 'period_end_utc') -Name 'campaign'
         if ($Campaign.campaign_hash -ne $Plan.campaign_hash) { Fail 'campaign_hash mismatch.' }
         if ($Campaign.campaign_id -ne $Plan.campaign_id) { Fail 'campaign_id mismatch.' }
         if ($Campaign.campaign_state -notin @('PREPARED', 'RUNNING')) { Fail 'campaign state mismatch.' }
+        if ($Campaign.cohort_hash -ne $Plan.cohort_hash) { Fail 'campaign cohort_hash mismatch.' }
+        if ($Campaign.strategy_version -ne $StrategyVersion) { Fail 'campaign strategy_version mismatch.' }
+        if ($Campaign.symbol -ne $Symbol) { Fail 'campaign symbol mismatch.' }
+        if ($Campaign.interval -ne $Interval) { Fail 'campaign interval mismatch.' }
+        if ($Campaign.inclusion_rule -ne 'sqlite_all_sessions') { Fail 'campaign inclusion_rule mismatch.' }
         if ($Campaign.period_start_utc -ne $Plan.window_start_utc) { Fail 'campaign period_start_utc mismatch.' }
         if ($Campaign.period_end_utc -ne $Plan.window_end_utc) { Fail 'campaign period_end_utc mismatch.' }
     }
@@ -480,39 +485,40 @@ function Invoke-SessionStart {
         if (-not $plan.session_id) {
             Fail 'session_started state requires a persisted session_id.'
         }
-        $active = Get-ActiveRuntimeSession -DataDir $PaperDataDir
-        if ($null -eq $active) {
-            Fail 'session_started state requires an active runtime session.'
-        }
-        if ($active.session_id -ne $plan.session_id) {
-            Fail 'active runtime session does not match the persisted plan.'
-        }
-        if ($active.decision_hash -ne $plan.decision_hash) {
-            Fail 'active runtime session decision hash mismatch.'
-        }
-        if ($plan.runtime_contract_hash -and $plan.runtime_contract_hash -ne $active.contract_hash) {
-            Fail 'active runtime session contract hash mismatch.'
-        }
-        $runtimeStatus = Invoke-PaperOperations @('session', 'status', '--session-id', $active.session_id, '--data-dir', $PaperDataDir)
-        if ($runtimeStatus.state -ne 'RUNNING') {
-            Fail 'persisted runtime session is no longer running.'
-        }
+        $runtimeStatus = Invoke-PaperOperations @('session', 'status', '--session-id', $plan.session_id, '--data-dir', $PaperDataDir)
         if ($runtimeStatus.session_id -ne $plan.session_id) {
             Fail 'persisted runtime session id mismatch.'
+        }
+        switch ($runtimeStatus.state) {
+            'RUNNING' {
+            }
+            'COMPLETED' {
+                Fail 'persisted runtime session is completed.'
+            }
+            'SUSPENDED' {
+                Fail 'persisted runtime session is suspended.'
+            }
+            'FAILED' {
+                Fail 'persisted runtime session failed.'
+            }
+            default {
+                Fail 'persisted runtime session returned an unknown state.'
+            }
         }
         if ($runtimeStatus.decision_hash -ne $plan.decision_hash) {
             Fail 'persisted runtime session decision hash mismatch.'
         }
-        if ($runtimeStatus.contract_hash -ne $active.contract_hash) {
+        if ($plan.runtime_contract_hash -and $runtimeStatus.contract_hash -ne $plan.runtime_contract_hash) {
             Fail 'persisted runtime session contract hash mismatch.'
         }
         if ($plan.session_state -ne 'RUNNING') {
             $persistedPlan = $plan | ConvertTo-Json -Depth 50 | ConvertFrom-Json -Depth 50
+            $persistedPlan.status = 'SESSION_STARTED'
             $persistedPlan.session_state = 'RUNNING'
-            $persistedPlan.runtime_contract_hash = $active.contract_hash
+            $persistedPlan.runtime_contract_hash = $runtimeStatus.contract_hash
             Save-OperationalPlan -Plan $persistedPlan -Path $planPath
         }
-        Write-Host ('Session already started: {0}' -f $active.session_id)
+        Write-Host ('Session already started: {0}' -f $plan.session_id)
         Write-Host '$env:PAPER_DATA_DIR = "C:\Users\Vitor\BotTraderPaperData"'
         Write-Host 'python bot_telegram.py'
         Write-Host 'Then, in the authorized Telegram chat, send /vigia.'
@@ -533,6 +539,8 @@ function Invoke-SessionStart {
     if ($doctorReport.status -ne 'READY') {
         Fail 'doctor is not ready.'
     }
+    Assert-StrictBool -Value $doctorReport.local_operations_ready -Name 'doctor.local_operations_ready' -Expected:$true
+    Assert-StrictBool -Value $doctorReport.bot_runtime_ready -Name 'doctor.bot_runtime_ready' -Expected:$true
     Assert-StrictBool -Value $backupVerify.verified -Name 'backup.verified' -Expected:$true
     Assert-StrictBool -Value $restoreVerify.verified -Name 'restore.verified' -Expected:$true
     Assert-PlanConsistency -Plan $plan -Reference $reference -Decision $decision -Cohort $cohort -Campaign $campaign -BackupVerify $backupVerify -RestoreVerify $restoreVerify -BindingHash $binding.binding_hash
@@ -580,6 +588,7 @@ function Invoke-SessionStart {
             Fail 'recovered runtime session contract hash mismatch.'
         }
         $recoveredPlan = $plan | ConvertTo-Json -Depth 50 | ConvertFrom-Json -Depth 50
+        $recoveredPlan.status = 'SESSION_STARTED'
         $recoveredPlan.session_id = $active.session_id
         $recoveredPlan.session_state = 'RUNNING'
         $recoveredPlan.runtime_contract_hash = $active.contract_hash

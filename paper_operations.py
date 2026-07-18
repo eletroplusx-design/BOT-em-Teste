@@ -142,6 +142,18 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _require_campaign_window_open(contract: Any, *, now: datetime | None = None) -> datetime:
+    current = _utcnow() if now is None else now
+    if current.tzinfo is None or current.utcoffset() is None:
+        raise PaperOperationsError("session start clock must be timezone-aware.")
+    current = current.astimezone(timezone.utc)
+    if current < contract.period_start_utc:
+        raise PaperOperationsError("campaign window has not started yet.")
+    if current >= contract.period_end_utc:
+        raise PaperOperationsError("campaign window has already ended.")
+    return current
+
+
 def _load_json_file(path: str | Path, *, label: str) -> dict[str, Any]:
     file_path = Path(path)
     if not file_path.exists():
@@ -1594,11 +1606,12 @@ def session_start(
         )
         if existing_binding.as_dict() != binding.as_dict():
             raise PaperOperationsError("campaign decision binding mismatch.")
+        now = _require_campaign_window_open(contract)
         session_id = new_session_id()
         session = create_monitored_session(
             decision,
             session_id=session_id,
-            session_started_utc=datetime.now(timezone.utc),
+            session_started_utc=now,
             store=_runtime_store_for(data_dir),
         )
     return {"session_id": session.record.session_id if session is not None else session_id, "state": session.record.state.value if session is not None else "N/A"}

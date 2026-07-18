@@ -19,6 +19,8 @@ from domain import Candle
 from domain.serialization import serialize_value
 from market_data import candles_to_market_snapshot
 from paper_evaluation import PaperEvaluationPolicy
+import paper_evaluation._operational as paper_eval_ops
+import paper_evaluation.campaign as paper_eval_campaign
 from paper_evaluation._operational import OperationalCohortContract
 from paper_evaluation.errors import PaperCampaignManifestError, PaperCampaignReadError
 from paper_evaluation.artifacts import paper_evaluation_hash
@@ -641,8 +643,12 @@ def _prepare_test_only_local_operations_fixture(tmp_path: Path, monkeypatch, sam
     campaign_policy_file = tmp_path / "campaign_policy.json"
     _write_json(campaign_policy_file, PaperEvaluationPolicy().as_dict())
     now = datetime.now(timezone.utc).replace(microsecond=0)
-    period_start = now + timedelta(days=1)
+    period_start = now - timedelta(minutes=1)
     period_end = period_start + timedelta(days=1)
+    contract_created_at = period_start - timedelta(hours=1)
+    runtime_now = now
+    monkeypatch.setattr(paper_eval_ops, "_utcnow", lambda: contract_created_at)
+    monkeypatch.setattr(paper_eval_campaign, "_utcnow", lambda: contract_created_at)
     cohort = cohort_prepare(
         strategy_version="v4_walk_forward",
         symbol="BTCUSDT",
@@ -672,6 +678,9 @@ def _prepare_test_only_local_operations_fixture(tmp_path: Path, monkeypatch, sam
         campaign_db=data_dir / "paper_evaluation_campaign.db",
         data_dir=data_dir,
     )
+    monkeypatch.setattr(paper_eval_ops, "_utcnow", lambda: runtime_now)
+    monkeypatch.setattr(paper_eval_campaign, "_utcnow", lambda: runtime_now)
+    monkeypatch.setattr(paper_ops, "_utcnow", lambda: runtime_now)
     reference_payload = json.loads(reference_output.read_text(encoding="utf-8"))
     return {
         "data_dir": data_dir,
@@ -1037,6 +1046,30 @@ def test_session_start_holds_lock_during_loading_and_creation(tmp_path, monkeypa
     assert session["state"] == "RUNNING"
 
 
+def test_session_start_blocks_outside_campaign_window_before_creating_session(tmp_path, monkeypatch, sample_btc_data):
+    flow = _prepare_test_only_local_operations_fixture(tmp_path, monkeypatch, sample_btc_data)
+    data_dir = flow["data_dir"]
+    contract = paper_ops.load_operational_paper_campaign_contract(data_dir / "paper_evaluation_campaign.db", campaign_id=flow["campaign_id"])
+    monkeypatch.setattr(paper_ops, "_utcnow", lambda: contract.period_end_utc + timedelta(seconds=1))
+
+    created = {"called": False}
+
+    def _boom(*args, **kwargs):
+        created["called"] = True
+        raise AssertionError("create_monitored_session should not run outside the campaign window.")
+
+    monkeypatch.setattr(paper_ops, "create_monitored_session", _boom)
+
+    with pytest.raises(PaperOperationsError, match="campaign window has already ended."):
+        session_start(
+            campaign_id=flow["campaign_id"],
+            decision_file=flow["decision_file"],
+            campaign_db=data_dir / "paper_evaluation_campaign.db",
+            data_dir=data_dir,
+        )
+    assert created["called"] is False
+
+
 def test_promotion_decision_requires_status_and_session_start_fails_closed(tmp_path, monkeypatch, sample_btc_data):
     flow = _prepare_test_only_local_operations_fixture(tmp_path, monkeypatch, sample_btc_data)
     data_dir = flow["data_dir"]
@@ -1201,6 +1234,8 @@ def test_start_campaign_script_contains_session_active_recovery_and_atomic_write
     assert "backup verify" in script
     assert "restore verify" in script
     assert "doctor is not ready." in script
+    assert "doctor.local_operations_ready" in script
+    assert "doctor.bot_runtime_ready" in script
     assert "backup.verified" in script
     assert "restore.verified" in script
     assert "campaign window has not started yet." in script
@@ -1208,13 +1243,20 @@ def test_start_campaign_script_contains_session_active_recovery_and_atomic_write
     assert "session_starting state requires an active runtime session for recovery." in script
     assert "session_started state requires a persisted session_id." in script
     assert "Session already started:" in script
+    assert "Invoke-PaperOperations @('session', 'status', '--session-id', $plan.session_id" in script
     assert "session start did not result in a running session." in script
     assert "session start revalidation failed." in script
     assert "active runtime session decision hash mismatch." in script
     assert "persisted runtime session decision hash mismatch." in script
     assert "recoveredPlan.session_state = 'RUNNING'" in script
+    assert "recoveredPlan.status = 'SESSION_STARTED'" in script
     assert "cohort hash mismatch." in script
     assert "campaign hash mismatch." in script
+    assert "campaign cohort_hash mismatch." in script
+    assert "campaign strategy_version mismatch." in script
+    assert "campaign symbol mismatch." in script
+    assert "campaign interval mismatch." in script
+    assert "campaign inclusion_rule mismatch." in script
     assert "binding_hash mismatch." in script
     assert "Recovered active session" in script
 
