@@ -15,6 +15,8 @@ from .errors import (
 
 class BinancePublicKlinesProvider:
     base_url = "https://api.binance.com/api/v3/klines"
+    trusted_market_data_provider = True
+    provider_identity = "binance.public.klines"
 
     def __init__(self, *, timeout: tuple[float, float] = (5.0, 10.0), session: requests.sessions.Session | None = None):
         self.timeout = timeout

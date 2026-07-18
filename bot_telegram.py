@@ -81,6 +81,7 @@ from storage import (
     reset_db as storage_reset_db,
     salvar_trade as storage_salvar_trade,
 )
+from config import resolve_trades_db_path
 try:
     from risk_manager import (
         calcular_tamanho_posicao,
@@ -164,7 +165,7 @@ def requer_autorizacao(func):
 DIRECAO, RESULTADO, SCORE, LUCRO, RR = range(5)
 
 # ---------- Banco de Dados ----------
-DB_NAME = "trades.db"
+DB_NAME = str(resolve_trades_db_path())
 
 @requer_autorizacao
 async def validar_sol(update: Update, context: ContextTypes.DEFAULT_TYPE):

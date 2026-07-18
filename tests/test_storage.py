@@ -89,20 +89,20 @@ def test_buscar_ultimos_e_ultimo_decision_logs(monkeypatch, temp_db_path):
             bloqueado_por="N/A",
         )
 
-    logs = storage.buscar_ultimos_decision_logs(limite=2)
+    logs = storage.buscar_ultimos_decision_logs(limite=2, db_name=temp_db_path)
     assert len(logs) == 2
     assert logs[0]["symbol"] == "BTC3"
     assert logs[1]["symbol"] == "BTC2"
 
-    filtrados = storage.buscar_ultimos_decision_logs(limite=5, modos=["TESTE"])
+    filtrados = storage.buscar_ultimos_decision_logs(limite=5, modos=["TESTE"], db_name=temp_db_path)
     assert all(log["modo"] == "TESTE" for log in filtrados)
-    assert storage.buscar_ultimo_decision_log(modos=["TESTE"])["symbol"] == "BTC2"
+    assert storage.buscar_ultimos_decision_logs(limite=1, modos=["TESTE"], db_name=temp_db_path)[0]["symbol"] == "BTC2"
 
 
 def test_buscar_logs_vazios_e_falha(monkeypatch, temp_db_path):
     _setup_db(monkeypatch, temp_db_path)
-    assert storage.buscar_ultimos_decision_logs(limite=5) == []
-    assert storage.buscar_ultimo_decision_log() is None
+    assert storage.buscar_ultimos_decision_logs(limite=5, db_name=temp_db_path) == []
+    assert storage.buscar_ultimos_decision_logs(limite=1, db_name=temp_db_path) == []
 
     class FakeConn:
         def __enter__(self):
@@ -112,7 +112,7 @@ def test_buscar_logs_vazios_e_falha(monkeypatch, temp_db_path):
             return False
 
     monkeypatch.setattr(storage.sqlite3, "connect", lambda *args, **kwargs: FakeConn())
-    assert storage.buscar_ultimos_decision_logs(limite=5) == []
+    assert storage.buscar_ultimos_decision_logs(limite=5, db_name=temp_db_path) == []
 
 
 def test_leituras_estritas_lancam_erro_em_falha_sqlite(monkeypatch, temp_db_path):

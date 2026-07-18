@@ -6,8 +6,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from config import resolve_trades_db_path
 
-DB_NAME = "trades.db"
+
+DB_NAME = str(resolve_trades_db_path())
 STRATEGY_VERSION_DEFAULT = "v2_risk_safe"
 
 
@@ -636,25 +638,43 @@ def atualizar_outbox_paper_trade(
         return False
 
 
-def buscar_ultimos_decision_logs(limite=10, modos=None):
+def buscar_ultimos_decision_logs(limite=10, modos=None, db_name=DB_NAME, strict=False):
     try:
-        criar_tabelas()
-        with sqlite3.connect(DB_NAME) as conn:
-            cursor = conn.cursor()
-            query = (
-                "SELECT id, timestamp, symbol, modo, decisao, direcao, preco, regime, adx, "
-                "volume_status, motivo, bloqueado_por, fonte_dados, erro, strategy_version "
-                "FROM decision_logs"
-            )
-            parametros = []
-            if modos:
-                modos = list(modos)
-                placeholders = ",".join("?" for _ in modos)
-                query += f" WHERE modo IN ({placeholders})"
-                parametros.extend(modos)
-            query += " ORDER BY timestamp DESC LIMIT ?"
-            parametros.append(limite)
-            rows = cursor.execute(query, parametros).fetchall()
+        if strict:
+            with _abrir_conexao_leitura_strita(db_name) as conn:
+                cursor = conn.cursor()
+                query = (
+                    "SELECT id, timestamp, symbol, modo, decisao, direcao, preco, regime, adx, "
+                    "volume_status, motivo, bloqueado_por, fonte_dados, erro, strategy_version "
+                    "FROM decision_logs"
+                )
+                parametros = []
+                if modos:
+                    modos = list(modos)
+                    placeholders = ",".join("?" for _ in modos)
+                    query += f" WHERE modo IN ({placeholders})"
+                    parametros.extend(modos)
+                query += " ORDER BY timestamp DESC LIMIT ?"
+                parametros.append(limite)
+                rows = cursor.execute(query, parametros).fetchall()
+        else:
+            criar_tabelas(db_name)
+            with sqlite3.connect(db_name) as conn:
+                cursor = conn.cursor()
+                query = (
+                    "SELECT id, timestamp, symbol, modo, decisao, direcao, preco, regime, adx, "
+                    "volume_status, motivo, bloqueado_por, fonte_dados, erro, strategy_version "
+                    "FROM decision_logs"
+                )
+                parametros = []
+                if modos:
+                    modos = list(modos)
+                    placeholders = ",".join("?" for _ in modos)
+                    query += f" WHERE modo IN ({placeholders})"
+                    parametros.extend(modos)
+                query += " ORDER BY timestamp DESC LIMIT ?"
+                parametros.append(limite)
+                rows = cursor.execute(query, parametros).fetchall()
         return [
             {
                 "id": row[0],
@@ -676,8 +696,7 @@ def buscar_ultimos_decision_logs(limite=10, modos=None):
             for row in rows
         ]
     except Exception as exc:
-        logging.warning(f"Falha ao buscar decision_logs: {exc}")
-        return []
+        return _tratar_falha_leitura_storage("Falha ao buscar decision_logs", exc, strict=strict)
 
 
 def buscar_ultimo_decision_log(modos=None):
@@ -1416,3 +1435,16 @@ def registrar_validacao_sol(total_trades, profit_factor, win_rate, drawdown_max,
     except Exception as exc:
         logging.warning(f"Falha ao registrar validacao SOL: {exc}")
         return False
+
+
+def _ensure_default_storage_ready() -> None:
+    default_path = Path(DB_NAME)
+    try:
+        default_path.parent.mkdir(parents=True, exist_ok=True)
+        criar_tabelas(str(default_path))
+        inicializar_banco(str(default_path))
+    except Exception as exc:  # pragma: no cover - best effort bootstrap
+        logging.warning(f"Falha ao inicializar storage padrao: {exc.__class__.__name__}")
+
+
+_ensure_default_storage_ready()

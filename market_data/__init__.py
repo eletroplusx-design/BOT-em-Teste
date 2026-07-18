@@ -10,7 +10,7 @@ from .errors import (
 )
 from .normalization import candles_to_dataframe, candles_to_market_snapshot, candles_to_legacy_dataframe
 from .provider import BinancePublicKlinesProvider
-from .service import MarketDataPackage, TrustedMarketDataService, trusted_market_data_service
+from .service import MarketDataPackage, MarketDataProvenance, TrustedMarketDataService, trusted_market_data_service
 from .validation import (
     ALLOWED_INTERVALS,
     validate_klines_payload,
@@ -32,6 +32,7 @@ __all__ = [
     "MarketDataRateLimitError",
     "MarketDataValidationError",
     "MarketDataPackage",
+    "MarketDataProvenance",
     "TrustedMarketDataService",
     "candles_to_dataframe",
     "candles_to_market_snapshot",

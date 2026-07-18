@@ -117,6 +117,10 @@ class PromotionDecision:
             raise PromotionDecisionError("decision_hash is required.")
         if self.paper_limits_hash != promotion_hash(self.paper_limits):
             raise PromotionDecisionError("paper_limits hash mismatch.")
+        payload = self.as_hash_payload(include_hash=False)
+        canonical_hash = promotion_hash(payload)
+        if self.decision_hash != canonical_hash:
+            raise PromotionDecisionError("decision hash mismatch.")
         if self.status == PromotionStatus.APPROVED_FOR_MONITORED_PAPER:
             if not self.criteria_evaluated:
                 raise PromotionDecisionError("approved decisions require evaluated criteria.")
@@ -129,6 +133,24 @@ class PromotionDecision:
             for key, expected in required_flags.items():
                 if self.paper_limits.get(key) is not expected:
                     raise PromotionDecisionError(f"{key} must be {expected}.")
+
+    def as_hash_payload(self, *, include_hash: bool = True) -> dict[str, Any]:
+        payload = {
+            "status": self.status.value,
+            "frozen_selection": self.frozen_selection.as_dict(),
+            "strategy_version": self.strategy_version,
+            "symbol": self.symbol,
+            "interval": self.interval,
+            "evidence_hash": self.evidence_hash,
+            "policy_hash": self.policy_hash,
+            "criteria_evaluated": [criterion.as_dict() for criterion in self.criteria_evaluated],
+            "reasons": list(self.reasons),
+            "recalculated_metrics": self.recalculated_metrics,
+            "paper_limits": self.paper_limits,
+        }
+        if include_hash:
+            payload["decision_hash"] = self.decision_hash
+        return payload
 
     def as_dict(self) -> dict[str, Any]:
         return {

@@ -15,6 +15,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
+from config import resolve_paper_campaign_db_path, resolve_paper_runtime_db_path, resolve_trades_db_path
 from domain.serialization import serialize_value
 from validation import WalkForwardResult
 from validation.artifacts import manifest_hash as validation_manifest_hash
@@ -59,6 +60,13 @@ def _require_datetime(value: Any, field_name: str) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise PaperCampaignManifestError(f"{field_name} must be timezone-aware.")
     return value.astimezone(timezone.utc)
+
+
+def _require_hash(value: Any, field_name: str) -> str:
+    result = _require_str(value, field_name)
+    if len(result) < 8:
+        raise PaperCampaignManifestError(f"{field_name} is invalid.")
+    return result
 
 
 def _require_decimal(value: Any, field_name: str, *, allow_negative: bool = False) -> Decimal:
@@ -405,6 +413,88 @@ class OperationalPaperCampaignContract:
 
 
 @dataclass(frozen=True, slots=True)
+class OperationalCampaignDecisionBinding:
+    campaign_hash: str
+    campaign_id: str
+    decision_hash: str
+    reference_hash: str
+    evidence_hash: str
+    manifest_hash: str
+    result_hash: str
+    promotion_policy_hash: str
+    campaign_policy_hash: str
+    paper_limits_hash: str
+    frozen_selection_hash: str
+    cohort_hash: str
+    strategy_version: str
+    symbol: str
+    interval: str
+    evidence_class: str
+    created_at_utc: datetime
+    payload_hash: str
+    payload_json: Mapping[str, Any]
+    binding_hash: str = field(default="", compare=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "campaign_hash", _require_hash(self.campaign_hash, "campaign_hash"))
+        object.__setattr__(self, "campaign_id", _require_str(self.campaign_id, "campaign_id"))
+        object.__setattr__(self, "decision_hash", _require_hash(self.decision_hash, "decision_hash"))
+        object.__setattr__(self, "reference_hash", _require_hash(self.reference_hash, "reference_hash"))
+        object.__setattr__(self, "evidence_hash", _require_hash(self.evidence_hash, "evidence_hash"))
+        object.__setattr__(self, "manifest_hash", _require_hash(self.manifest_hash, "manifest_hash"))
+        object.__setattr__(self, "result_hash", _require_hash(self.result_hash, "result_hash"))
+        object.__setattr__(self, "promotion_policy_hash", _require_hash(self.promotion_policy_hash, "promotion_policy_hash"))
+        object.__setattr__(self, "campaign_policy_hash", _require_hash(self.campaign_policy_hash, "campaign_policy_hash"))
+        object.__setattr__(self, "paper_limits_hash", _require_hash(self.paper_limits_hash, "paper_limits_hash"))
+        object.__setattr__(self, "frozen_selection_hash", _require_hash(self.frozen_selection_hash, "frozen_selection_hash"))
+        object.__setattr__(self, "cohort_hash", _require_hash(self.cohort_hash, "cohort_hash"))
+        object.__setattr__(self, "strategy_version", _require_str(self.strategy_version, "strategy_version"))
+        object.__setattr__(self, "symbol", _require_str(self.symbol, "symbol"))
+        object.__setattr__(self, "interval", _require_str(self.interval, "interval"))
+        object.__setattr__(self, "evidence_class", _require_str(self.evidence_class, "evidence_class"))
+        object.__setattr__(self, "created_at_utc", _require_datetime(self.created_at_utc, "created_at_utc"))
+        object.__setattr__(self, "payload_json", dict(self.payload_json))
+        payload_hash = _require_hash(self.payload_hash, "payload_hash")
+        object.__setattr__(self, "payload_hash", payload_hash)
+        if self.payload_hash != paper_evaluation_hash(serialize_value(dict(self.payload_json))):
+            raise PaperCampaignManifestError("payload hash mismatch.")
+        payload_for_hash = self.as_hash_payload(include_hash=False)
+        binding_hash = self.binding_hash or paper_evaluation_hash(payload_for_hash)
+        object.__setattr__(self, "binding_hash", _require_hash(binding_hash, "binding_hash"))
+        if self.binding_hash != paper_evaluation_hash(payload_for_hash):
+            raise PaperCampaignManifestError("binding hash mismatch.")
+
+    def as_hash_payload(self, *, include_hash: bool = True) -> dict[str, Any]:
+        payload = {
+            "campaign_hash": self.campaign_hash,
+            "campaign_id": self.campaign_id,
+            "decision_hash": self.decision_hash,
+            "reference_hash": self.reference_hash,
+            "evidence_hash": self.evidence_hash,
+            "manifest_hash": self.manifest_hash,
+            "result_hash": self.result_hash,
+            "promotion_policy_hash": self.promotion_policy_hash,
+            "campaign_policy_hash": self.campaign_policy_hash,
+            "paper_limits_hash": self.paper_limits_hash,
+            "frozen_selection_hash": self.frozen_selection_hash,
+            "cohort_hash": self.cohort_hash,
+            "strategy_version": self.strategy_version,
+            "symbol": self.symbol,
+            "interval": self.interval,
+            "evidence_class": self.evidence_class,
+            "created_at_utc": self.created_at_utc.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "payload_hash": self.payload_hash,
+            "payload_json": serialize_value(dict(self.payload_json)),
+        }
+        if include_hash:
+            payload["binding_hash"] = self.binding_hash
+        return payload
+
+    def as_dict(self) -> dict[str, Any]:
+        return serialize_value(self.as_hash_payload())
+
+
+@dataclass(frozen=True, slots=True)
 class OperationalPaperCampaignReport:
     contract: OperationalPaperCampaignContract
     campaign_state: OperationalPaperCampaignState
@@ -504,6 +594,29 @@ _CAMPAIGN_REQUIRED_COLUMNS = {
     "payload_json",
 }
 
+_CAMPAIGN_BINDING_REQUIRED_COLUMNS = {
+    "binding_hash",
+    "campaign_hash",
+    "campaign_id",
+    "decision_hash",
+    "reference_hash",
+    "evidence_hash",
+    "manifest_hash",
+    "result_hash",
+    "promotion_policy_hash",
+    "campaign_policy_hash",
+    "paper_limits_hash",
+    "frozen_selection_hash",
+    "cohort_hash",
+    "strategy_version",
+    "symbol",
+    "interval",
+    "evidence_class",
+    "created_at_utc",
+    "payload_hash",
+    "payload_json",
+}
+
 _CAMPAIGN_REPORT_REQUIRED_COLUMNS = {
     "campaign_hash",
     "campaign_state",
@@ -539,53 +652,248 @@ def _connect_ro(db_path: str | Path):
             pass
 
 
+def _migrate_operational_campaign_decision_bindings(conn: sqlite3.Connection) -> None:
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(operational_campaign_decision_bindings)")}
+    if "payload_hash" not in columns:
+        conn.execute("ALTER TABLE operational_campaign_decision_bindings ADD COLUMN payload_hash TEXT")
+    rows = conn.execute(
+        """
+        SELECT rowid, binding_hash, campaign_hash, campaign_id, decision_hash, reference_hash, evidence_hash,
+               manifest_hash, result_hash, promotion_policy_hash, campaign_policy_hash, paper_limits_hash,
+               frozen_selection_hash, cohort_hash, strategy_version, symbol, interval, evidence_class, created_at_utc,
+               payload_hash, payload_json
+        FROM operational_campaign_decision_bindings
+        ORDER BY created_at_utc, binding_hash
+        """
+    ).fetchall()
+    for row in rows:
+        try:
+            stored_payload = json.loads(row["payload_json"]) if row["payload_json"] else None
+            if not isinstance(stored_payload, Mapping):
+                raise PaperCampaignReadError("campaign decision binding payload mismatch.")
+            legacy_payload = "payload_hash" not in stored_payload or row["payload_hash"] in (None, "")
+            if legacy_payload:
+                legacy_hash_payload = dict(stored_payload)
+                legacy_hash_payload.pop("payload_json", None)
+                if paper_evaluation_hash(serialize_value(legacy_hash_payload)) != row["binding_hash"]:
+                    raise PaperCampaignReadError("campaign decision binding payload hash mismatch.")
+                payload_json = stored_payload.get("payload_json")
+                if not isinstance(payload_json, Mapping):
+                    raise PaperCampaignReadError("campaign decision binding payload mismatch.")
+                contract_payload = payload_json.get("contract")
+                decision_payload = payload_json.get("decision")
+                if not isinstance(contract_payload, Mapping) or not isinstance(decision_payload, Mapping):
+                    raise PaperCampaignReadError("campaign decision binding payload mismatch.")
+                expected_contract_fields = {
+                    "campaign_hash": row["campaign_hash"],
+                    "campaign_id": row["campaign_id"],
+                    "cohort_hash": row["cohort_hash"],
+                    "strategy_version": row["strategy_version"],
+                    "symbol": row["symbol"],
+                    "interval": row["interval"],
+                    "policy_hash": row["campaign_policy_hash"],
+                    "walk_forward_manifest_hash": row["manifest_hash"],
+                    "walk_forward_result_hash": row["result_hash"],
+                }
+                for field, expected_value in expected_contract_fields.items():
+                    if str(contract_payload.get(field)) != str(expected_value):
+                        raise PaperCampaignReadError("campaign decision binding payload mismatch.")
+                expected_decision_fields = {
+                    "decision_hash": row["decision_hash"],
+                    "evidence_hash": row["evidence_hash"],
+                    "policy_hash": row["promotion_policy_hash"],
+                    "paper_limits_hash": row["paper_limits_hash"],
+                    "strategy_version": row["strategy_version"],
+                    "symbol": row["symbol"],
+                    "interval": row["interval"],
+                }
+                for field, expected_value in expected_decision_fields.items():
+                    if str(decision_payload.get(field)) != str(expected_value):
+                        raise PaperCampaignReadError("campaign decision binding payload mismatch.")
+                frozen_selection = decision_payload.get("frozen_selection")
+                if not isinstance(frozen_selection, Mapping):
+                    raise PaperCampaignReadError("campaign decision binding payload mismatch.")
+                if validation_manifest_hash(frozen_selection) != row["frozen_selection_hash"]:
+                    raise PaperCampaignReadError("campaign decision binding payload mismatch.")
+                payload_hash = paper_evaluation_hash(serialize_value(dict(payload_json)))
+                binding = OperationalCampaignDecisionBinding(
+                    binding_hash="",
+                    campaign_hash=row["campaign_hash"],
+                    campaign_id=row["campaign_id"],
+                    decision_hash=row["decision_hash"],
+                    reference_hash=row["reference_hash"],
+                    evidence_hash=row["evidence_hash"],
+                    manifest_hash=row["manifest_hash"],
+                    result_hash=row["result_hash"],
+                    promotion_policy_hash=row["promotion_policy_hash"],
+                    campaign_policy_hash=row["campaign_policy_hash"],
+                    paper_limits_hash=row["paper_limits_hash"],
+                    frozen_selection_hash=row["frozen_selection_hash"],
+                    cohort_hash=row["cohort_hash"],
+                    strategy_version=row["strategy_version"],
+                    symbol=row["symbol"],
+                    interval=row["interval"],
+                    evidence_class=row["evidence_class"],
+                    created_at_utc=datetime.fromisoformat(str(row["created_at_utc"]).replace("Z", "+00:00")),
+                    payload_hash=payload_hash,
+                    payload_json=payload_json,
+                )
+                expected_payload = binding.as_hash_payload(include_hash=False)
+                if expected_payload["payload_json"] != serialize_value(dict(payload_json)):
+                    raise PaperCampaignReadError("campaign decision binding payload mismatch.")
+                normalized_payload_json = json.dumps(expected_payload, ensure_ascii=False, sort_keys=True)
+                conn.execute(
+                    "UPDATE operational_campaign_decision_bindings SET binding_hash = ?, payload_hash = ?, payload_json = ? WHERE rowid = ?",
+                    (binding.binding_hash, binding.payload_hash, normalized_payload_json, row["rowid"]),
+                )
+                migrated = conn.execute(
+                    "SELECT * FROM operational_campaign_decision_bindings WHERE rowid = ?",
+                    (row["rowid"],),
+                ).fetchone()
+                if migrated is None:
+                    raise PaperCampaignReadError("campaign decision binding migration failed.")
+                _binding_from_row(migrated)
+                continue
+            payload_json = stored_payload.get("payload_json")
+            if not isinstance(payload_json, Mapping):
+                raise PaperCampaignReadError("campaign decision binding payload mismatch.")
+            contract_payload = payload_json.get("contract")
+            decision_payload = payload_json.get("decision")
+            if not isinstance(contract_payload, Mapping) or not isinstance(decision_payload, Mapping):
+                raise PaperCampaignReadError("campaign decision binding payload mismatch.")
+            for field in ("campaign_hash", "campaign_id", "cohort_hash", "strategy_version", "symbol", "interval"):
+                if str(contract_payload.get(field)) != str(row[field]):
+                    raise PaperCampaignReadError("campaign decision binding payload mismatch.")
+            for field in ("decision_hash", "evidence_hash", "paper_limits_hash", "strategy_version", "symbol", "interval"):
+                if str(decision_payload.get(field)) != str(row[field]):
+                    raise PaperCampaignReadError("campaign decision binding payload mismatch.")
+            binding = OperationalCampaignDecisionBinding(
+                binding_hash=row["binding_hash"],
+                campaign_hash=row["campaign_hash"],
+                campaign_id=row["campaign_id"],
+                decision_hash=row["decision_hash"],
+                reference_hash=row["reference_hash"],
+                evidence_hash=row["evidence_hash"],
+                manifest_hash=row["manifest_hash"],
+                result_hash=row["result_hash"],
+                promotion_policy_hash=row["promotion_policy_hash"],
+                campaign_policy_hash=row["campaign_policy_hash"],
+                paper_limits_hash=row["paper_limits_hash"],
+                frozen_selection_hash=row["frozen_selection_hash"],
+                cohort_hash=row["cohort_hash"],
+                strategy_version=row["strategy_version"],
+                symbol=row["symbol"],
+                interval=row["interval"],
+                evidence_class=row["evidence_class"],
+                created_at_utc=datetime.fromisoformat(str(row["created_at_utc"]).replace("Z", "+00:00")),
+                payload_hash=paper_evaluation_hash(serialize_value(dict(payload_json))),
+                payload_json=payload_json,
+            )
+            expected_payload = binding.as_hash_payload(include_hash=False)
+            normalized_payload = dict(stored_payload)
+            normalized_payload["payload_hash"] = binding.payload_hash
+            if normalized_payload != expected_payload:
+                raise PaperCampaignReadError("campaign decision binding payload mismatch.")
+            normalized_payload_json = json.dumps(expected_payload, ensure_ascii=False, sort_keys=True)
+            if row["binding_hash"] != binding.binding_hash or row["payload_hash"] != binding.payload_hash or row["payload_json"] != normalized_payload_json:
+                raise PaperCampaignReadError("campaign decision binding payload hash mismatch.")
+        except PaperCampaignReadError:
+            raise
+        except Exception as exc:
+            raise PaperCampaignReadError("campaign decision binding migration failed.") from exc
+
+
 def ensure_operational_paper_campaign_schema(db_path: str | Path) -> None:
     with _connect_rw(db_path) as conn:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS paper_evaluation_campaign_contracts (
-                campaign_hash TEXT PRIMARY KEY,
-                campaign_id TEXT NOT NULL UNIQUE,
-                cohort_hash TEXT NOT NULL,
-                strategy_version TEXT NOT NULL,
-                symbol TEXT NOT NULL,
-                interval TEXT NOT NULL,
-                inclusion_rule TEXT NOT NULL,
-                period_start_utc TEXT NOT NULL,
-                period_end_utc TEXT NOT NULL,
-                policy_payload_json TEXT NOT NULL,
-                reference_payload_json TEXT NOT NULL,
-                policy_hash TEXT NOT NULL,
-                walk_forward_manifest_hash TEXT NOT NULL,
-                walk_forward_result_hash TEXT NOT NULL,
-                evaluator_version TEXT NOT NULL,
-                created_at_utc TEXT NOT NULL,
-                payload_json TEXT NOT NULL
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS paper_evaluation_campaign_contracts (
+                    campaign_hash TEXT PRIMARY KEY,
+                    campaign_id TEXT NOT NULL UNIQUE,
+                    cohort_hash TEXT NOT NULL,
+                    strategy_version TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    interval TEXT NOT NULL,
+                    inclusion_rule TEXT NOT NULL,
+                    period_start_utc TEXT NOT NULL,
+                    period_end_utc TEXT NOT NULL,
+                    policy_payload_json TEXT NOT NULL,
+                    reference_payload_json TEXT NOT NULL,
+                    policy_hash TEXT NOT NULL,
+                    walk_forward_manifest_hash TEXT NOT NULL,
+                    walk_forward_result_hash TEXT NOT NULL,
+                    evaluator_version TEXT NOT NULL,
+                    created_at_utc TEXT NOT NULL,
+                    payload_json TEXT NOT NULL
+                )
+                """
             )
-            """
-        )
-        conn.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_campaign_contracts_id ON paper_evaluation_campaign_contracts(campaign_id)"
-        )
-        conn.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_campaign_contracts_window ON paper_evaluation_campaign_contracts(strategy_version, symbol, interval, inclusion_rule, period_start_utc, period_end_utc)"
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS paper_evaluation_campaign_reports (
-                campaign_hash TEXT PRIMARY KEY,
-                campaign_state TEXT NOT NULL,
-                decision_status TEXT NOT NULL,
-                operational_evidence INTEGER NOT NULL,
-                report_json TEXT NOT NULL,
-                report_hash TEXT NOT NULL,
-                evaluated_at_utc TEXT NOT NULL
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_campaign_contracts_id ON paper_evaluation_campaign_contracts(campaign_id)"
             )
-            """
-        )
-        conn.commit()
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_campaign_contracts_window ON paper_evaluation_campaign_contracts(strategy_version, symbol, interval, inclusion_rule, period_start_utc, period_end_utc)"
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS operational_campaign_decision_bindings (
+                    binding_hash TEXT PRIMARY KEY,
+                    campaign_hash TEXT NOT NULL UNIQUE,
+                    campaign_id TEXT NOT NULL UNIQUE,
+                    decision_hash TEXT NOT NULL UNIQUE,
+                    reference_hash TEXT NOT NULL UNIQUE,
+                    evidence_hash TEXT NOT NULL,
+                    manifest_hash TEXT NOT NULL,
+                    result_hash TEXT NOT NULL,
+                    promotion_policy_hash TEXT NOT NULL,
+                    campaign_policy_hash TEXT NOT NULL,
+                    paper_limits_hash TEXT NOT NULL,
+                    frozen_selection_hash TEXT NOT NULL,
+                    cohort_hash TEXT NOT NULL,
+                    strategy_version TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    interval TEXT NOT NULL,
+                    evidence_class TEXT NOT NULL,
+                    created_at_utc TEXT NOT NULL,
+                    payload_hash TEXT NOT NULL,
+                    payload_json TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_campaign_decision_bindings_campaign_hash ON operational_campaign_decision_bindings(campaign_hash)"
+            )
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_campaign_decision_bindings_campaign_id ON operational_campaign_decision_bindings(campaign_id)"
+            )
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_campaign_decision_bindings_decision_hash ON operational_campaign_decision_bindings(decision_hash)"
+            )
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_campaign_decision_bindings_reference_hash ON operational_campaign_decision_bindings(reference_hash)"
+            )
+            _migrate_operational_campaign_decision_bindings(conn)
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS paper_evaluation_campaign_reports (
+                    campaign_hash TEXT PRIMARY KEY,
+                    campaign_state TEXT NOT NULL,
+                    decision_status TEXT NOT NULL,
+                    operational_evidence INTEGER NOT NULL,
+                    report_json TEXT NOT NULL,
+                    report_hash TEXT NOT NULL,
+                    evaluated_at_utc TEXT NOT NULL
+                )
+                """
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
 
 
 def _campaign_from_row(row: sqlite3.Row) -> OperationalPaperCampaignContract:
@@ -610,8 +918,126 @@ def _campaign_from_row(row: sqlite3.Row) -> OperationalPaperCampaignContract:
         )
     stored_payload = json.loads(row["payload_json"]) if row["payload_json"] else None
     if stored_payload != contract.as_dict():
-        raise PaperCampaignReadError("campaign payload mismatch.")
+            raise PaperCampaignReadError("campaign payload mismatch.")
     return contract
+
+
+def persist_operational_campaign_decision_binding(db_path: str | Path, binding: OperationalCampaignDecisionBinding) -> OperationalCampaignDecisionBinding:
+    ensure_operational_paper_campaign_schema(db_path)
+    payload = json.dumps(binding.as_hash_payload(include_hash=False), ensure_ascii=False, sort_keys=True)
+    existing = load_operational_campaign_decision_binding(db_path, campaign_hash=binding.campaign_hash)
+    if existing is not None:
+        if existing.as_dict() == binding.as_dict():
+            return existing
+        raise PaperCampaignManifestError("campaign decision binding already exists.")
+    with _connect_rw(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute(
+                """
+                INSERT INTO operational_campaign_decision_bindings (
+                    binding_hash, campaign_hash, campaign_id, decision_hash, reference_hash, evidence_hash,
+                    manifest_hash, result_hash, promotion_policy_hash, campaign_policy_hash, paper_limits_hash,
+                    frozen_selection_hash, cohort_hash, strategy_version, symbol, interval, evidence_class, created_at_utc, payload_hash, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    binding.binding_hash,
+                    binding.campaign_hash,
+                    binding.campaign_id,
+                    binding.decision_hash,
+                    binding.reference_hash,
+                    binding.evidence_hash,
+                    binding.manifest_hash,
+                    binding.result_hash,
+                    binding.promotion_policy_hash,
+                    binding.campaign_policy_hash,
+                    binding.paper_limits_hash,
+                    binding.frozen_selection_hash,
+                    binding.cohort_hash,
+                    binding.strategy_version,
+                    binding.symbol,
+                    binding.interval,
+                    binding.evidence_class,
+                    binding.created_at_utc.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    binding.payload_hash,
+                    payload,
+                ),
+            )
+            conn.commit()
+        except sqlite3.IntegrityError as exc:
+            raise PaperCampaignManifestError("campaign decision binding already exists.") from exc
+    return binding
+
+
+def _binding_from_row(row: sqlite3.Row) -> OperationalCampaignDecisionBinding:
+    stored_payload = json.loads(row["payload_json"]) if row["payload_json"] else None
+    if not isinstance(stored_payload, Mapping):
+        raise PaperCampaignReadError("campaign decision binding payload mismatch.")
+    payload_json = stored_payload.get("payload_json")
+    if not isinstance(payload_json, Mapping):
+        raise PaperCampaignReadError("campaign decision binding payload mismatch.")
+    binding = OperationalCampaignDecisionBinding(
+        binding_hash=row["binding_hash"],
+        campaign_hash=row["campaign_hash"],
+        campaign_id=row["campaign_id"],
+        decision_hash=row["decision_hash"],
+        reference_hash=row["reference_hash"],
+        evidence_hash=row["evidence_hash"],
+        manifest_hash=row["manifest_hash"],
+        result_hash=row["result_hash"],
+        promotion_policy_hash=row["promotion_policy_hash"],
+        campaign_policy_hash=row["campaign_policy_hash"],
+        paper_limits_hash=row["paper_limits_hash"],
+        frozen_selection_hash=row["frozen_selection_hash"],
+        cohort_hash=row["cohort_hash"],
+        strategy_version=row["strategy_version"],
+        symbol=row["symbol"],
+        interval=row["interval"],
+        evidence_class=row["evidence_class"],
+        created_at_utc=datetime.fromisoformat(str(row["created_at_utc"]).replace("Z", "+00:00")),
+        payload_hash=row["payload_hash"],
+        payload_json=payload_json,
+    )
+    if stored_payload != binding.as_hash_payload(include_hash=False):
+        raise PaperCampaignReadError("campaign decision binding payload mismatch.")
+    return binding
+
+
+def load_operational_campaign_decision_binding(
+    db_path: str | Path,
+    *,
+    campaign_id: str | None = None,
+    campaign_hash: str | None = None,
+    decision_hash: str | None = None,
+) -> OperationalCampaignDecisionBinding | None:
+    with _connect_ro(db_path) as conn:
+        tables = {row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "operational_campaign_decision_bindings" not in tables:
+            return None
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(operational_campaign_decision_bindings)") }
+        missing = sorted(_CAMPAIGN_BINDING_REQUIRED_COLUMNS - columns)
+        if missing:
+            raise PaperCampaignReadError("campaign decision binding schema is incomplete.")
+        filters: list[str] = []
+        params: list[Any] = []
+        if campaign_id is not None:
+            filters.append("campaign_id = ?")
+            params.append(_require_str(campaign_id, "campaign_id"))
+        if campaign_hash is not None:
+            filters.append("campaign_hash = ?")
+            params.append(_require_str(campaign_hash, "campaign_hash"))
+        if decision_hash is not None:
+            filters.append("decision_hash = ?")
+            params.append(_require_str(decision_hash, "decision_hash"))
+        query = "SELECT * FROM operational_campaign_decision_bindings"
+        if filters:
+            query += " WHERE " + " AND ".join(filters)
+        query += " ORDER BY created_at_utc DESC, binding_hash DESC LIMIT 1"
+        row = conn.execute(query, params).fetchone()
+        if row is None:
+            return None
+        return _binding_from_row(row)
 
 
 def persist_operational_paper_campaign_contract(db_path: str | Path, contract: OperationalPaperCampaignContract) -> OperationalPaperCampaignContract:
@@ -770,8 +1196,8 @@ def create_operational_paper_campaign(
     policy: PaperEvaluationPolicy,
     reference_walk_forward: WalkForwardResult,
     evaluator_version: str = "v8_paper_evaluation",
-    runtime_db_path: str | Path = "paper_runtime.db",
-    campaign_db_path: str | Path = "paper_evaluation_campaign.db",
+    runtime_db_path: str | Path = resolve_paper_runtime_db_path(),
+    campaign_db_path: str | Path = resolve_paper_campaign_db_path(),
 ) -> OperationalPaperCampaignContract:
     policy_floor_reasons = _validate_policy_floor(policy)
     period_start = _require_datetime(period_start_utc, "period_start_utc")
@@ -839,7 +1265,7 @@ def _current_campaign_state(contract: OperationalPaperCampaignContract, *, now: 
 def get_operational_paper_campaign_status(
     *,
     campaign_id: str,
-    campaign_db_path: str | Path = "paper_evaluation_campaign.db",
+    campaign_db_path: str | Path = resolve_paper_campaign_db_path(),
 ) -> OperationalPaperCampaignStatusSnapshot:
     current = _utcnow()
     try:
@@ -903,9 +1329,9 @@ def _campaign_result_from_report(
 def evaluate_operational_paper_campaign(
     *,
     campaign_id: str,
-    campaign_db_path: str | Path = "paper_evaluation_campaign.db",
-    runtime_db_path: str | Path = "paper_runtime.db",
-    trades_db_path: str | Path = "trades.db",
+    campaign_db_path: str | Path = resolve_paper_campaign_db_path(),
+    runtime_db_path: str | Path = resolve_paper_runtime_db_path(),
+    trades_db_path: str | Path = resolve_trades_db_path(),
 ) -> OperationalPaperCampaignReport:
     current = _utcnow()
     contract = load_operational_paper_campaign_contract(campaign_db_path, campaign_id=campaign_id)
@@ -999,8 +1425,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     prepare = subparsers.add_parser("prepare", help="Prepare a new operational paper campaign.")
     prepare.add_argument("--campaign-id", required=True)
-    prepare.add_argument("--campaign-db", default="paper_evaluation_campaign.db")
-    prepare.add_argument("--runtime-db", default="paper_runtime.db")
+    prepare.add_argument("--campaign-db", default=str(resolve_paper_campaign_db_path()))
+    prepare.add_argument("--runtime-db", default=str(resolve_paper_runtime_db_path()))
     prepare.add_argument("--cohort-hash", required=False)
     prepare.add_argument("--strategy-version", required=True)
     prepare.add_argument("--symbol", required=True)
@@ -1014,13 +1440,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     status = subparsers.add_parser("status", help="Show a sanitized campaign status snapshot.")
     status.add_argument("--campaign-id", required=True)
-    status.add_argument("--campaign-db", default="paper_evaluation_campaign.db")
+    status.add_argument("--campaign-db", default=str(resolve_paper_campaign_db_path()))
 
     evaluate = subparsers.add_parser("evaluate", help="Evaluate a finished operational paper campaign.")
     evaluate.add_argument("--campaign-id", required=True)
-    evaluate.add_argument("--campaign-db", default="paper_evaluation_campaign.db")
-    evaluate.add_argument("--runtime-db", default="paper_runtime.db")
-    evaluate.add_argument("--trades-db", default="trades.db")
+    evaluate.add_argument("--campaign-db", default=str(resolve_paper_campaign_db_path()))
+    evaluate.add_argument("--runtime-db", default=str(resolve_paper_runtime_db_path()))
+    evaluate.add_argument("--trades-db", default=str(resolve_trades_db_path()))
 
     return parser
 def main(argv: list[str] | None = None) -> int:

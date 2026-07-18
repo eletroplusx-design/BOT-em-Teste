@@ -25,6 +25,20 @@ Copie `.env.example` para `.env` e preencha as variaveis necessarias:
 python bot_telegram.py
 ```
 
+## Operacao paper local
+
+O diretório local persistente é configurado por `PAPER_DATA_DIR`. Quando a variável não estiver definida, o projeto usa um diretório `.paper_data` dentro da pasta do repositório.
+
+Para preparar e inspecionar a infraestrutura operacional local:
+
+```bash
+python -m paper_operations doctor
+python -m paper_operations initialize
+python -m paper_operations report
+```
+
+Os comandos administrativos de campanha, coorte, sessão e backup também ficam disponíveis em `python -m paper_operations --help`.
+
 ## Executar testes
 
 Instale as dependencias de desenvolvimento:

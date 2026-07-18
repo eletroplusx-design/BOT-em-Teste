@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from domain.serialization import serialize_value
+from config import resolve_paper_runtime_db_path
 
 from .audit import chain_hash, event_content_hash, sanitize_payload, sha256_hex
 from .errors import PaperRuntimeAuditError, PaperRuntimeSessionError, PaperRuntimeStoreError
@@ -43,7 +44,7 @@ def _ensure_timezone_aware_text(value: str) -> str:
 
 
 class PaperRuntimeStore:
-    def __init__(self, db_path: str | Path = "paper_runtime.db") -> None:
+    def __init__(self, db_path: str | Path = resolve_paper_runtime_db_path()) -> None:
         self.db_path = Path(db_path)
         self._initialized = False
 
@@ -1045,5 +1046,5 @@ _DEFAULT_STORE: PaperRuntimeStore | None = None
 def get_default_store() -> PaperRuntimeStore:
     global _DEFAULT_STORE
     if _DEFAULT_STORE is None:
-        _DEFAULT_STORE = PaperRuntimeStore()
+        _DEFAULT_STORE = PaperRuntimeStore(resolve_paper_runtime_db_path())
     return _DEFAULT_STORE

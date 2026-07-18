@@ -33,6 +33,7 @@ from paper_evaluation.campaign import (
 )
 from paper_runtime import PaperRuntimeSession, PaperRuntimeStore
 from paper_evaluation._operational import persist_operational_cohort_contract
+from promotion import promotion_hash
 from storage import finalizar_trade_paper, registrar_trade_paper
 from tests.test_paper_evaluation_phase8 import _decision, _seed_runtime_and_trades
 from tests.test_paper_evaluation_phase8 import _snapshot
@@ -66,6 +67,20 @@ def _session_trade_result(session_index: int, trade_index: int) -> Decimal:
     return Decimal("12") + Decimal(session_index % 3)
 
 
+def _session_decision_with_regime(decision, regime: str):
+    frozen_selection = replace(
+        decision.frozen_selection,
+        execution_contract=tuple({**dict(decision.phase5_manifest["execution_contract"]), "regime": regime}.items()),
+    )
+    payload = decision.as_hash_payload(include_hash=False)
+    payload["frozen_selection"] = frozen_selection.as_dict()
+    return replace(
+        decision,
+        frozen_selection=frozen_selection,
+        decision_hash=promotion_hash(payload),
+    )
+
+
 def _seed_operational_campaign_runtime(
     tmp_path: Path,
     *,
@@ -93,13 +108,7 @@ def _seed_operational_campaign_runtime(
         session_id = f"campaign-session-{idx:02d}"
         started = base_start + timedelta(days=idx)
         regime = ("BULL", "BEAR", "CHOP")[idx % 3]
-        session_decision = replace(
-            decision,
-            frozen_selection=replace(
-                decision.frozen_selection,
-                execution_contract=tuple({**dict(decision.phase5_manifest["execution_contract"]), "regime": regime}.items()),
-            ),
-        )
+        session_decision = _session_decision_with_regime(decision, regime)
         runtime_session = PaperRuntimeSession.create_from_decision(
             session_decision,
             session_id=session_id,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from enum import Enum
 from typing import Any
 
 from domain import Candle, MarketSnapshot
@@ -13,6 +14,12 @@ from .provider import BinancePublicKlinesProvider
 from .validation import MAX_BINANCE_LIMIT, validate_klines_payload, validate_limit, validate_market_data_consistency, validate_symbol_interval
 
 
+class MarketDataProvenance(str, Enum):
+    OPERATIONAL_TRUSTED = "OPERATIONAL_TRUSTED"
+    SYNTHETIC_TEST = "SYNTHETIC_TEST"
+    UNKNOWN = "UNKNOWN"
+
+
 @dataclass(frozen=True, slots=True)
 class MarketDataPackage:
     symbol: str
@@ -20,9 +27,14 @@ class MarketDataPackage:
     candles: tuple[Candle, ...]
     snapshot: MarketSnapshot
     source: str
+    provenance_class: MarketDataProvenance
     fetched_at: datetime
     expires_at: datetime
     cache_status: str = "miss"
+
+    @property
+    def synthetic_test_data(self) -> bool:
+        return self.provenance_class is MarketDataProvenance.SYNTHETIC_TEST
 
     @property
     def expired(self) -> bool:
@@ -43,6 +55,12 @@ class TrustedMarketDataService:
         self.ttl_seconds = ttl_seconds
         self.max_age_seconds = max_age_seconds
 
+    def _provider_provenance_class(self) -> MarketDataProvenance:
+        provider = self.provider
+        if type(provider) is BinancePublicKlinesProvider and getattr(provider, "trusted_market_data_provider", False) is True:
+            return MarketDataProvenance.OPERATIONAL_TRUSTED
+        return MarketDataProvenance.UNKNOWN
+
     def _build_package(self, candles: list[Candle], symbol: str, interval: str, cache_status: str = "miss") -> MarketDataPackage:
         snapshot = candles_to_market_snapshot(candles)
         now = datetime.now(timezone.utc)
@@ -52,6 +70,7 @@ class TrustedMarketDataService:
             candles=tuple(candles),
             snapshot=snapshot,
             source=snapshot.source.value if hasattr(snapshot.source, "value") else str(snapshot.source),
+            provenance_class=self._provider_provenance_class(),
             fetched_at=now,
             expires_at=now + timedelta(seconds=self.ttl_seconds),
             cache_status=cache_status,
@@ -66,6 +85,7 @@ class TrustedMarketDataService:
             candles=candles,
             snapshot=snapshot,
             source=snapshot.source.value if hasattr(snapshot.source, "value") else str(snapshot.source),
+            provenance_class=package.provenance_class,
             fetched_at=package.fetched_at,
             expires_at=package.expires_at,
             cache_status=cache_status,
@@ -110,6 +130,7 @@ class TrustedMarketDataService:
                         candles=cached.candles,
                         snapshot=cached.snapshot,
                         source=cached.snapshot.source.value if hasattr(cached.snapshot.source, "value") else str(cached.snapshot.source),
+                        provenance_class=self._provider_provenance_class(),
                         fetched_at=cached.stored_at,
                         expires_at=cached.expires_at,
                         cache_status="hit",
@@ -142,6 +163,7 @@ class TrustedMarketDataService:
             candles=entry.candles,
             snapshot=entry.snapshot,
             source=entry.snapshot.source.value if hasattr(entry.snapshot.source, "value") else str(entry.snapshot.source),
+            provenance_class=self._provider_provenance_class(),
             fetched_at=entry.stored_at,
             expires_at=entry.expires_at,
             cache_status="miss",
