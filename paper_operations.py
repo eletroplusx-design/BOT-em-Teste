@@ -461,6 +461,17 @@ def _persist_reference_contract(reference_db: Path, payload: Mapping[str, Any]) 
     }
 
 
+def _delete_reference_contract(reference_db: Path, reference_hash: str) -> None:
+    if not reference_db.exists():
+        return
+    with sqlite3.connect(reference_db) as conn:
+        conn.execute(
+            "DELETE FROM operational_reference_contracts WHERE reference_hash = ?",
+            (reference_hash,),
+        )
+        conn.commit()
+
+
 def _load_reference_contract(reference_db: Path, reference_hash: str) -> dict[str, Any]:
     if not reference_db.exists():
         raise PaperOperationsError("operational reference registry not found.")
@@ -646,6 +657,17 @@ def _persist_promotion_decision(
     }
 
 
+def _delete_promotion_decision_contract(reference_db: Path, decision_hash: str) -> None:
+    if not reference_db.exists():
+        return
+    with sqlite3.connect(reference_db) as conn:
+        conn.execute(
+            "DELETE FROM operational_promotion_decision_contracts WHERE decision_hash = ?",
+            (decision_hash,),
+        )
+        conn.commit()
+
+
 def _load_promotion_decision_registry(reference_db: Path, decision_hash: str) -> PromotionDecision:
     if not reference_db.exists():
         raise PaperOperationsError("promotion decision registry not found.")
@@ -827,7 +849,7 @@ def _campaign_decision_binding_payload(
     reference_hash = provenance.get("reference_hash")
     manifest_hash = provenance.get("manifest_hash")
     result_hash = provenance.get("result_hash")
-    evidence_class = provenance.get("evidence_class", "OPERATIONAL_TRUSTED")
+    evidence_class = provenance.get("evidence_class")
     if type(reference_hash) is not str or not reference_hash.strip():
         raise PaperOperationsError("campaign decision reference hash is invalid.")
     if type(manifest_hash) is not str or not manifest_hash.strip():
@@ -854,7 +876,7 @@ def _campaign_decision_binding_payload(
         "symbol": contract.symbol,
         "interval": contract.interval,
         "evidence_class": evidence_class.strip().upper(),
-        "created_at_utc": _require_datetime(created_at_utc, "created_at_utc") if created_at_utc is not None else _utcnow(),
+        "created_at_utc": created_at_utc if created_at_utc is not None else _utcnow(),
         "payload_json": {
             "contract": contract.as_dict(),
             "decision": decision.as_dict(),
@@ -1046,6 +1068,7 @@ def _run_operational_walk_forward(*, symbol: str, interval: str, limit: int, str
     provenance = {
         "version": _REFERENCE_PROVENANCE_VERSION,
         "synthetic_test_data": bool(getattr(package, "synthetic_test_data", False)),
+        "evidence_class": "OPERATIONAL_TRUSTED" if bool(getattr(package, "synthetic_test_data", False)) is False else "SYNTHETIC_TEST",
         "symbol": symbol,
         "interval": interval,
         "strategy_version": strategy_version,
@@ -1172,18 +1195,36 @@ def doctor(*, data_dir: str | Path | None = None) -> dict[str, Any]:
             if not _sqlite_integrity_ok(reference_db):
                 local_issues.append("operational reference database integrity failed.")
             else:
-                with sqlite3.connect(reference_db) as conn:
-                    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-                    if "operational_reference_contracts" not in tables:
-                        local_issues.append("operational reference schema is incomplete.")
-                    else:
-                        row = conn.execute("SELECT reference_hash FROM operational_reference_contracts ORDER BY created_at_utc DESC LIMIT 1").fetchone()
-                        if row is None:
-                            local_issues.append("operational reference unavailable.")
+                reference_file = paths["reference_file"]
+                if not reference_file.exists():
+                    local_issues.append("operational reference unavailable.")
+                else:
+                    reference = _load_walk_forward_reference(reference_file)
+                    if reference.summary.get("runner_trusted") is not True or reference.manifest.get("runner_trusted") is not True:
+                        local_issues.append("operational reference not trusted.")
     except Exception:
         local_issues.append("operational reference unavailable.")
     try:
-        load_operational_paper_campaign_contract(paths["campaign_db"])
+        campaign_contract = load_operational_paper_campaign_contract(paths["campaign_db"])
+        binding = load_operational_campaign_decision_binding(paths["campaign_db"], campaign_hash=campaign_contract.campaign_hash)
+        if binding is None:
+            if active_sessions:
+                local_issues.append("campaign decision binding unavailable.")
+        else:
+            if binding.payload_json.get("contract") != campaign_contract.as_dict():
+                local_issues.append("campaign decision binding contract mismatch.")
+            decision_payload = binding.payload_json.get("decision")
+            if not isinstance(decision_payload, Mapping):
+                local_issues.append("campaign decision binding decision payload missing.")
+            elif decision_payload.get("decision_hash") != binding.decision_hash:
+                local_issues.append("campaign decision binding decision hash mismatch.")
+            reference_payload = binding.payload_json.get("reference_payload")
+            if not isinstance(reference_payload, Mapping):
+                local_issues.append("campaign decision binding reference payload missing.")
+            else:
+                provenance = reference_payload.get(_REFERENCE_PROVENANCE_KEY)
+                if not isinstance(provenance, Mapping) or provenance.get("reference_hash") != binding.reference_hash:
+                    local_issues.append("campaign decision binding reference hash mismatch.")
     except Exception:
         local_issues.append("operational campaign unavailable.")
     try:
@@ -1257,13 +1298,27 @@ def phase5_reference(*, input_file: str | Path, output_file: str | Path | None =
             provider=config["provider"],
         )
         reference_db = _reference_db_path(output.parent)
-        _persist_reference_contract(reference_db, payload)
         if output.exists():
             existing = _load_json_file(output, label="reference output")
             if existing != payload:
                 raise PaperOperationsError("operational reference already exists.")
-        else:
-            _write_json(output, payload)
+        reference_hash = payload[_REFERENCE_PROVENANCE_KEY]["reference_hash"]
+        existing_reference = None
+        try:
+            existing_reference = _load_reference_contract(reference_db, reference_hash)
+        except PaperOperationsError:
+            existing_reference = None
+        _persist_reference_contract(reference_db, payload)
+        if not output.exists():
+            temp_output = output.with_name(f".{output.name}.tmp")
+            try:
+                _write_json(temp_output, payload)
+                os.replace(temp_output, output)
+            except Exception as exc:
+                temp_output.unlink(missing_ok=True)
+                if existing_reference is None:
+                    _delete_reference_contract(reference_db, reference_hash)
+                raise PaperOperationsError("operational reference output failed.") from exc
     return {
         "output": str(output),
         "manifest_hash": result.manifest.get("manifest_hash"),
@@ -1284,15 +1339,26 @@ def promotion_decision(*, reference_file: str | Path, policy_file: str | Path, o
         if provenance.get("synthetic_test_data") is not False:
             raise PaperOperationsError("promotion decision cannot be created from synthetic test data.")
     reference_db = _reference_db_path(output.parent)
-    _persist_promotion_decision(reference_db, decision, reference_payload=reference_payload, token=_PROMOTION_DECISION_PERSIST_TOKEN)
-    temp_output = output.with_name(f".{output.name}.tmp")
+    if output.exists():
+        existing = _load_json_file(output, label="promotion decision output")
+        if existing != decision.as_dict():
+            raise PaperOperationsError("promotion decision already exists.")
+    existing_decision = None
     try:
-        _write_json(temp_output, decision.as_dict())
-        os.replace(temp_output, output)
-    except Exception as exc:
-        if temp_output.exists():
+        existing_decision = _load_promotion_decision_registry(reference_db, decision.decision_hash)
+    except PaperOperationsError:
+        existing_decision = None
+    _persist_promotion_decision(reference_db, decision, reference_payload=reference_payload, token=_PROMOTION_DECISION_PERSIST_TOKEN)
+    if not output.exists():
+        temp_output = output.with_name(f".{output.name}.tmp")
+        try:
+            _write_json(temp_output, decision.as_dict())
+            os.replace(temp_output, output)
+        except Exception as exc:
             temp_output.unlink(missing_ok=True)
-        raise PaperOperationsError("promotion decision output failed.") from exc
+            if existing_decision is None:
+                _delete_promotion_decision_contract(reference_db, decision.decision_hash)
+            raise PaperOperationsError("promotion decision output failed.") from exc
     return {"output": str(output), "status": decision.status.value, "decision_hash": decision.decision_hash, "paper_limits_hash": decision.paper_limits_hash}
 
 
@@ -1426,37 +1492,33 @@ def session_start(
     decision = decision_registry
     if decision.status is not PromotionStatus.APPROVED_FOR_MONITORED_PAPER:
         raise PaperOperationsError("promotion decision is not approved for monitored paper.")
-    reference_payload = contract.reference_payload_json
-    if not isinstance(reference_payload, Mapping):
-        raise PaperOperationsError("campaign reference payload is invalid.")
-    provenance = reference_payload.get(_REFERENCE_PROVENANCE_KEY)
+    reference_file = paths["reference_file"]
+    reference_envelope, provenance, walk_forward_payload = _load_walk_forward_reference_envelope(reference_file)
+    if walk_forward_payload != contract.reference_payload_json:
+        raise PaperOperationsError("campaign reference payload mismatch.")
     if not isinstance(provenance, Mapping):
-        provenance = {
-            "reference_hash": paper_evaluation_hash(reference_payload),
-            "manifest_hash": contract.walk_forward_manifest_hash,
-            "result_hash": contract.walk_forward_result_hash,
-            "evidence_class": "OPERATIONAL_TRUSTED",
-            "synthetic_test_data": False,
-        }
-    else:
-        if provenance.get("synthetic_test_data") is not False:
-            raise PaperOperationsError("campaign reference must be operational provenance.")
-        if provenance.get("evidence_class") != "OPERATIONAL_TRUSTED":
-            raise PaperOperationsError("campaign reference evidence class is invalid.")
-        binding = _build_operational_campaign_decision_binding(contract, decision, provenance, reference_payload)
+        raise PaperOperationsError("campaign reference provenance is missing.")
+    if provenance.get("synthetic_test_data") is not False:
+        raise PaperOperationsError("campaign reference must be operational provenance.")
+    if provenance.get("evidence_class") != "OPERATIONAL_TRUSTED":
+        raise PaperOperationsError("campaign reference evidence class is invalid.")
+    binding = _build_operational_campaign_decision_binding(contract, decision, provenance, reference_envelope)
+    existing_binding = load_operational_campaign_decision_binding(campaign_db_path, campaign_id=campaign_id)
+    if existing_binding is None:
+        persist_operational_campaign_decision_binding(campaign_db_path, binding)
         existing_binding = load_operational_campaign_decision_binding(campaign_db_path, campaign_id=campaign_id)
         if existing_binding is None:
-            persist_operational_campaign_decision_binding(campaign_db_path, binding)
-        else:
-            binding = _build_operational_campaign_decision_binding(
-                contract,
-                decision,
-                provenance,
-                reference_payload,
-                created_at_utc=existing_binding.created_at_utc,
-            )
-            if existing_binding.as_dict() != binding.as_dict():
-                raise PaperOperationsError("campaign decision binding mismatch.")
+            raise PaperOperationsError("campaign decision binding not found.")
+    else:
+        binding = _build_operational_campaign_decision_binding(
+            contract,
+            decision,
+            provenance,
+            reference_envelope,
+            created_at_utc=existing_binding.created_at_utc,
+        )
+    if existing_binding.as_dict() != binding.as_dict():
+        raise PaperOperationsError("campaign decision binding mismatch.")
     session_id = new_session_id()
     with _acquire_operational_lock(paths["root"], scope=f"session_start:{campaign_id}"):
         _require_no_restore_recovery(paths)

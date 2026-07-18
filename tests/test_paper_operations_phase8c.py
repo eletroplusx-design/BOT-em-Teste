@@ -15,7 +15,7 @@ import decisor
 import paper_operations as paper_ops
 from domain import Candle
 from domain.serialization import serialize_value
-from market_data import MarketDataPackage, MarketDataProvenance, candles_to_market_snapshot
+from market_data import candles_to_market_snapshot
 from paper_evaluation import PaperEvaluationPolicy
 from paper_evaluation._operational import OperationalCohortContract
 from paper_evaluation.errors import PaperCampaignManifestError
@@ -30,6 +30,7 @@ from promotion import (
     PromotionStatus,
     promotion_hash,
 )
+from promotion.errors import PromotionEvidenceError
 from promotion.monitoring import MonitoredPaperLimits
 from validation import CandidateConfig, FrozenSelection
 from paper_operations import (
@@ -74,47 +75,55 @@ def _enable_operational_tmp_dirs(monkeypatch) -> None:
     monkeypatch.setattr("paper_operations._ALLOW_TEMPORARY_DATA_DIRS_FOR_TESTS", True)
 
 
-def _operational_reference_package(
+def _operational_reference_payload(
     frame: pd.DataFrame,
     *,
     symbol: str = "BTCUSDT",
     interval: str = "1h",
-    provenance_class: MarketDataProvenance = MarketDataProvenance.SYNTHETIC_TEST,
-) -> MarketDataPackage:
+) -> list[list[int | str]]:
     candles = []
     start = datetime(2025, 1, 1, tzinfo=timezone.utc)
     for idx, row in frame.reset_index(drop=True).iterrows():
         open_time = start + timedelta(hours=idx)
         close_time = open_time + timedelta(hours=1) - timedelta(milliseconds=1)
-        candle = Candle.from_dict(
-            {
-                "open_time": open_time.isoformat().replace("+00:00", "Z"),
-                "close_time": close_time.isoformat().replace("+00:00", "Z"),
-                "open": str(row["open"]),
-                "high": str(row["high"]),
-                "low": str(row["low"]),
-                "close": str(row["close"]),
-                "volume": str(row["volume"]),
-                "symbol": symbol,
-                "interval": interval,
-                "source": "BINANCE",
-            }
+        candles.append(
+            [
+                int(open_time.timestamp() * 1000),
+                str(row["open"]),
+                str(row["high"]),
+                str(row["low"]),
+                str(row["close"]),
+                str(row["volume"]),
+                int(close_time.timestamp() * 1000),
+                0,
+                0,
+                0,
+                0,
+                0,
+            ]
         )
-        candles.append(candle)
-    candles_tuple = tuple(candles)
-    snapshot = candles_to_market_snapshot(candles_tuple)
-    now = datetime.now(timezone.utc)
-    return MarketDataPackage(
-        symbol=symbol,
-        interval=interval,
-        candles=candles_tuple,
-        snapshot=snapshot,
-        source=snapshot.source.value if hasattr(snapshot.source, "value") else str(snapshot.source),
-        provenance_class=provenance_class,
-        fetched_at=now,
-        expires_at=now + timedelta(minutes=5),
-        cache_status="miss",
-    )
+    return candles
+
+
+def _trusted_operational_reference_package(
+    monkeypatch,
+    frame: pd.DataFrame,
+    *,
+    symbol: str = "BTCUSDT",
+    interval: str = "1h",
+):
+    payload = _operational_reference_payload(frame, symbol=symbol, interval=interval)
+    provider = paper_ops.trusted_market_data_service.provider
+    monkeypatch.setattr(paper_ops.trusted_market_data_service, "max_age_seconds", 10**9)
+
+    def fetch_klines(symbol="BTCUSDT", interval="1h", limit=500, *, end_time=None):
+        rows = payload
+        if end_time is not None:
+            rows = [row for row in rows if row[6] <= end_time]
+        return rows[:limit]
+
+    monkeypatch.setattr(provider, "fetch_klines", fetch_klines)
+    return paper_ops.trusted_market_data_service.fetch(symbol=symbol, interval=interval, limit=min(len(payload), 500))
 
 
 def _operational_reference_frame(rows: int = 1200) -> pd.DataFrame:
@@ -154,14 +163,8 @@ def _operational_reference_frame(rows: int = 1200) -> pd.DataFrame:
     )
 
 
-def _mock_operational_market_data(monkeypatch, frame: pd.DataFrame) -> MarketDataPackage:
-    package = _operational_reference_package(frame)
-    monkeypatch.setattr(
-        paper_ops.trusted_market_data_service,
-        "fetch",
-        lambda symbol="BTCUSDT", interval="1h", limit=500: package,
-    )
-    return package
+def _mock_operational_market_data(monkeypatch, frame: pd.DataFrame):
+    return _trusted_operational_reference_package(monkeypatch, frame)
 
 
 def _seed_decision_log(db_path: Path, *, modo: str, decisao: str, symbol: str) -> None:
@@ -536,12 +539,7 @@ def _prepare_test_only_local_operations_fixture(tmp_path: Path, monkeypatch, sam
     data_dir = tmp_path / "paper_data"
     initialize(data_dir=data_dir)
     operational_frame = _operational_reference_frame(len(sample_btc_data))
-    package = _operational_reference_package(operational_frame, provenance_class=MarketDataProvenance.OPERATIONAL_TRUSTED)
-    monkeypatch.setattr(
-        paper_ops.trusted_market_data_service,
-        "fetch",
-        lambda symbol="BTCUSDT", interval="1h", limit=500: package,
-    )
+    package = _trusted_operational_reference_package(monkeypatch, operational_frame)
 
     reference_result = _approved_walk_forward_result(sample_btc_data.iloc[:260].copy())
     reference_output = data_dir / "reference.json"
@@ -556,6 +554,7 @@ def _prepare_test_only_local_operations_fixture(tmp_path: Path, monkeypatch, sam
             "limit_value": len(sample_btc_data),
             "data_period_start_utc": sample_btc_data.iloc[0]["open_time"].astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
             "data_period_end_utc": sample_btc_data.iloc[-1]["close_time"].astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "evidence_class": "OPERATIONAL_TRUSTED",
             "data_content_hash": paper_ops.validation_manifest_hash(
                 {
                     "symbol": "BTCUSDT",
@@ -685,12 +684,7 @@ def test_phase8c_honest_operational_flow_rejects_unsatisfied_strategy_without_ad
     data_dir = tmp_path / "paper_data"
     initialize(data_dir=data_dir)
 
-    package = _operational_reference_package(sample_btc_data)
-    monkeypatch.setattr(
-        paper_ops.trusted_market_data_service,
-        "fetch",
-        lambda symbol="BTCUSDT", interval="1h", limit=500: package,
-    )
+    _trusted_operational_reference_package(monkeypatch, sample_btc_data)
 
     reference_input = tmp_path / "reference_config.json"
     _write_json(
@@ -706,7 +700,7 @@ def test_phase8c_honest_operational_flow_rejects_unsatisfied_strategy_without_ad
     reference_output = data_dir / "reference.json"
     reference_result = phase5_reference(input_file=reference_input, output_file=reference_output)
     assert reference_result["runner_trusted"] is True
-    assert reference_result["synthetic_test_data"] is True
+    assert reference_result["synthetic_test_data"] is False
 
     reference_payload = json.loads(reference_output.read_text(encoding="utf-8"))
     assert all(window.get("approved") is not True for window in reference_payload["walk_forward"]["windows"])
@@ -740,14 +734,14 @@ def test_phase8c_honest_operational_flow_rejects_unsatisfied_strategy_without_ad
         period_end_utc=period_end.isoformat().replace("+00:00", "Z"),
         runtime_db=data_dir / "paper_runtime.db",
     )
-    with pytest.raises(PaperOperationsError):
+    with pytest.raises(PromotionEvidenceError):
         promotion_decision(
             reference_file=reference_output,
             policy_file=policy_file,
             output_file=tmp_path / "rejected_decision.json",
         )
 
-    with pytest.raises(PaperOperationsError):
+    with pytest.raises(PaperCampaignManifestError):
         campaign_prepare(
             campaign_id="campaign-phase8c-honest",
             policy_file=campaign_policy_file,
