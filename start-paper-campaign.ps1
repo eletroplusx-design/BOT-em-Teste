@@ -229,7 +229,10 @@ function Assert-PlanSchema {
         'window_start_utc',
         'window_end_utc',
         'backup_dir',
-        'restore_verify_dir'
+        'restore_verify_dir',
+        'session_id',
+        'session_state',
+        'runtime_contract_hash'
     ) -Name 'operational-plan'
     Assert-StrictBool -Value $Plan.paper_only -Name 'paper_only' -Expected:$true
 }
@@ -239,6 +242,10 @@ function Assert-PlanConsistency {
         [Parameter(Mandatory = $true)]$Plan,
         [Parameter(Mandatory = $true)]$Reference,
         [Parameter(Mandatory = $true)]$Decision,
+        [Parameter(Mandatory = $false)]$Cohort,
+        [Parameter(Mandatory = $false)]$Campaign,
+        [Parameter(Mandatory = $false)]$BackupVerify,
+        [Parameter(Mandatory = $false)]$RestoreVerify,
         [Parameter(Mandatory = $false)]$BindingHash
     )
     Assert-PlanSchema -Plan $Plan
@@ -256,6 +263,42 @@ function Assert-PlanConsistency {
     Assert-StrictBool -Value $Reference.operational_provenance.synthetic_test_data -Name 'synthetic_test_data' -Expected:$false
     Assert-StrictBool -Value $Reference.walk_forward.manifest.runner_trusted -Name 'runner_trusted' -Expected:$true
     Assert-StrictBool -Value $Reference.walk_forward.manifest.execution_contract.paper_only -Name 'paper_only' -Expected:$true
+    if ($PSBoundParameters.ContainsKey('BackupVerify')) {
+        Assert-ObjectHasKeys -Object $BackupVerify -Keys @('backup_dir', 'verified') -Name 'backup verification'
+        Assert-StrictBool -Value $BackupVerify.verified -Name 'backup.verified' -Expected:$true
+        $expectedBackupDir = (Resolve-Path -LiteralPath $Plan.backup_dir).Path
+        $actualBackupDir = (Resolve-Path -LiteralPath (Join-Path (Join-Path $PaperDataDir 'backups') $BackupVerify.backup_dir)).Path
+        if ($expectedBackupDir -ne $actualBackupDir) {
+            Fail 'backup_dir mismatch.'
+        }
+    }
+    if ($PSBoundParameters.ContainsKey('RestoreVerify')) {
+        Assert-ObjectHasKeys -Object $RestoreVerify -Keys @('backup_dir', 'verified') -Name 'restore verification'
+        Assert-StrictBool -Value $RestoreVerify.verified -Name 'restore.verified' -Expected:$true
+        $expectedRestoreVerifyDir = (Resolve-Path -LiteralPath $Plan.restore_verify_dir).Path
+        $actualRestoreVerifyDir = (Resolve-Path -LiteralPath (Join-Path (Join-Path $PaperDataDir 'backups') $RestoreVerify.backup_dir)).Path
+        if ($expectedRestoreVerifyDir -ne $actualRestoreVerifyDir) {
+            Fail 'restore_verify_dir mismatch.'
+        }
+    }
+    if ($PSBoundParameters.ContainsKey('Cohort')) {
+        Assert-ObjectHasKeys -Object $Cohort -Keys @('cohort_hash', 'strategy_version', 'symbol', 'interval', 'inclusion_rule', 'period_start_utc', 'period_end_utc') -Name 'cohort'
+        if ($Cohort.cohort_hash -ne $Plan.cohort_hash) { Fail 'cohort_hash mismatch.' }
+        if ($Cohort.strategy_version -ne $StrategyVersion) { Fail 'cohort strategy_version mismatch.' }
+        if ($Cohort.symbol -ne $Symbol) { Fail 'cohort symbol mismatch.' }
+        if ($Cohort.interval -ne $Interval) { Fail 'cohort interval mismatch.' }
+        if ($Cohort.inclusion_rule -ne 'sqlite_all_sessions') { Fail 'cohort inclusion_rule mismatch.' }
+        if ($Cohort.period_start_utc -ne $Plan.window_start_utc) { Fail 'cohort period_start_utc mismatch.' }
+        if ($Cohort.period_end_utc -ne $Plan.window_end_utc) { Fail 'cohort period_end_utc mismatch.' }
+    }
+    if ($PSBoundParameters.ContainsKey('Campaign')) {
+        Assert-ObjectHasKeys -Object $Campaign -Keys @('campaign_hash', 'campaign_id', 'campaign_state', 'period_start_utc', 'period_end_utc') -Name 'campaign'
+        if ($Campaign.campaign_hash -ne $Plan.campaign_hash) { Fail 'campaign_hash mismatch.' }
+        if ($Campaign.campaign_id -ne $Plan.campaign_id) { Fail 'campaign_id mismatch.' }
+        if ($Campaign.campaign_state -notin @('PREPARED', 'RUNNING')) { Fail 'campaign state mismatch.' }
+        if ($Campaign.period_start_utc -ne $Plan.window_start_utc) { Fail 'campaign period_start_utc mismatch.' }
+        if ($Campaign.period_end_utc -ne $Plan.window_end_utc) { Fail 'campaign period_end_utc mismatch.' }
+    }
     if ($PSBoundParameters.ContainsKey('BindingHash')) {
         Assert-StringValue -Value $BindingHash -Name 'binding_hash'
         if ($Plan.binding_hash -ne $BindingHash) {
@@ -340,7 +383,7 @@ function Invoke-Prepare {
         '--strategy-version', $StrategyVersion,
         '--symbol', $Symbol,
         '--interval', $Interval,
-        '--inclusion-rule', 'sessions-with-valid-paper-evidence',
+        '--inclusion-rule', 'sqlite_all_sessions',
         '--period-start-utc', $windowStartUtc,
         '--period-end-utc', $windowEndUtc,
         '--runtime-db', (Join-Path $PaperDataDir 'paper_runtime.db')
@@ -353,7 +396,7 @@ function Invoke-Prepare {
         '--strategy-version', $StrategyVersion,
         '--symbol', $Symbol,
         '--interval', $Interval,
-        '--inclusion-rule', 'sessions-with-valid-paper-evidence',
+        '--inclusion-rule', 'sqlite_all_sessions',
         '--period-start-utc', $windowStartUtc,
         '--period-end-utc', $windowEndUtc,
         '--cohort-hash', $cohort.cohort_hash,
@@ -431,6 +474,51 @@ function Invoke-SessionStart {
 
     $cohort = Invoke-PaperOperations @('cohort', 'status', '--runtime-db', (Join-Path $PaperDataDir 'paper_runtime.db'), '--cohort-hash', $plan.cohort_hash)
     $campaign = Invoke-PaperOperations @('campaign', 'status', '--campaign-id', $plan.campaign_id, '--campaign-db', (Join-Path $PaperDataDir 'paper_evaluation_campaign.db'))
+    Assert-PlanConsistency -Plan $plan -Reference $reference -Decision $decision -Cohort $cohort -Campaign $campaign
+
+    if ($plan.status -eq 'SESSION_STARTED') {
+        if (-not $plan.session_id) {
+            Fail 'session_started state requires a persisted session_id.'
+        }
+        $active = Get-ActiveRuntimeSession -DataDir $PaperDataDir
+        if ($null -eq $active) {
+            Fail 'session_started state requires an active runtime session.'
+        }
+        if ($active.session_id -ne $plan.session_id) {
+            Fail 'active runtime session does not match the persisted plan.'
+        }
+        if ($active.decision_hash -ne $plan.decision_hash) {
+            Fail 'active runtime session decision hash mismatch.'
+        }
+        if ($plan.runtime_contract_hash -and $plan.runtime_contract_hash -ne $active.contract_hash) {
+            Fail 'active runtime session contract hash mismatch.'
+        }
+        $runtimeStatus = Invoke-PaperOperations @('session', 'status', '--session-id', $active.session_id, '--data-dir', $PaperDataDir)
+        if ($runtimeStatus.state -ne 'RUNNING') {
+            Fail 'persisted runtime session is no longer running.'
+        }
+        if ($runtimeStatus.session_id -ne $plan.session_id) {
+            Fail 'persisted runtime session id mismatch.'
+        }
+        if ($runtimeStatus.decision_hash -ne $plan.decision_hash) {
+            Fail 'persisted runtime session decision hash mismatch.'
+        }
+        if ($runtimeStatus.contract_hash -ne $active.contract_hash) {
+            Fail 'persisted runtime session contract hash mismatch.'
+        }
+        if ($plan.session_state -ne 'RUNNING') {
+            $persistedPlan = $plan | ConvertTo-Json -Depth 50 | ConvertFrom-Json -Depth 50
+            $persistedPlan.session_state = 'RUNNING'
+            $persistedPlan.runtime_contract_hash = $active.contract_hash
+            Save-OperationalPlan -Plan $persistedPlan -Path $planPath
+        }
+        Write-Host ('Session already started: {0}' -f $active.session_id)
+        Write-Host '$env:PAPER_DATA_DIR = "C:\Users\Vitor\BotTraderPaperData"'
+        Write-Host 'python bot_telegram.py'
+        Write-Host 'Then, in the authorized Telegram chat, send /vigia.'
+        Write-Host 'After a restart, run runtime resume and send /vigia again.'
+        return
+    }
     $binding = Invoke-PaperOperations @(
         'campaign', 'bind',
         '--campaign-id', $plan.campaign_id,
@@ -447,7 +535,7 @@ function Invoke-SessionStart {
     }
     Assert-StrictBool -Value $backupVerify.verified -Name 'backup.verified' -Expected:$true
     Assert-StrictBool -Value $restoreVerify.verified -Name 'restore.verified' -Expected:$true
-    Assert-PlanConsistency -Plan $plan -Reference $reference -Decision $decision -BindingHash $binding.binding_hash
+    Assert-PlanConsistency -Plan $plan -Reference $reference -Decision $decision -Cohort $cohort -Campaign $campaign -BackupVerify $backupVerify -RestoreVerify $restoreVerify -BindingHash $binding.binding_hash
     if ($plan.cohort_hash -ne $cohort.cohort_hash) { Fail 'cohort hash mismatch.' }
     if ($plan.campaign_hash -ne $campaign.campaign_hash) { Fail 'campaign hash mismatch.' }
     if ($plan.reference_hash -ne $reference.operational_provenance.reference_hash) { Fail 'reference hash mismatch.' }
@@ -459,7 +547,7 @@ function Invoke-SessionStart {
     if ($nowUtc -lt $windowStartUtc) {
         Fail 'campaign window has not started yet.'
     }
-    if ($nowUtc -gt $windowEndUtc) {
+    if ($nowUtc -ge $windowEndUtc) {
         Fail 'campaign window has already ended.'
     }
 
@@ -471,6 +559,9 @@ function Invoke-SessionStart {
         if ($plan.session_id -and $plan.session_id -ne $active.session_id) {
             Fail 'active runtime session does not match the persisted plan.'
         }
+        if ($plan.decision_hash -ne $active.decision_hash) {
+            Fail 'active runtime session decision hash mismatch.'
+        }
         if ($plan.runtime_contract_hash -and $plan.runtime_contract_hash -ne $active.contract_hash) {
             Fail 'active runtime session contract hash mismatch.'
         }
@@ -479,12 +570,18 @@ function Invoke-SessionStart {
         if ($runtimeStatus.state -ne 'RUNNING') {
             Fail 'recovered runtime session is not running.'
         }
+        if ($runtimeStatus.session_id -ne $active.session_id) {
+            Fail 'recovered runtime session id mismatch.'
+        }
+        if ($runtimeStatus.decision_hash -ne $plan.decision_hash) {
+            Fail 'recovered runtime session decision hash mismatch.'
+        }
         if ($runtimeStatus.contract_hash -ne $active.contract_hash) {
             Fail 'recovered runtime session contract hash mismatch.'
         }
         $recoveredPlan = $plan | ConvertTo-Json -Depth 50 | ConvertFrom-Json -Depth 50
         $recoveredPlan.session_id = $active.session_id
-        $recoveredPlan.session_state = 'SESSION_STARTED'
+        $recoveredPlan.session_state = 'RUNNING'
         $recoveredPlan.runtime_contract_hash = $active.contract_hash
         Save-OperationalPlan -Plan $recoveredPlan -Path $planPath
         Write-Host ('Recovered active session {0}.' -f $active.session_id)
@@ -550,8 +647,8 @@ function Show-Review {
     Write-Host ('  {0} -m paper_operations --data-dir "{1}" initialize' -f $PythonExe, $PaperDataDir)
     Write-Host ('  {0} -m paper_operations phase5-reference --input "{1}"' -f $PythonExe, $ReferenceConfigFile)
     Write-Host ('  {0} -m paper_operations promotion-decision --reference-file "{1}" --policy-file "{2}"' -f $PythonExe, (Join-Path $PaperDataDir 'reference.json'), $PromotionPolicyFile)
-    Write-Host ('  {0} -m paper_operations cohort prepare --strategy-version "{1}" --symbol "{2}" --interval "{3}" --inclusion-rule "sessions-with-valid-paper-evidence" --period-start-utc "{4}" --period-end-utc "{5}" --runtime-db "{6}"' -f $PythonExe, $StrategyVersion, $Symbol, $Interval, $windowStartUtc, $windowEndUtc, (Join-Path $PaperDataDir 'paper_runtime.db'))
-    Write-Host ('  {0} -m paper_operations campaign prepare --campaign-id "{1}" --policy-file "{2}" --reference-file "{3}" --strategy-version "{4}" --symbol "{5}" --interval "{6}" --inclusion-rule "sessions-with-valid-paper-evidence" --period-start-utc "{7}" --period-end-utc "{8}" --cohort-hash "<cohort_hash>" --runtime-db "{9}" --campaign-db "{10}"' -f $PythonExe, $CampaignId, $CampaignPolicyFile, (Join-Path $PaperDataDir 'reference.json'), $StrategyVersion, $Symbol, $Interval, $windowStartUtc, $windowEndUtc, (Join-Path $PaperDataDir 'paper_runtime.db'), (Join-Path $PaperDataDir 'paper_evaluation_campaign.db'))
+    Write-Host ('  {0} -m paper_operations cohort prepare --strategy-version "{1}" --symbol "{2}" --interval "{3}" --inclusion-rule "sqlite_all_sessions" --period-start-utc "{4}" --period-end-utc "{5}" --runtime-db "{6}"' -f $PythonExe, $StrategyVersion, $Symbol, $Interval, $windowStartUtc, $windowEndUtc, (Join-Path $PaperDataDir 'paper_runtime.db'))
+    Write-Host ('  {0} -m paper_operations campaign prepare --campaign-id "{1}" --policy-file "{2}" --reference-file "{3}" --strategy-version "{4}" --symbol "{5}" --interval "{6}" --inclusion-rule "sqlite_all_sessions" --period-start-utc "{7}" --period-end-utc "{8}" --cohort-hash "<cohort_hash>" --runtime-db "{9}" --campaign-db "{10}"' -f $PythonExe, $CampaignId, $CampaignPolicyFile, (Join-Path $PaperDataDir 'reference.json'), $StrategyVersion, $Symbol, $Interval, $windowStartUtc, $windowEndUtc, (Join-Path $PaperDataDir 'paper_runtime.db'), (Join-Path $PaperDataDir 'paper_evaluation_campaign.db'))
     Write-Host ('  {0} -m paper_operations campaign bind --campaign-id "{1}" --decision-file "{2}" --campaign-db "{3}" --data-dir "{4}"' -f $PythonExe, $CampaignId, (Join-Path $PaperDataDir 'promotion_decision.json'), (Join-Path $PaperDataDir 'paper_evaluation_campaign.db'), $PaperDataDir)
     Write-Host ('  {0} -m paper_operations backup create --data-dir "{1}" --backup-name "<timestamp>-campaign"' -f $PythonExe, $PaperDataDir)
     Write-Host ('  {0} -m paper_operations restore verify --backup-dir "<backup_dir>"' -f $PythonExe)

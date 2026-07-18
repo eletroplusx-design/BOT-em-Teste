@@ -647,7 +647,7 @@ def _prepare_test_only_local_operations_fixture(tmp_path: Path, monkeypatch, sam
         strategy_version="v4_walk_forward",
         symbol="BTCUSDT",
         interval="1h",
-        inclusion_rule="sessions-with-valid-paper-evidence",
+        inclusion_rule="sqlite_all_sessions",
         period_start_utc=period_start.isoformat().replace("+00:00", "Z"),
         period_end_utc=period_end.isoformat().replace("+00:00", "Z"),
         runtime_db=data_dir / "paper_runtime.db",
@@ -659,7 +659,7 @@ def _prepare_test_only_local_operations_fixture(tmp_path: Path, monkeypatch, sam
         strategy_version="v4_walk_forward",
         symbol="BTCUSDT",
         interval="1h",
-        inclusion_rule="sessions-with-valid-paper-evidence",
+        inclusion_rule="sqlite_all_sessions",
         period_start_utc=period_start.isoformat().replace("+00:00", "Z"),
         period_end_utc=period_end.isoformat().replace("+00:00", "Z"),
         cohort_hash=cohort["cohort_hash"],
@@ -870,7 +870,7 @@ def test_phase8c_honest_operational_flow_rejects_unsatisfied_strategy_without_ad
         strategy_version="v4_walk_forward",
         symbol="BTCUSDT",
         interval="1h",
-        inclusion_rule="sessions-with-valid-paper-evidence",
+        inclusion_rule="sqlite_all_sessions",
         period_start_utc=period_start.isoformat().replace("+00:00", "Z"),
         period_end_utc=period_end.isoformat().replace("+00:00", "Z"),
         runtime_db=data_dir / "paper_runtime.db",
@@ -890,7 +890,7 @@ def test_phase8c_honest_operational_flow_rejects_unsatisfied_strategy_without_ad
             strategy_version="v4_walk_forward",
             symbol="BTCUSDT",
             interval="1h",
-            inclusion_rule="sessions-with-valid-paper-evidence",
+            inclusion_rule="sqlite_all_sessions",
             period_start_utc=period_start.isoformat().replace("+00:00", "Z"),
             period_end_utc=period_end.isoformat().replace("+00:00", "Z"),
             cohort_hash=cohort["cohort_hash"],
@@ -1131,6 +1131,40 @@ def test_session_active_blocks_on_store_error(tmp_path, monkeypatch, sample_btc_
         paper_ops.session_active(data_dir=data_dir)
 
 
+def test_session_active_is_read_only_and_does_not_initialize_store(tmp_path, monkeypatch, sample_btc_data):
+    flow = _prepare_test_only_local_operations_fixture(tmp_path, monkeypatch, sample_btc_data)
+    data_dir = flow["data_dir"]
+    session_start(
+        campaign_id=flow["campaign_id"],
+        decision_file=flow["decision_file"],
+        campaign_db=data_dir / "paper_evaluation_campaign.db",
+        data_dir=data_dir,
+    )
+
+    before = _sqlite_logical_fingerprint(data_dir / "paper_runtime.db")
+
+    def _boom_initialize(*args, **kwargs):
+        raise AssertionError("session active should not initialize the runtime store.")
+
+    monkeypatch.setattr(PaperRuntimeStore, "initialize", _boom_initialize)
+
+    active = paper_ops.session_active(data_dir=data_dir)
+    after = _sqlite_logical_fingerprint(data_dir / "paper_runtime.db")
+
+    assert active["status"] == "FOUND"
+    assert active["active_sessions"] == 1
+    assert before == after
+
+
+def test_session_active_blocks_when_runtime_database_is_missing(tmp_path, monkeypatch):
+    _enable_operational_tmp_dirs(monkeypatch)
+    data_dir = tmp_path / "paper_data"
+
+    with pytest.raises(PaperRuntimeStoreError, match="runtime database not found"):
+        paper_ops.session_active(data_dir=data_dir)
+    assert not (data_dir / "paper_runtime.db").exists()
+
+
 def test_session_active_cli_reports_active_session(tmp_path, monkeypatch, sample_btc_data, capsys):
     flow = _prepare_test_only_local_operations_fixture(tmp_path, monkeypatch, sample_btc_data)
     data_dir = flow["data_dir"]
@@ -1154,6 +1188,9 @@ def test_start_campaign_script_contains_session_active_recovery_and_atomic_write
     assert "SESSION_STARTING" in script
     assert "SESSION_STARTED" in script
     assert "Assert-PlanConsistency" in script
+    assert "sqlite_all_sessions" in script
+    assert "sessions-with-valid-paper-evidence" not in script
+    assert "if ($nowUtc -ge $windowEndUtc)" in script
     assert "Convert-ToUtcIso" in script
     assert "File]::Replace" in script
     assert "File]::Move" in script
@@ -1169,8 +1206,13 @@ def test_start_campaign_script_contains_session_active_recovery_and_atomic_write
     assert "campaign window has not started yet." in script
     assert "campaign window has already ended." in script
     assert "session_starting state requires an active runtime session for recovery." in script
+    assert "session_started state requires a persisted session_id." in script
+    assert "Session already started:" in script
     assert "session start did not result in a running session." in script
     assert "session start revalidation failed." in script
+    assert "active runtime session decision hash mismatch." in script
+    assert "persisted runtime session decision hash mismatch." in script
+    assert "recoveredPlan.session_state = 'RUNNING'" in script
     assert "cohort hash mismatch." in script
     assert "campaign hash mismatch." in script
     assert "binding_hash mismatch." in script

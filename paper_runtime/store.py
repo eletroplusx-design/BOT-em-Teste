@@ -67,6 +67,25 @@ class PaperRuntimeStore:
             except Exception:
                 pass
 
+    @contextmanager
+    def _connect_readonly(self):
+        if not self.db_path.exists():
+            raise PaperRuntimeStoreError("runtime database not found.")
+        conn = None
+        try:
+            conn = sqlite3.connect(f"{self.db_path.resolve().as_uri()}?mode=ro", uri=True, timeout=30, isolation_level=None)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA foreign_keys = ON")
+            conn.execute("PRAGMA query_only = ON")
+            yield conn
+        except sqlite3.DatabaseError as exc:
+            raise PaperRuntimeStoreError("runtime storage error.") from exc
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
     def initialize(self) -> None:
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -295,8 +314,8 @@ class PaperRuntimeStore:
             return self._row_to_session(row)
 
     def load_active_session(self, decision_hash: str | None = None, *, session_id: str | None = None) -> PaperRuntimeSessionRecord | None:
-        self._ensure_initialized(require_exists=True)
-        with self._connect(require_exists=True) as conn:
+        with self._connect_readonly() as conn:
+            self._validate_schema_locked(conn)
             if session_id is not None:
                 row = self._fetch_session_row(conn, session_id)
                 if row is None or not row["active"]:
@@ -314,8 +333,8 @@ class PaperRuntimeStore:
             return self._row_to_session(row) if row else None
 
     def list_active_sessions(self) -> list[PaperRuntimeSessionRecord]:
-        self._ensure_initialized(require_exists=True)
-        with self._connect(require_exists=True) as conn:
+        with self._connect_readonly() as conn:
+            self._validate_schema_locked(conn)
             rows = conn.execute("SELECT * FROM paper_runtime_sessions WHERE active = 1 ORDER BY created_at_utc ASC").fetchall()
         return [self._row_to_session(row) for row in rows]
 
