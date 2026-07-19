@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import hashlib
 import os
+import shutil
 import subprocess
 import sqlite3
 from datetime import datetime, timedelta, timezone
@@ -1271,10 +1272,14 @@ def test_start_campaign_script_review_is_read_only_and_ps51_json_round_trip(tmp_
     review_dir.mkdir(parents=True, exist_ok=True)
     review_dir.rmdir()
 
+    powershell = shutil.which("powershell.exe") or shutil.which("pwsh")
+    if powershell is None:
+        pytest.skip("No PowerShell executable available for script round-trip test.")
+
     nested_json = '{"outer":{"inner":42,"items":[1,{"x":2}]}}'
     round_trip = subprocess.run(
         [
-            "powershell.exe",
+            powershell,
             "-NoProfile",
             "-ExecutionPolicy",
             "Bypass",
@@ -1289,7 +1294,7 @@ def test_start_campaign_script_review_is_read_only_and_ps51_json_round_trip(tmp_
 
     review = subprocess.run(
         [
-            "powershell.exe",
+            powershell,
             "-NoProfile",
             "-ExecutionPolicy",
             "Bypass",
