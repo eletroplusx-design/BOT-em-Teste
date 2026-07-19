@@ -1,4 +1,4 @@
-from .adapters import adapt_walk_forward_result
+from .adapters import adapt_historical_experiment_report, adapt_walk_forward_result
 from .artifacts import build_promotion_report, promotion_hash
 from .decision import evaluate_promotion
 from .evidence import PromotionEvidence, PromotionWindowEvidence
@@ -28,6 +28,7 @@ __all__ = [
     "PromotionStatus",
     "PromotionValidationError",
     "PromotionWindowEvidence",
+    "adapt_historical_experiment_report",
     "adapt_walk_forward_result",
     "build_promotion_report",
     "evaluate_promotion",
