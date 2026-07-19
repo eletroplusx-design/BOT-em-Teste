@@ -37,7 +37,7 @@ from promotion import (
     PromotionStatus,
     promotion_hash,
 )
-from promotion.errors import PromotionDecisionError, PromotionEvidenceError
+from promotion.errors import PromotionDecisionError, PromotionEvidenceError, PromotionPolicyError
 from promotion.monitoring import MonitoredPaperLimits
 from validation import CandidateConfig, FrozenSelection
 from paper_operations import (
@@ -2053,6 +2053,77 @@ def test_cli_rejects_temporary_paths_and_missing_status(tmp_path, monkeypatch, s
         str(flow["data_dir"]),
     ])
     assert exit_code == 1
+
+
+@pytest.mark.parametrize(
+    "exc_factory, expected_message",
+    [
+        (lambda: PromotionEvidenceError("window must be approved."), "window must be approved."),
+        (lambda: PromotionPolicyError("policy mismatch."), "policy mismatch."),
+    ],
+)
+def test_main_reports_promotion_validation_errors_sanitized(
+    tmp_path,
+    monkeypatch,
+    exc_factory,
+    expected_message,
+    capsys,
+):
+    reference_file = tmp_path / "reference.json"
+    policy_file = tmp_path / "policy.json"
+    output_file = tmp_path / "decision.json"
+    reference_file.write_text("{}", encoding="utf-8")
+    policy_file.write_text("{}", encoding="utf-8")
+
+    def boom(*args, **kwargs):
+        raise exc_factory()
+
+    monkeypatch.setattr(paper_ops, "promotion_decision", boom)
+
+    exit_code = paper_operations_main([
+        "promotion-decision",
+        "--reference-file",
+        str(reference_file),
+        "--policy-file",
+        str(policy_file),
+        "--output",
+        str(output_file),
+    ])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert f"error: {expected_message}" in captured.err
+    assert "paper operations command failed." not in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_main_keeps_generic_fallback_for_unexpected_errors(tmp_path, monkeypatch, capsys):
+    reference_file = tmp_path / "reference.json"
+    policy_file = tmp_path / "policy.json"
+    output_file = tmp_path / "decision.json"
+    reference_file.write_text("{}", encoding="utf-8")
+    policy_file.write_text("{}", encoding="utf-8")
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(paper_ops, "promotion_decision", boom)
+
+    exit_code = paper_operations_main([
+        "promotion-decision",
+        "--reference-file",
+        str(reference_file),
+        "--policy-file",
+        str(policy_file),
+        "--output",
+        str(output_file),
+    ])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "paper operations command failed." in captured.err
+    assert "error: boom" not in captured.err
+    assert "Traceback" not in captured.err
 
 
 def test_report_uses_selected_database_for_decision_logs(tmp_path, monkeypatch, sample_btc_data):

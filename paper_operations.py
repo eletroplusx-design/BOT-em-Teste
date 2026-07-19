@@ -72,7 +72,7 @@ from paper_evaluation.errors import (
     PaperCampaignReadError,
 )
 from promotion import PromotionDecision, PromotionPolicy, PromotionStatus, adapt_walk_forward_result, evaluate_promotion, promotion_hash
-from promotion.errors import PromotionDecisionError, PromotionPolicyError
+from promotion.errors import PromotionDecisionError, PromotionPolicyError, PromotionValidationError
 from validation.artifacts import manifest_hash as validation_manifest_hash
 from validation import CandidateConfig, SelectionCriteria, ValidationSplitConfig, WalkForwardResult, WalkForwardValidator, TrustedLeakFreeBacktestRunner
 
@@ -2627,7 +2627,7 @@ def main(argv: list[str] | None = None) -> int:
             _print_result(report(data_dir=args.data_dir, campaign_id=args.campaign_id, session_id=args.session_id))
             return 0
         raise PaperOperationsError("unknown command.")
-    except (PaperOperationsError, PaperCampaignError, PaperRuntimeSessionError, PaperRuntimeStoreError, PaperRuntimeAuditError, PaperCampaignManifestError, PaperCampaignPolicyError, PaperCampaignReadError, PromotionDecisionError, PromotionPolicyError) as exc:
+    except (PaperOperationsError, PaperCampaignError, PaperRuntimeSessionError, PaperRuntimeStoreError, PaperRuntimeAuditError, PaperCampaignManifestError, PaperCampaignPolicyError, PaperCampaignReadError, PromotionDecisionError, PromotionPolicyError, PromotionValidationError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except Exception:
