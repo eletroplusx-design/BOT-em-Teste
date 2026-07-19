@@ -24,3 +24,19 @@ class MarketDataValidationError(MarketDataError):
 
 class MarketDataExpiredError(MarketDataError):
     pass
+
+
+class HistoricalDataError(MarketDataError):
+    pass
+
+
+class HistoricalDataValidationError(HistoricalDataError):
+    pass
+
+
+class HistoricalDataConflictError(HistoricalDataError):
+    pass
+
+
+class HistoricalDataIntegrityError(HistoricalDataError):
+    pass

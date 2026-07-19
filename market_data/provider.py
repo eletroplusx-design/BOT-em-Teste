@@ -22,8 +22,10 @@ class BinancePublicKlinesProvider:
         self.timeout = timeout
         self.session = session or requests.Session()
 
-    def fetch_klines(self, symbol: str, interval: str, limit: int = 500, *, end_time: int | None = None) -> list[Any]:
+    def fetch_klines(self, symbol: str, interval: str, limit: int = 500, *, start_time: int | None = None, end_time: int | None = None) -> list[Any]:
         params = {"symbol": symbol, "interval": interval, "limit": limit}
+        if start_time is not None:
+            params["startTime"] = start_time
         if end_time is not None:
             params["endTime"] = end_time
         try:
