@@ -36,7 +36,7 @@ from promotion import (
     PromotionStatus,
     promotion_hash,
 )
-from promotion.errors import PromotionEvidenceError
+from promotion.errors import PromotionDecisionError, PromotionEvidenceError
 from promotion.monitoring import MonitoredPaperLimits
 from validation import CandidateConfig, FrozenSelection
 from paper_operations import (
@@ -696,6 +696,63 @@ def _prepare_test_only_local_operations_fixture(tmp_path: Path, monkeypatch, sam
     }
 
 
+def _prepare_valid_phase5_reference_fixture(tmp_path: Path, monkeypatch, sample_btc_data, *, limit: int = 500):
+    _enable_operational_tmp_dirs(monkeypatch)
+    monkeypatch.setattr("paper_operations.live_trading_permitted", lambda: False)
+    monkeypatch.setattr(decisor, "obter_funding_rate", lambda symbol="BTCUSDT": None)
+    monkeypatch.setattr(decisor, "log_decisao", lambda *args, **kwargs: None)
+    data_dir = tmp_path / "paper_data"
+    initialize(data_dir=data_dir)
+    _trusted_operational_reference_package(monkeypatch, sample_btc_data)
+
+    reference_input = tmp_path / "reference_config.json"
+    _write_json(
+        reference_input,
+        {
+            "symbol": "BTCUSDT",
+            "interval": "1h",
+            "limit": limit,
+            "strategy_version": "v4_walk_forward",
+            "provider": "trusted_market_data_service",
+        },
+    )
+    reference_output = data_dir / "reference.json"
+    phase5_reference(input_file=reference_input, output_file=reference_output)
+    return {
+        "data_dir": data_dir,
+        "reference_input": reference_input,
+        "reference_output": reference_output,
+    }
+
+
+def _prepare_valid_promotion_decision_fixture(tmp_path: Path, monkeypatch, sample_btc_data):
+    flow = _prepare_valid_phase5_reference_fixture(tmp_path, monkeypatch, sample_btc_data, limit=500)
+    policy_file = tmp_path / "promotion_policy.json"
+    _write_json(
+        policy_file,
+        PromotionPolicy(
+            min_oos_windows=1,
+            min_oos_trades=1,
+            min_oos_net_return_percent=0,
+            min_oos_expectancy=0,
+            min_oos_profit_factor=0.1,
+            max_oos_drawdown_percent=100,
+            min_profitable_window_ratio_percent=0,
+            max_validation_degradation_percent=100,
+            require_nonzero_costs=True,
+        ).as_dict(),
+    )
+    decision_file = flow["data_dir"] / "promotion_decision.json"
+    promotion_decision(
+        reference_file=flow["reference_output"],
+        policy_file=policy_file,
+        output_file=decision_file,
+    )
+    flow["policy_file"] = policy_file
+    flow["decision_file"] = decision_file
+    return flow
+
+
 def _create_legacy_campaign_binding_db(path: Path, binding, *, payload_mutator=None) -> None:
     with sqlite3.connect(path) as conn:
         conn.row_factory = sqlite3.Row
@@ -826,6 +883,202 @@ def test_phase5_reference_rejects_unknown_market_data_provenance(tmp_path, monke
     )
     with pytest.raises(PaperOperationsError, match="trusted operational market data"):
         phase5_reference(input_file=reference_input, output_file=data_dir / "reference.json")
+
+
+def test_phase5_reference_reuses_existing_artifact_without_network(tmp_path, monkeypatch, sample_btc_data):
+    flow = _prepare_valid_phase5_reference_fixture(tmp_path, monkeypatch, sample_btc_data, limit=500)
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("walk-forward should not be recomputed when the reference already exists.")
+
+    monkeypatch.setattr(paper_ops.trusted_market_data_service, "fetch", _boom)
+    monkeypatch.setattr(paper_ops, "_run_operational_walk_forward", _boom)
+
+    reference_output = flow["reference_output"]
+    before = reference_output.read_text(encoding="utf-8")
+    result = phase5_reference(input_file=flow["reference_input"], output_file=reference_output)
+    after = reference_output.read_text(encoding="utf-8")
+
+    assert result["output"] == str(reference_output)
+    assert result["runner_trusted"] is True
+    assert result["synthetic_test_data"] is False
+    assert before == after
+
+
+def test_phase5_reference_existing_artifact_blocks_configuration_mismatch(tmp_path, monkeypatch, sample_btc_data):
+    flow = _prepare_valid_phase5_reference_fixture(tmp_path, monkeypatch, sample_btc_data, limit=500)
+    reference_input = tmp_path / "reference_config_mismatch.json"
+    _write_json(
+        reference_input,
+        {
+            "symbol": "ETHUSDT",
+            "interval": "1h",
+            "limit": 500,
+            "strategy_version": "v4_walk_forward",
+            "provider": "trusted_market_data_service",
+        },
+    )
+
+    with pytest.raises(PaperOperationsError, match="operational reference configuration mismatch"):
+        phase5_reference(input_file=reference_input, output_file=flow["reference_output"])
+
+
+def test_phase5_reference_existing_artifact_blocks_registry_divergence(tmp_path, monkeypatch, sample_btc_data):
+    flow = _prepare_valid_phase5_reference_fixture(tmp_path, monkeypatch, sample_btc_data, limit=500)
+    reference_db = flow["data_dir"] / "paper_evaluation_reference.db"
+    with sqlite3.connect(reference_db) as conn:
+        row = conn.execute(
+            "SELECT reference_hash, payload_json FROM operational_reference_contracts ORDER BY reference_hash LIMIT 1",
+        ).fetchone()
+        assert row is not None
+        payload = json.loads(row[1])
+        payload["operational_provenance"]["provider"] = "tampered_provider"
+        conn.execute(
+            "UPDATE operational_reference_contracts SET payload_json = ? WHERE reference_hash = ?",
+            (json.dumps(payload, ensure_ascii=False, sort_keys=True), row[0]),
+        )
+        conn.commit()
+
+    reference_input = tmp_path / "reference_config.json"
+    _write_json(
+        reference_input,
+        {
+            "symbol": "BTCUSDT",
+            "interval": "1h",
+            "limit": 500,
+            "strategy_version": "v4_walk_forward",
+            "provider": "trusted_market_data_service",
+        },
+    )
+
+    with pytest.raises(PaperOperationsError, match="operational reference registry mismatch"):
+        phase5_reference(input_file=reference_input, output_file=flow["reference_output"])
+
+
+def test_phase5_reference_existing_registry_absence_blocks_reuse(tmp_path, monkeypatch, sample_btc_data):
+    flow = _prepare_valid_phase5_reference_fixture(tmp_path, monkeypatch, sample_btc_data, limit=500)
+    reference_db = flow["data_dir"] / "paper_evaluation_reference.db"
+    with sqlite3.connect(reference_db) as conn:
+        conn.execute("DELETE FROM operational_reference_contracts")
+        conn.commit()
+
+    reference_input = tmp_path / "reference_config.json"
+    _write_json(
+        reference_input,
+        {
+            "symbol": "BTCUSDT",
+            "interval": "1h",
+            "limit": 500,
+            "strategy_version": "v4_walk_forward",
+            "provider": "trusted_market_data_service",
+        },
+    )
+
+    with pytest.raises(PaperOperationsError, match="operational reference contract not found"):
+        phase5_reference(input_file=reference_input, output_file=flow["reference_output"])
+
+
+def test_promotion_decision_reuses_existing_artifact_when_identical(tmp_path, monkeypatch, sample_btc_data):
+    flow = _prepare_test_only_local_operations_fixture(tmp_path, monkeypatch, sample_btc_data)
+    policy_file = tmp_path / "promotion_policy.json"
+    _write_json(
+        policy_file,
+        PromotionPolicy(
+            min_oos_windows=1,
+            min_oos_trades=1,
+            min_oos_net_return_percent=0,
+            min_oos_expectancy=0,
+            min_oos_profit_factor=0.1,
+            max_oos_drawdown_percent=100,
+            min_profitable_window_ratio_percent=0,
+            max_validation_degradation_percent=100,
+            require_nonzero_costs=True,
+        ).as_dict(),
+    )
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("promotion decision should not be persisted again when the artifact already exists.")
+
+    monkeypatch.setattr(paper_ops, "_persist_promotion_decision", _boom)
+    existing_decision = paper_ops._load_promotion_decision(flow["decision_file"])
+    monkeypatch.setattr(paper_ops, "evaluate_promotion", lambda *args, **kwargs: existing_decision)
+
+    before = flow["decision_file"].read_text(encoding="utf-8")
+    result = promotion_decision(
+        reference_file=flow["reference_output"],
+        policy_file=policy_file,
+        output_file=flow["decision_file"],
+    )
+    after = flow["decision_file"].read_text(encoding="utf-8")
+
+    assert result["output"] == str(flow["decision_file"])
+    assert result["status"] == PromotionStatus.APPROVED_FOR_MONITORED_PAPER.value
+    assert before == after
+
+
+def test_promotion_decision_existing_artifact_blocks_policy_mismatch(tmp_path, monkeypatch, sample_btc_data):
+    flow = _prepare_test_only_local_operations_fixture(tmp_path, monkeypatch, sample_btc_data)
+    policy_file = tmp_path / "promotion_policy_mismatch.json"
+    _write_json(
+        policy_file,
+        PromotionPolicy(
+            min_oos_windows=9,
+            min_oos_trades=90,
+            min_oos_net_return_percent=0,
+            min_oos_expectancy=0,
+            min_oos_profit_factor=1.10,
+            max_oos_drawdown_percent=15,
+            min_profitable_window_ratio_percent=60,
+            max_validation_degradation_percent=10,
+            require_nonzero_costs=True,
+        ).as_dict(),
+    )
+
+    with pytest.raises(PaperOperationsError, match="promotion decision already exists"):
+        promotion_decision(
+            reference_file=flow["reference_output"],
+            policy_file=policy_file,
+            output_file=flow["decision_file"],
+        )
+
+
+def test_promotion_decision_existing_artifact_blocks_registry_divergence(tmp_path, monkeypatch, sample_btc_data):
+    flow = _prepare_test_only_local_operations_fixture(tmp_path, monkeypatch, sample_btc_data)
+    policy_file = tmp_path / "promotion_policy.json"
+    _write_json(
+        policy_file,
+        PromotionPolicy(
+            min_oos_windows=1,
+            min_oos_trades=1,
+            min_oos_net_return_percent=0,
+            min_oos_expectancy=0,
+            min_oos_profit_factor=0.1,
+            max_oos_drawdown_percent=100,
+            min_profitable_window_ratio_percent=0,
+            max_validation_degradation_percent=100,
+            require_nonzero_costs=True,
+        ).as_dict(),
+    )
+    reference_db = flow["data_dir"] / "paper_evaluation_reference.db"
+    with sqlite3.connect(reference_db) as conn:
+        row = conn.execute(
+            "SELECT decision_hash, payload_json FROM operational_promotion_decision_contracts ORDER BY decision_hash LIMIT 1",
+        ).fetchone()
+        assert row is not None
+        payload = json.loads(row[1])
+        payload["decision"]["reasons"] = ["tampered"]
+        conn.execute(
+            "UPDATE operational_promotion_decision_contracts SET payload_json = ? WHERE decision_hash = ?",
+            (json.dumps(payload, ensure_ascii=False, sort_keys=True), row[0]),
+        )
+        conn.commit()
+
+    with pytest.raises(PromotionDecisionError):
+        promotion_decision(
+            reference_file=flow["reference_output"],
+            policy_file=policy_file,
+            output_file=flow["decision_file"],
+        )
 
 
 def test_phase8c_honest_operational_flow_rejects_unsatisfied_strategy_without_adulteration(tmp_path, monkeypatch, sample_btc_data):
@@ -1291,6 +1544,10 @@ def test_start_campaign_script_review_is_read_only_and_ps51_json_round_trip(tmp_
                 "$obj = ConvertFrom-JsonCompatible -JsonText @'",
                 nested_json,
                 "'@",
+                "Set-JsonObjectSourcePath -Object $obj -Path 'C:\\temp\\source.json' | Out-Null",
+                "if ($obj._source_path -ne 'C:\\temp\\source.json') { exit 1 }",
+                "Set-JsonObjectSourcePath -Object $obj -Path 'C:\\temp\\source-2.json' | Out-Null",
+                "if ($obj._source_path -ne 'C:\\temp\\source-2.json') { exit 1 }",
                 "$cacheProbe = ConvertFrom-JsonCompatible -JsonText @'",
                 nested_json,
                 "'@",
