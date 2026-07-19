@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import sqlite3
+import sys
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from contextlib import contextmanager
@@ -1516,6 +1517,17 @@ def test_start_campaign_script_contains_session_active_recovery_and_atomic_write
     assert "campaign inclusion_rule mismatch." in script
     assert "binding_hash mismatch." in script
     assert "Recovered active session" in script
+    assert "Get-PaperOperationsSubcommand" in script
+    assert "Format-PaperOperationsStreamSummary" in script
+    assert "Get-PaperOperationsStreamSummary" in script
+    assert "paper operations command failed." in script
+    assert "subcommand: {0}" in script
+    assert "exit_code: {0}" in script
+    assert "stdout: {0}" in script
+    assert "stderr: {0}" in script
+    assert "<empty>" in script
+    assert "<unavailable>" in script
+    assert "<truncated>" in script
 
 
 def test_start_campaign_script_review_is_read_only_and_ps51_json_round_trip(tmp_path):
@@ -1608,6 +1620,136 @@ def test_start_campaign_script_review_is_read_only_and_ps51_json_round_trip(tmp_
     assert "Review mode: no commands will be executed." in review.stdout
     assert "No command has been executed." in review.stdout
     assert not review_dir.exists()
+
+
+def test_invoke_paper_operations_preserves_success_json_and_sanitizes_failures(tmp_path):
+    project_root = Path.cwd()
+    script_path = project_root / "start-paper-campaign.ps1"
+    powershell = shutil.which("powershell.exe") or shutil.which("pwsh")
+    if powershell is None:
+        pytest.skip("No PowerShell executable available for wrapper diagnostics test.")
+
+    temp_root = tmp_path / "wrapper-temp"
+    temp_root.mkdir(parents=True, exist_ok=True)
+
+    helper_script = tmp_path / "invoke-probe.ps1"
+    helper_script.write_text(
+        "\n".join(
+            [
+                "Set-StrictMode -Version Latest",
+                "$ErrorActionPreference = 'Stop'",
+                f"$env:TEMP = '{temp_root}'",
+                f"$env:TMP = '{temp_root}'",
+                "function Start-Process {",
+                "    param(",
+                "        [string]$FilePath,",
+                "        [string]$WindowStyle,",
+                "        [switch]$PassThru,",
+                "        [switch]$Wait,",
+                "        [string]$RedirectStandardOutput,",
+                "        [string]$RedirectStandardError,",
+                "        [object[]]$ArgumentList",
+                "    )",
+                "    $argsText = (@($ArgumentList) -join ' ')",
+                "    if ($argsText -match 'success-long') {",
+                "        $payload = [pscustomobject]@{",
+                "            ok = $true",
+                "            message = ('x' * 900)",
+                "            nested = [pscustomobject]@{",
+                "                items = @(",
+                "                    [pscustomobject]@{ id = 1; tags = @('alpha', 'beta') },",
+                "                    [pscustomobject]@{ id = 2; tags = @('gamma') }",
+                "                )",
+                "                matrix = @(@(1, 2), @(3, 4))",
+                "            }",
+                "        } | ConvertTo-Json -Depth 10",
+                "        Set-Content -LiteralPath $RedirectStandardOutput -Value $payload -Encoding UTF8",
+                "        Set-Content -LiteralPath $RedirectStandardError -Value '' -Encoding UTF8",
+                "        return [pscustomobject]@{ ExitCode = 0 }",
+                "    }",
+                "    if ($argsText -match 'success-multiline') {",
+                "        $payload = @'",
+                "    {",
+                '      "ok": true,',
+                '      "outer": {',
+                '        "inner": 42,',
+                '        "items": [',
+                '          { "x": 1 },',
+                '          { "x": 2 }',
+                "        ]",
+                "      }",
+                "    }",
+                "'@",
+                "        Set-Content -LiteralPath $RedirectStandardOutput -Value $payload -Encoding UTF8",
+                "        Set-Content -LiteralPath $RedirectStandardError -Value '' -Encoding UTF8",
+                "        return [pscustomobject]@{ ExitCode = 0 }",
+                "    }",
+                "    $stdoutLines = @(",
+                "        'stdout token=abc123 secret=def456 api_key=ghi789 Authorization: Bearer verysecret',",
+                "        ('stdout line 2 ' + ('z' * 200)),",
+                "        ('stdout line 3 ' + ('z' * 200)),",
+                "        ('stdout line 4 ' + ('z' * 200)),",
+                "        ('stdout line 5 ' + ('z' * 200)),",
+                "        ('stdout line 6 ' + ('z' * 200))",
+                "    )",
+                "    $stderrLines = @(",
+                "        'stderr token=abc123 secret=def456 api_key=ghi789 Authorization: Bearer verysecret',",
+                "        ('stderr line 2 ' + ('y' * 200)),",
+                "        ('stderr line 3 ' + ('y' * 200)),",
+                "        ('stderr line 4 ' + ('y' * 200)),",
+                "        ('stderr line 5 ' + ('y' * 200)),",
+                "        ('stderr line 6 ' + ('y' * 200))",
+                "    )",
+                "    Set-Content -LiteralPath $RedirectStandardOutput -Value $stdoutLines -Encoding UTF8",
+                "    Set-Content -LiteralPath $RedirectStandardError -Value $stderrLines -Encoding UTF8",
+                "    return [pscustomobject]@{ ExitCode = 1 }",
+                "}",
+                f'. "{script_path}" -Review -ProjectRoot "{project_root}" -PaperDataDir "{tmp_path / "paper_data"}" -ReferenceConfigFile "{project_root / "reference-config.json"}" -PromotionPolicyFile "{project_root / "promotion_policy.json"}" -CampaignPolicyFile "{project_root / "campaign_policy.json"}" -PythonExe "{sys.executable}"',
+                "$successLong = Invoke-PaperOperations @('success-long')",
+                "if ($successLong.ok -ne $true) { exit 1 }",
+                "if ($successLong.message.Length -lt 900) { exit 1 }",
+                "if ($successLong.nested.items.Count -ne 2) { exit 1 }",
+                "if ($successLong.nested.items[1].tags[0] -ne 'gamma') { exit 1 }",
+                "if ($successLong.nested.matrix[1][1] -ne 4) { exit 1 }",
+                "$successMultiline = Invoke-PaperOperations @('success-multiline')",
+                "if ($successMultiline.ok -ne $true) { exit 1 }",
+                "if ($successMultiline.outer.inner -ne 42) { exit 1 }",
+                "if ($successMultiline.outer.items[1].x -ne 2) { exit 1 }",
+                    "Invoke-PaperOperations @('promotion-decision', '--reference-file', 'ref.json', '--policy-file', 'policy.json') | Out-Null",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+    completed = subprocess.run(
+        [
+            powershell,
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(helper_script),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode != 0
+    assert "<truncated>" in completed.stdout
+    assert "abc123" not in completed.stdout
+    assert "def456" not in completed.stdout
+    assert "ghi789" not in completed.stdout
+    assert "verysecret" not in completed.stdout
+    assert "paper_operations command failed." in completed.stderr
+    assert "subcommand: promotion-decision" in completed.stderr
+    assert "exit_code: 1" in completed.stderr
+    assert "stdout:" in completed.stderr
+    assert "stderr:" in completed.stderr
+    assert "abc123" not in completed.stderr
+    assert "def456" not in completed.stderr
+    assert "ghi789" not in completed.stderr
+    assert "verysecret" not in completed.stderr
+    assert not any(temp_root.iterdir())
 
 
 def test_session_start_requires_registry_entry(tmp_path, monkeypatch, sample_btc_data):
