@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import hashlib
 import os
+import subprocess
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -1217,6 +1218,8 @@ def test_session_active_cli_reports_active_session(tmp_path, monkeypatch, sample
 
 def test_start_campaign_script_contains_session_active_recovery_and_atomic_write():
     script = Path("start-paper-campaign.ps1").read_text(encoding="utf-8")
+    assert "ConvertFrom-JsonCompatible" in script
+    assert "ConvertFrom-Json -Depth" not in script
     assert "session active" in script
     assert "SESSION_STARTING" in script
     assert "SESSION_STARTED" in script
@@ -1259,6 +1262,59 @@ def test_start_campaign_script_contains_session_active_recovery_and_atomic_write
     assert "campaign inclusion_rule mismatch." in script
     assert "binding_hash mismatch." in script
     assert "Recovered active session" in script
+
+
+def test_start_campaign_script_review_is_read_only_and_ps51_json_round_trip(tmp_path):
+    project_root = Path.cwd()
+    script_path = project_root / "start-paper-campaign.ps1"
+    review_dir = tmp_path / "paper_data_review"
+    review_dir.mkdir(parents=True, exist_ok=True)
+    review_dir.rmdir()
+
+    nested_json = '{"outer":{"inner":42,"items":[1,{"x":2}]}}'
+    round_trip = subprocess.run(
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            f'$json = \'{nested_json}\'; $obj = $json | ConvertFrom-Json; if ($obj.outer.inner -ne 42 -or $obj.outer.items[1].x -ne 2) {{ exit 1 }}',
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert round_trip.returncode == 0
+
+    review = subprocess.run(
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(script_path),
+            "-Review",
+            "-ProjectRoot",
+            str(project_root),
+            "-PaperDataDir",
+            str(review_dir),
+            "-ReferenceConfigFile",
+            str(project_root / "reference-config.json"),
+            "-PromotionPolicyFile",
+            str(project_root / "promotion_policy.json"),
+            "-CampaignPolicyFile",
+            str(project_root / "campaign_policy.json"),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert review.returncode == 0
+    assert "Review mode: no commands will be executed." in review.stdout
+    assert "No command has been executed." in review.stdout
+    assert not review_dir.exists()
 
 
 def test_session_start_requires_registry_entry(tmp_path, monkeypatch, sample_btc_data):
