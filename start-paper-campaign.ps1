@@ -26,6 +26,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$script:ConvertFromJsonSupportsDepth = $null
 
 function Fail {
     param([Parameter(Mandatory = $true)][string]$Message)
@@ -41,6 +42,25 @@ function Convert-FromUtcIso {
     param([Parameter(Mandatory = $true)][string]$Value)
     $dto = [datetimeoffset]::Parse($Value, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind)
     return $dto.UtcDateTime
+}
+
+function ConvertFrom-JsonCompatible {
+    param([Parameter(Mandatory = $true)][string]$JsonText)
+    if ([string]::IsNullOrWhiteSpace($JsonText)) {
+        Fail 'JSON is invalid.'
+    }
+    if ($null -eq $script:ConvertFromJsonSupportsDepth) {
+        $script:ConvertFromJsonSupportsDepth = (Get-Command ConvertFrom-Json).Parameters.ContainsKey('Depth')
+    }
+    try {
+        $arguments = @{}
+        if ($script:ConvertFromJsonSupportsDepth) {
+            $arguments['Depth'] = 100
+        }
+        return ($JsonText | ConvertFrom-Json @arguments -ErrorAction Stop)
+    } catch {
+        Fail 'JSON is invalid.'
+    }
 }
 
 function Assert-StrictBool {
@@ -94,7 +114,7 @@ function Read-JsonFileStrict {
         Fail "$Label is empty."
     }
     try {
-        return $raw | ConvertFrom-Json -Depth 100
+        return ConvertFrom-JsonCompatible -JsonText $raw
     } catch {
         Fail "$Label is invalid JSON."
     }
@@ -160,7 +180,7 @@ function Invoke-PaperOperations {
         if ([string]::IsNullOrWhiteSpace($outText)) {
             return $null
         }
-        return $outText | ConvertFrom-Json -Depth 100
+        return ConvertFrom-JsonCompatible -JsonText $outText
     } finally {
         Remove-Item -LiteralPath $stdout, $stderr -Force -ErrorAction SilentlyContinue
     }
@@ -512,7 +532,7 @@ function Invoke-SessionStart {
             Fail 'persisted runtime session contract hash mismatch.'
         }
         if ($plan.session_state -ne 'RUNNING') {
-            $persistedPlan = $plan | ConvertTo-Json -Depth 50 | ConvertFrom-Json -Depth 50
+            $persistedPlan = ConvertFrom-JsonCompatible -JsonText ($plan | ConvertTo-Json -Depth 50)
             $persistedPlan.status = 'SESSION_STARTED'
             $persistedPlan.session_state = 'RUNNING'
             $persistedPlan.runtime_contract_hash = $runtimeStatus.contract_hash
@@ -587,7 +607,7 @@ function Invoke-SessionStart {
         if ($runtimeStatus.contract_hash -ne $active.contract_hash) {
             Fail 'recovered runtime session contract hash mismatch.'
         }
-        $recoveredPlan = $plan | ConvertTo-Json -Depth 50 | ConvertFrom-Json -Depth 50
+        $recoveredPlan = ConvertFrom-JsonCompatible -JsonText ($plan | ConvertTo-Json -Depth 50)
         $recoveredPlan.status = 'SESSION_STARTED'
         $recoveredPlan.session_id = $active.session_id
         $recoveredPlan.session_state = 'RUNNING'
@@ -601,7 +621,7 @@ function Invoke-SessionStart {
         Fail 'operational plan must be PREPARED or SESSION_STARTING.'
     }
 
-    $startingPlan = $plan | ConvertTo-Json -Depth 50 | ConvertFrom-Json -Depth 50
+    $startingPlan = ConvertFrom-JsonCompatible -JsonText ($plan | ConvertTo-Json -Depth 50)
     $startingPlan.status = 'SESSION_STARTING'
     Save-OperationalPlan -Plan $startingPlan -Path $planPath
 
@@ -624,7 +644,7 @@ function Invoke-SessionStart {
         if ($sessionStatus.contract_hash -ne $startingPlan.runtime_contract_hash -and $startingPlan.runtime_contract_hash) {
             Fail 'session start contract hash mismatch.'
         }
-        $startedPlan = $startingPlan | ConvertTo-Json -Depth 50 | ConvertFrom-Json -Depth 50
+        $startedPlan = ConvertFrom-JsonCompatible -JsonText ($startingPlan | ConvertTo-Json -Depth 50)
         $startedPlan.status = 'SESSION_STARTED'
         $startedPlan.session_id = $sessionStart.session_id
         $startedPlan.session_state = $sessionStatus.state
