@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import sqlite3
+import sys
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from contextlib import contextmanager
@@ -1474,6 +1475,9 @@ def test_start_campaign_script_contains_session_active_recovery_and_atomic_write
     script = Path("start-paper-campaign.ps1").read_text(encoding="utf-8")
     assert "ConvertFrom-JsonCompatible" in script
     assert "ConvertFrom-Json -Depth" not in script
+    assert "Get-PaperOperationsSubcommand" in script
+    assert "Format-PaperOperationsStreamSummary" in script
+    assert "Get-PaperOperationsStreamSummary" in script
     assert "session active" in script
     assert "SESSION_STARTING" in script
     assert "SESSION_STARTED" in script
@@ -1505,6 +1509,14 @@ def test_start_campaign_script_contains_session_active_recovery_and_atomic_write
     assert "session start revalidation failed." in script
     assert "active runtime session decision hash mismatch." in script
     assert "persisted runtime session decision hash mismatch." in script
+    assert "paper operations command failed." in script
+    assert "subcommand: {0}" in script
+    assert "exit_code: {0}" in script
+    assert "stdout: {0}" in script
+    assert "stderr: {0}" in script
+    assert "<empty>" in script
+    assert "<unavailable>" in script
+    assert "<truncated>" in script
     assert "recoveredPlan.session_state = 'RUNNING'" in script
     assert "recoveredPlan.status = 'SESSION_STARTED'" in script
     assert "cohort hash mismatch." in script
@@ -1608,6 +1620,82 @@ def test_start_campaign_script_review_is_read_only_and_ps51_json_round_trip(tmp_
     assert "Review mode: no commands will be executed." in review.stdout
     assert "No command has been executed." in review.stdout
     assert not review_dir.exists()
+
+
+def test_invoke_paper_operations_reports_sanitized_failure_and_cleans_temp_files(tmp_path):
+    project_root = Path.cwd()
+    script_path = project_root / "start-paper-campaign.ps1"
+    powershell = shutil.which("powershell.exe") or shutil.which("pwsh")
+    if powershell is None:
+        pytest.skip("No PowerShell executable available for wrapper diagnostics test.")
+
+    temp_root = tmp_path / "wrapper-temp"
+    temp_root.mkdir(parents=True, exist_ok=True)
+
+    helper_script = tmp_path / "invoke-probe.ps1"
+    helper_script.write_text(
+        "\n".join(
+            [
+                "Set-StrictMode -Version Latest",
+                "$ErrorActionPreference = 'Stop'",
+                f"$env:TEMP = '{temp_root}'",
+                f"$env:TMP = '{temp_root}'",
+                "function Start-Process {",
+                "    param(",
+                "        [string]$FilePath,",
+                "        [string]$WindowStyle,",
+                "        [switch]$PassThru,",
+                "        [switch]$Wait,",
+                "        [string]$RedirectStandardOutput,",
+                "        [string]$RedirectStandardError,",
+                "        [object[]]$ArgumentList",
+                "    )",
+                "    $argsText = @($ArgumentList)",
+                "    if ($argsText -contains 'success') {",
+                "        Set-Content -LiteralPath $RedirectStandardOutput -Value (@('{\"ok\":true,\"echo\":[\"success\"]}') -join [Environment]::NewLine) -Encoding UTF8",
+                "        Set-Content -LiteralPath $RedirectStandardError -Value '' -Encoding UTF8",
+                "        return [pscustomobject]@{ ExitCode = 0 }",
+                "    }",
+                "    Set-Content -LiteralPath $RedirectStandardOutput -Value 'stdout token=abc123 secret=def456 api_key=ghi789 Authorization: Bearer verysecret' -Encoding UTF8",
+                "    Set-Content -LiteralPath $RedirectStandardError -Value 'stderr token=abc123 secret=def456 api_key=ghi789 Authorization: Bearer verysecret' -Encoding UTF8",
+                "    return [pscustomobject]@{ ExitCode = 1 }",
+                "}",
+                f'. "{script_path}" -Review -ProjectRoot "{project_root}" -PaperDataDir "{tmp_path / "paper_data"}" -ReferenceConfigFile "{project_root / "reference-config.json"}" -PromotionPolicyFile "{project_root / "promotion_policy.json"}" -CampaignPolicyFile "{project_root / "campaign_policy.json"}" -PythonExe "{sys.executable}"',
+                "$success = Invoke-PaperOperations @('success')",
+                "if ($success.ok -ne $true -or $success.echo[0] -ne 'success') { exit 1 }",
+                "try {",
+                "    Invoke-PaperOperations @('promotion-decision', '--reference-file', 'ref.json', '--policy-file', 'policy.json') | Out-Null",
+                "    exit 1",
+                "} catch {",
+                "    $message = $_.Exception.Message",
+                "    if ($message -notmatch 'paper operations command failed\\.') { exit 1 }",
+                "    if ($message -notmatch 'subcommand: promotion-decision') { exit 1 }",
+                "    if ($message -notmatch 'exit_code: 1') { exit 1 }",
+                "    if ($message -notmatch 'stdout:') { exit 1 }",
+                "    if ($message -notmatch 'stderr:') { exit 1 }",
+                "    if ($message -match 'abc123|def456|ghi789|verysecret') { exit 1 }",
+                "    if ($message -notmatch '<redacted>') { exit 1 }",
+                "}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        [
+            powershell,
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(helper_script),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert completed.returncode == 0
+    assert not any(temp_root.iterdir())
 
 
 def test_session_start_requires_registry_entry(tmp_path, monkeypatch, sample_btc_data):

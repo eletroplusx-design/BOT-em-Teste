@@ -72,6 +72,97 @@ function Set-JsonObjectSourcePath {
     return $Object
 }
 
+function Get-PaperOperationsSubcommand {
+    param([Parameter(Mandatory = $true)][string[]]$Arguments)
+    $valueArgs = @(
+        '--backup-dir',
+        '--backup-name',
+        '--campaign-db',
+        '--campaign-id',
+        '--cohort-hash',
+        '--copy-existing-trades',
+        '--data-dir',
+        '--decision-file',
+        '--input',
+        '--interval',
+        '--output',
+        '--paper-data-dir',
+        '--period-end-utc',
+        '--period-start-utc',
+        '--policy-file',
+        '--project-root',
+        '--reference-file',
+        '--runtime-db',
+        '--session-id',
+        '--strategy-version',
+        '--symbol',
+        '--inclusion-rule'
+    )
+    $knownSubcommands = @('initialize', 'phase5-reference', 'promotion-decision', 'cohort', 'campaign', 'backup', 'restore', 'doctor', 'session', 'report', 'lock')
+    for ($index = 0; $index -lt $Arguments.Count; $index++) {
+        $argument = $Arguments[$index]
+        if ($valueArgs -contains $argument) {
+            $index++
+            continue
+        }
+        if ($knownSubcommands -contains $argument) {
+            return $argument
+        }
+    }
+    if ($Arguments.Count -gt 0) {
+        return $Arguments[0]
+    }
+    return '<unknown>'
+}
+
+function Format-PaperOperationsStreamSummary {
+    param(
+        [Parameter(Mandatory = $false)][string]$Text,
+        [Parameter(Mandatory = $false)][int]$MaxLength = 800
+    )
+    if ([string]::IsNullOrWhiteSpace($Text)) {
+        return '<empty>'
+    }
+    $summary = $Text.Trim()
+    $patterns = @(
+        @{ Pattern = '(?i)\bBearer\s+[A-Za-z0-9._\-/+=]+'; Replacement = 'Bearer <redacted>' },
+        @{ Pattern = '(?i)\bAuthorization:\s*[^\r\n]+'; Replacement = 'Authorization: <redacted>' },
+        @{ Pattern = '(?i)("?(?:api[_-]?key|secret|password|token)"?\s*[:=]\s*)("[^"]*"|''[^'']*''|[^\s\r\n,;]+)'; Replacement = '$1<redacted>' },
+        @{ Pattern = '(?i)\b(Authorization|Bearer)\b[^\r\n]*'; Replacement = '$1 <redacted>' }
+    )
+    foreach ($pattern in $patterns) {
+        $summary = [System.Text.RegularExpressions.Regex]::Replace($summary, $pattern.Pattern, $pattern.Replacement)
+    }
+    $lines = @($summary -split '\r?\n' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($lines.Count -eq 0) {
+        return '<empty>'
+    }
+    $summary = ($lines | Select-Object -First 5) -join ' | '
+    if ($summary.Length -gt $MaxLength) {
+        $summary = $summary.Substring(0, $MaxLength).TrimEnd() + '...<truncated>'
+    }
+    if ([string]::IsNullOrWhiteSpace($summary)) {
+        return '<empty>'
+    }
+    return $summary
+}
+
+function Get-PaperOperationsStreamSummary {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $false)][int]$MaxLength = 800
+    )
+    try {
+        if (-not (Test-Path -LiteralPath $Path)) {
+            return '<unavailable>'
+        }
+        $text = Get-Content -LiteralPath $Path -Raw -Encoding UTF8
+        return Format-PaperOperationsStreamSummary -Text $text -MaxLength $MaxLength
+    } catch {
+        return '<unavailable>'
+    }
+}
+
 function Assert-StrictBool {
     param(
         [Parameter(Mandatory = $true)]$Value,
@@ -178,13 +269,18 @@ function Invoke-PaperOperations {
     $allArguments = @('-m', 'paper_operations') + $Arguments
     try {
         $process = Start-Process -FilePath $PythonExe -WindowStyle Hidden -PassThru -Wait -RedirectStandardOutput $stdout -RedirectStandardError $stderr -ArgumentList $allArguments
-        $outText = if (Test-Path -LiteralPath $stdout) { Get-Content -LiteralPath $stdout -Raw -Encoding UTF8 } else { '' }
-        $errText = if (Test-Path -LiteralPath $stderr) { Get-Content -LiteralPath $stderr -Raw -Encoding UTF8 } else { '' }
+        $outText = Get-PaperOperationsStreamSummary -Path $stdout
+        $errText = Get-PaperOperationsStreamSummary -Path $stderr
         if ($process.ExitCode -ne 0) {
-            if (-not [string]::IsNullOrWhiteSpace($errText)) {
-                Write-Host $errText.Trim()
-            }
-            Fail "paper_operations command failed."
+            $subcommand = Get-PaperOperationsSubcommand -Arguments $Arguments
+            $failureMessage = @(
+                'paper operations command failed.',
+                ('subcommand: {0}' -f $subcommand),
+                ('exit_code: {0}' -f $process.ExitCode),
+                ('stdout: {0}' -f $outText),
+                ('stderr: {0}' -f $errText)
+            ) -join [Environment]::NewLine
+            throw $failureMessage
         }
         if ([string]::IsNullOrWhiteSpace($outText)) {
             return $null
