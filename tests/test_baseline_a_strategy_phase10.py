@@ -6,8 +6,10 @@ from decimal import Decimal
 import pytest
 
 from backtesting import BacktestConfig, LeakFreeBacktestEngine
+from backtesting.errors import BacktestConfigurationError
 from domain import Candle, DataSource, MarketSnapshot, Direction
 from historical_experiments import HistoricalExperimentValidationError, build_historical_experiment_plan
+from validation.errors import ValidationSelectionError
 from historical_replay import HistoricalDataset
 from market_data import HistoricalDatasetRequest, historical_content_hash
 from market_data.historical_manifest import build_historical_manifest
@@ -173,9 +175,92 @@ def _snapshot(candles: tuple[Candle, ...], *, regime: str | None = None) -> Mark
     )
 
 
+def _history_with_symbol(candles: tuple[Candle, ...], symbol: str, interval: str) -> tuple[Candle, ...]:
+    return tuple(
+        Candle.from_dict(
+            {
+                "open_time": candle.open_time,
+                "close_time": candle.close_time,
+                "open": candle.open,
+                "high": candle.high,
+                "low": candle.low,
+                "close": candle.close,
+                "volume": candle.volume,
+                "symbol": symbol,
+                "interval": interval,
+                "source": candle.source,
+            }
+        )
+        for candle in candles
+    )
+
+
 def test_strategy_requires_enough_history():
     candles = _bullish_pullback_history(count=200)
     assert baseline_a_strategy(candles, _snapshot(candles)) is None
+
+
+def test_backtest_config_helper_rejects_divergent_contract():
+    with pytest.raises(BacktestConfigurationError):
+        baseline_a_backtest_config(symbol="ETHUSDT")
+    with pytest.raises(BacktestConfigurationError):
+        baseline_a_backtest_config(interval="15m")
+    with pytest.raises(BacktestConfigurationError):
+        baseline_a_backtest_config(interval="4h")
+
+
+def test_trusted_runner_rejects_divergent_contract():
+    with pytest.raises(ValidationSelectionError):
+        baseline_a_trusted_runner(symbol="ETHUSDT")
+    with pytest.raises(ValidationSelectionError):
+        baseline_a_trusted_runner(interval="15m")
+    with pytest.raises(ValidationSelectionError):
+        baseline_a_trusted_runner(interval="4h")
+
+
+def test_historical_plan_rejects_divergent_contract(tmp_path):
+    candles = _bullish_pullback_history(count=260)
+    request = HistoricalDatasetRequest(
+        provider="binance.public.klines",
+        endpoint="https://api.binance.com/api/v3/klines",
+        symbol=BASELINE_A_SYMBOL,
+        interval=BASELINE_A_INTERVAL,
+        requested_start_utc=candles[0].open_time,
+        requested_end_utc=candles[-1].close_time,
+        page_size=1000,
+        closed_candles_only=True,
+    )
+    manifest = build_historical_manifest(
+        request=request,
+        effective_start_utc=candles[0].open_time,
+        effective_end_utc=candles[-1].close_time,
+        created_at_utc=candles[-1].close_time + timedelta(days=1),
+        candle_count=len(candles),
+        page_count=1,
+        gap_count=0,
+        duplicate_count=0,
+        content_hash=historical_content_hash(candles),
+    )
+    dataset = HistoricalDataset(manifest=manifest, candles=candles)
+    path = tmp_path / "baseline-a-historical-divergent.json"
+    save_historical_dataset(path, dataset)
+
+    with pytest.raises(HistoricalExperimentValidationError):
+        baseline_a_historical_experiment_plan(path, symbol="ETHUSDT")
+    with pytest.raises(HistoricalExperimentValidationError):
+        baseline_a_historical_experiment_plan(path, interval="15m")
+    with pytest.raises(HistoricalExperimentValidationError):
+        baseline_a_historical_experiment_plan(path, interval="4h")
+
+
+def test_strategy_rejects_divergent_symbol_or_interval():
+    candles = _bullish_pullback_history()
+    eth_candles = _history_with_symbol(candles, "ETHUSDT", BASELINE_A_INTERVAL)
+    fast_candles = _history_with_symbol(candles, BASELINE_A_SYMBOL, "15m")
+    slow_candles = _history_with_symbol(candles, BASELINE_A_SYMBOL, "4h")
+    assert baseline_a_strategy(eth_candles, _snapshot(eth_candles)) is None
+    assert baseline_a_strategy(fast_candles, _snapshot(fast_candles)) is None
+    assert baseline_a_strategy(slow_candles, _snapshot(slow_candles)) is None
 
 
 def test_strategy_rejects_when_ema50_is_not_above_ema200():

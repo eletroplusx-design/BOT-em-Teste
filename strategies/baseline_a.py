@@ -6,8 +6,9 @@ from decimal import Decimal
 from typing import Any
 
 from backtesting import BacktestConfig, LeakFreeBacktestEngine
+from backtesting.errors import BacktestConfigurationError
 from domain import Candle, DataSource, Direction, Signal
-from historical_experiments import build_historical_experiment_plan
+from historical_experiments import HistoricalExperimentValidationError, build_historical_experiment_plan
 from historical_replay import HistoricalDataset
 from validation import CandidateConfig, SelectionCriteria, TrustedLeakFreeBacktestRunner, ValidationSplitConfig
 from validation.errors import ValidationSelectionError
@@ -47,6 +48,10 @@ def baseline_a_candidate_config() -> CandidateConfig:
 
 
 def baseline_a_backtest_config(*, symbol: str = BASELINE_A_SYMBOL, interval: str = BASELINE_A_INTERVAL) -> BacktestConfig:
+    if symbol != BASELINE_A_SYMBOL:
+        raise BacktestConfigurationError("baseline A requires BTCUSDT.")
+    if interval != BASELINE_A_INTERVAL:
+        raise BacktestConfigurationError("baseline A requires 1h.")
     return BacktestConfig(
         initial_capital=Decimal("10000"),
         risk_percent=Decimal("0.5"),
@@ -127,6 +132,17 @@ def baseline_a_strategy(history: Sequence[Candle], snapshot) -> Signal | None:
     candles = tuple(history)
     if len(candles) < BASELINE_A_MIN_HISTORY:
         return None
+    if any(candle.symbol != BASELINE_A_SYMBOL for candle in candles):
+        return None
+    if any(candle.interval != BASELINE_A_INTERVAL for candle in candles):
+        return None
+    if snapshot is not None:
+        snapshot_symbol = getattr(snapshot, "symbol", None)
+        snapshot_interval = getattr(snapshot, "interval", None)
+        if snapshot_symbol not in (None, BASELINE_A_SYMBOL):
+            return None
+        if snapshot_interval not in (None, BASELINE_A_INTERVAL):
+            return None
 
     closes = _closes(candles)
     ema20 = _ema_series(closes, BASELINE_A_FAST_EMA)
@@ -200,6 +216,11 @@ def baseline_a_strategy_factory(candidate: CandidateConfig) -> Callable[[Sequenc
 
 
 def baseline_a_trusted_runner(*, symbol: str = BASELINE_A_SYMBOL, interval: str = BASELINE_A_INTERVAL) -> TrustedLeakFreeBacktestRunner:
+    if symbol != BASELINE_A_SYMBOL:
+        raise ValidationSelectionError("baseline A requires BTCUSDT.")
+    if interval != BASELINE_A_INTERVAL:
+        raise ValidationSelectionError("baseline A requires 1h.")
+
     def _engine_factory() -> LeakFreeBacktestEngine:
         return LeakFreeBacktestEngine(baseline_a_backtest_config(symbol=symbol, interval=interval))
 
@@ -218,6 +239,10 @@ def baseline_a_historical_experiment_plan(
     interval: str = BASELINE_A_INTERVAL,
     seed: int | None = None,
 ) -> Any:
+    if symbol != BASELINE_A_SYMBOL:
+        raise HistoricalExperimentValidationError("baseline A requires BTCUSDT.")
+    if interval != BASELINE_A_INTERVAL:
+        raise HistoricalExperimentValidationError("baseline A requires 1h.")
     runner = baseline_a_trusted_runner(symbol=symbol, interval=interval)
     contract = runner.execution_contract()
     config = baseline_a_backtest_config(symbol=symbol, interval=interval)
