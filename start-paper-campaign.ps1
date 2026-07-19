@@ -26,6 +26,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$script:ConvertFromJsonSupportsDepth = $null
 
 function Fail {
     param([Parameter(Mandatory = $true)][string]$Message)

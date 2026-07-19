@@ -1268,6 +1268,9 @@ def test_start_campaign_script_contains_session_active_recovery_and_atomic_write
 def test_start_campaign_script_review_is_read_only_and_ps51_json_round_trip(tmp_path):
     project_root = Path.cwd()
     script_path = project_root / "start-paper-campaign.ps1"
+    reference_config_path = project_root / "reference-config.json"
+    promotion_policy_path = project_root / "promotion_policy.json"
+    campaign_policy_path = project_root / "campaign_policy.json"
     review_dir = tmp_path / "paper_data_review"
     review_dir.mkdir(parents=True, exist_ok=True)
     review_dir.rmdir()
@@ -1277,20 +1280,48 @@ def test_start_campaign_script_review_is_read_only_and_ps51_json_round_trip(tmp_
         pytest.skip("No PowerShell executable available for script round-trip test.")
 
     nested_json = '{"outer":{"inner":42,"items":[1,{"x":2}]}}'
-    round_trip = subprocess.run(
+    invalid_json = '{"outer":'
+    helper_probe_script = tmp_path / "helper-probe.ps1"
+    helper_probe_script.write_text(
+        "\n".join(
+            [
+                "Set-StrictMode -Version Latest",
+                "$ErrorActionPreference = 'Stop'",
+                f'. "{script_path}" -Review -ProjectRoot "{project_root}" -PaperDataDir "{review_dir}" -ReferenceConfigFile "{reference_config_path}" -PromotionPolicyFile "{promotion_policy_path}" -CampaignPolicyFile "{campaign_policy_path}"',
+                "$obj = ConvertFrom-JsonCompatible -JsonText @'",
+                nested_json,
+                "'@",
+                "$cacheProbe = ConvertFrom-JsonCompatible -JsonText @'",
+                nested_json,
+                "'@",
+                "if ($obj.outer.inner -ne 42 -or $obj.outer.items[1].x -ne 2) { exit 1 }",
+                "if ($cacheProbe.outer.inner -ne 42 -or $cacheProbe.outer.items[1].x -ne 2) { exit 1 }",
+                "try {",
+                "    ConvertFrom-JsonCompatible -JsonText @'",
+                invalid_json,
+                "'@ | Out-Null",
+                "    exit 1",
+                "} catch {",
+                "    if ($_.Exception.Message -notmatch 'JSON is invalid') { exit 1 }",
+                "}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    helper_probe = subprocess.run(
         [
             powershell,
             "-NoProfile",
             "-ExecutionPolicy",
             "Bypass",
-            "-Command",
-            f'$json = \'{nested_json}\'; $obj = $json | ConvertFrom-Json; if ($obj.outer.inner -ne 42 -or $obj.outer.items[1].x -ne 2) {{ exit 1 }}',
+            "-File",
+            str(helper_probe_script),
         ],
         capture_output=True,
         text=True,
         check=True,
     )
-    assert round_trip.returncode == 0
+    assert helper_probe.returncode == 0
 
     review = subprocess.run(
         [
