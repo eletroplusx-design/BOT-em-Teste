@@ -80,6 +80,16 @@ def _build_request(
     )
 
 
+def _require_max_pages(value: Any) -> int:
+    if type(value) is not int:
+        raise HistoricalDataValidationError("max_pages must be an integer.")
+    if value <= 0:
+        raise HistoricalDataValidationError("max_pages must be greater than zero.")
+    if value > HISTORICAL_MAX_PAGES:
+        raise HistoricalDataValidationError(f"max_pages must be <= {HISTORICAL_MAX_PAGES}.")
+    return value
+
+
 def _request_matches_dataset(request: HistoricalDatasetRequest, dataset: HistoricalDataset) -> bool:
     manifest = dataset.manifest
     return manifest.matches_request(request)
@@ -130,8 +140,7 @@ def fetch_historical_public_klines(
     max_pages: int = HISTORICAL_MAX_PAGES,
 ) -> HistoricalDataset:
     provider = provider or BinancePublicKlinesProvider()
-    if max_pages <= 0:
-        raise HistoricalDataValidationError("max_pages must be greater than zero.")
+    max_pages = _require_max_pages(max_pages)
     request = _build_request(
         symbol=symbol,
         interval=interval,
@@ -141,11 +150,13 @@ def fetch_historical_public_klines(
         provider_identity=getattr(provider, "provider_identity", provider.__class__.__name__),
         endpoint=getattr(provider, "base_url", HISTORICAL_ENDPOINT),
     )
+    operation_now = _utcnow()
+    if request.requested_end_utc > operation_now:
+        raise HistoricalDataValidationError("requested_end_utc must not be in the future.")
 
     current_start = request.requested_start_utc
     current_start_ms = int(current_start.timestamp() * 1000)
     end_ms = int(request.requested_end_utc.timestamp() * 1000)
-    now = request.requested_end_utc
     candles: list[Candle] = []
     page_count = 0
     last_open_time: datetime | None = None
@@ -160,12 +171,12 @@ def fetch_historical_public_klines(
             start_time=current_start_ms,
             end_time=end_ms,
         )
-        page_candles = _validate_page_candles(payload=payload, symbol=request.symbol, interval=request.interval, now=now)
+        page_candles = _validate_page_candles(payload=payload, symbol=request.symbol, interval=request.interval, now=operation_now)
         if not page_candles:
             raise HistoricalDataValidationError("Historical page did not return closed candles.")
         if page_count == 0:
-            if page_candles[0].open_time < request.requested_start_utc:
-                raise HistoricalDataValidationError("Historical page starts before requested_start_utc.")
+            if page_candles[0].open_time != request.requested_start_utc:
+                raise HistoricalDataValidationError("Historical page must start at requested_start_utc.")
         else:
             expected_open = _next_open_time(candles[-1])
             if page_candles[0].open_time < expected_open:
@@ -179,13 +190,14 @@ def fetch_historical_public_klines(
         candles.extend(page_candles)
         page_count += 1
         last_open_time = candles[-1].open_time
+        if candles[-1].close_time < request.requested_end_utc:
+            current_start_ms = int((_next_open_time(candles[-1])).timestamp() * 1000)
+            continue
+        if candles[-1].close_time != request.requested_end_utc:
+            raise HistoricalDataValidationError("Historical dataset does not end at requested_end_utc.")
         if len(page_candles) < request.page_size:
-            if candles[-1].close_time < request.requested_end_utc:
-                raise HistoricalDataValidationError("Historical dataset ended before requested_end_utc.")
             break
-        if candles[-1].close_time >= request.requested_end_utc:
-            break
-        current_start_ms = int((_next_open_time(candles[-1])).timestamp() * 1000)
+        break
 
     final_candles = _validate_page_candles(
         payload=[
@@ -207,9 +219,9 @@ def fetch_historical_public_klines(
         ],
         symbol=request.symbol,
         interval=request.interval,
-        now=request.requested_end_utc,
+        now=operation_now,
     )
-    return _finalize_dataset(request=request, candles=final_candles, page_count=page_count)
+    return _finalize_dataset(request=request, candles=final_candles, created_at_utc=operation_now, page_count=page_count)
 
 
 def prepare_historical_dataset(
@@ -223,6 +235,7 @@ def prepare_historical_dataset(
     page_size: int = MAX_BINANCE_LIMIT,
     max_pages: int = HISTORICAL_MAX_PAGES,
 ) -> dict[str, Any]:
+    resolved_provider = provider or BinancePublicKlinesProvider()
     output_path = Path(output_file)
     request = _build_request(
         symbol=symbol,
@@ -230,8 +243,8 @@ def prepare_historical_dataset(
         requested_start_utc=requested_start_utc,
         requested_end_utc=requested_end_utc,
         page_size=page_size,
-        provider_identity=getattr(provider or BinancePublicKlinesProvider(), "provider_identity", "binance.public.klines"),
-        endpoint=getattr(provider or BinancePublicKlinesProvider(), "base_url", HISTORICAL_ENDPOINT),
+        provider_identity=getattr(resolved_provider, "provider_identity", "binance.public.klines"),
+        endpoint=getattr(resolved_provider, "base_url", HISTORICAL_ENDPOINT),
     )
     if output_path.exists():
         existing = load_historical_dataset(output_path)
@@ -249,7 +262,7 @@ def prepare_historical_dataset(
         }
 
     dataset = fetch_historical_public_klines(
-        provider=provider,
+        provider=resolved_provider,
         symbol=symbol,
         interval=interval,
         requested_start_utc=requested_start_utc,

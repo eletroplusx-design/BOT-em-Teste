@@ -7,10 +7,11 @@ from hashlib import sha256
 import json
 from typing import Any, Mapping, Sequence
 
-from domain import Candle, MarketSnapshot
+from domain import Candle, DataSource, MarketSnapshot
 from domain.serialization import serialize_value
 
 from .errors import HistoricalDataIntegrityError, HistoricalDataValidationError
+from .validation import validate_klines_payload
 
 
 def _canonical_json(payload: Any) -> str:
@@ -234,19 +235,69 @@ class HistoricalDataset:
     def __post_init__(self) -> None:
         if not isinstance(self.candles, tuple):
             object.__setattr__(self, "candles", tuple(self.candles))
+        if not self.candles:
+            raise HistoricalDataIntegrityError("Historical dataset must contain candles.")
         if self.manifest.candle_count != len(self.candles):
             raise HistoricalDataIntegrityError("manifest candle_count does not match candles.")
-        if self.candles and self.manifest.content_hash != candles_content_hash(self.candles):
+        if self.manifest.closed_candles_only is not True:
+            raise HistoricalDataIntegrityError("closed_candles_only must be true.")
+        if self.manifest.gap_count != 0:
+            raise HistoricalDataIntegrityError("gap_count must be zero.")
+        if self.manifest.duplicate_count != 0:
+            raise HistoricalDataIntegrityError("duplicate_count must be zero.")
+        if any(candle.symbol != self.manifest.symbol for candle in self.candles):
+            raise HistoricalDataIntegrityError("Historical dataset candle symbol mismatch.")
+        if any(candle.interval != self.manifest.interval for candle in self.candles):
+            raise HistoricalDataIntegrityError("Historical dataset candle interval mismatch.")
+        if any(candle.source != DataSource.BINANCE for candle in self.candles):
+            raise HistoricalDataIntegrityError("Historical dataset candle source mismatch.")
+        if self.candles[0].open_time != self.manifest.requested_start_utc:
+            raise HistoricalDataIntegrityError("requested_start_utc does not match candles.")
+        if self.candles[-1].close_time != self.manifest.requested_end_utc:
+            raise HistoricalDataIntegrityError("requested_end_utc does not match candles.")
+        if self.manifest.effective_start_utc != self.candles[0].open_time:
+            raise HistoricalDataIntegrityError("effective_start_utc does not match candles.")
+        if self.manifest.effective_end_utc != self.candles[-1].close_time:
+            raise HistoricalDataIntegrityError("effective_end_utc does not match candles.")
+        if self.manifest.effective_end_utc > self.manifest.created_at_utc:
+            raise HistoricalDataIntegrityError("effective_end_utc cannot be after created_at_utc.")
+        try:
+            validated = validate_klines_payload(
+                [
+                    [
+                        int(candle.open_time.timestamp() * 1000),
+                        str(candle.open),
+                        str(candle.high),
+                        str(candle.low),
+                        str(candle.close),
+                        str(candle.volume),
+                        int(candle.close_time.timestamp() * 1000),
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                    ]
+                    for candle in self.candles
+                ],
+                symbol=self.manifest.symbol,
+                interval=self.manifest.interval,
+                now=self.manifest.effective_end_utc,
+            )
+        except Exception as exc:
+            raise HistoricalDataIntegrityError("Historical dataset candles are invalid.") from exc
+        if tuple(candle.to_dict() for candle in validated) != tuple(candle.to_dict() for candle in self.candles):
+            raise HistoricalDataIntegrityError("Historical dataset candles are inconsistent.")
+        if self.manifest.content_hash != candles_content_hash(self.candles):
             raise HistoricalDataIntegrityError("content_hash mismatch.")
         if self.manifest.dataset_id != self.manifest.content_hash:
             raise HistoricalDataIntegrityError("dataset_id must match content_hash.")
         if self.manifest.manifest_hash and self.manifest.manifest_hash != _hash_payload(self.manifest.canonical_payload()):
             raise HistoricalDataIntegrityError("manifest_hash mismatch.")
-        if self.candles:
-            first = self.candles[0].open_time
-            last = self.candles[-1].close_time
-            if first != self.manifest.effective_start_utc or last != self.manifest.effective_end_utc:
-                raise HistoricalDataIntegrityError("manifest candle bounds do not match candles.")
+        first = self.candles[0].open_time
+        last = self.candles[-1].close_time
+        if first != self.manifest.effective_start_utc or last != self.manifest.effective_end_utc:
+            raise HistoricalDataIntegrityError("manifest candle bounds do not match candles.")
 
     def as_dict(self) -> dict[str, Any]:
         manifest_payload = self.manifest.as_dict()

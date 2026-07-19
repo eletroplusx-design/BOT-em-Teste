@@ -6,7 +6,9 @@ from pathlib import Path
 
 import pytest
 
+import market_data.historical as historical
 import paper_operations as paper_ops
+from domain import Candle
 from market_data import (
     BinancePublicKlinesProvider,
     HistoricalDataConflictError,
@@ -22,6 +24,7 @@ from market_data import (
     status_historical_dataset,
     verify_historical_dataset_file,
 )
+from market_data.historical_manifest import historical_manifest_hash
 
 
 BASE_START = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
@@ -86,44 +89,66 @@ def _build_output(tmp_path: Path, name: str = "historical-dataset.json") -> Path
     return tmp_path / name
 
 
+def _recompute_dataset_hashes(payload: dict) -> None:
+    candles = [Candle.from_dict(item) for item in payload["candles"]]
+    payload["manifest"]["candle_count"] = len(candles)
+    payload["manifest"]["content_hash"] = historical_content_hash(candles)
+    payload["manifest"]["dataset_id"] = payload["manifest"]["content_hash"]
+    payload["manifest"]["manifest_hash"] = historical_manifest_hash(payload["manifest"])
+
+
 def test_historical_prepare_one_page_round_trip_and_verify(tmp_path):
     output = _build_output(tmp_path)
     page = _page(BASE_START, 1000)
     provider = SequenceProvider([page])
+    frozen_now = _request_end(BASE_START, 1000) + timedelta(days=1)
+    call_count = {"count": 0}
 
-    result = prepare_historical_dataset(
-        output_file=output,
-        provider=provider,
-        symbol="BTCUSDT",
-        interval="1h",
-        requested_start_utc=BASE_START,
-        requested_end_utc=_request_end(BASE_START, 1000),
-        page_size=1000,
-        max_pages=4,
-    )
+    def _frozen_now():
+        call_count["count"] += 1
+        return frozen_now
 
-    assert result["reused"] is False
-    assert output.exists()
-    assert result["candle_count"] == 1000
-    assert result["page_count"] == 1
-    assert result["page_size"] == 1000
-    assert provider.calls[0]["start_time"] == int(BASE_START.timestamp() * 1000)
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(historical, "_utcnow", _frozen_now)
 
-    dataset = load_historical_dataset_file(output)
-    assert len(dataset.candles) == 1000
-    assert dataset.manifest.content_hash == historical_content_hash(dataset.candles)
-    snapshots = dataset.replay_snapshots()
-    assert len(snapshots) == 1000
-    assert snapshots[0].symbol == "BTCUSDT"
-    assert snapshots[-1].timestamp == dataset.candles[-1].close_time
+    try:
+        result = prepare_historical_dataset(
+            output_file=output,
+            provider=provider,
+            symbol="BTCUSDT",
+            interval="1h",
+            requested_start_utc=BASE_START,
+            requested_end_utc=_request_end(BASE_START, 1000),
+            page_size=1000,
+            max_pages=4,
+        )
 
-    status = status_historical_dataset(input_file=output)
-    assert status["exists"] is True
-    assert status["manifest_hash"] == dataset.manifest.manifest_hash
+        assert result["reused"] is False
+        assert output.exists()
+        assert result["candle_count"] == 1000
+        assert result["page_count"] == 1
+        assert result["page_size"] == 1000
+        assert provider.calls[0]["start_time"] == int(BASE_START.timestamp() * 1000)
 
-    verify = verify_historical_dataset_file(input_file=output)
-    assert verify["verified"] is True
-    assert verify["content_hash"] == dataset.manifest.content_hash
+        dataset = load_historical_dataset_file(output)
+        assert len(dataset.candles) == 1000
+        assert dataset.manifest.content_hash == historical_content_hash(dataset.candles)
+        assert dataset.manifest.created_at_utc == frozen_now
+        assert call_count["count"] == 1
+        snapshots = dataset.replay_snapshots()
+        assert len(snapshots) == 1000
+        assert snapshots[0].symbol == "BTCUSDT"
+        assert snapshots[-1].timestamp == dataset.candles[-1].close_time
+
+        status = status_historical_dataset(input_file=output)
+        assert status["exists"] is True
+        assert status["manifest_hash"] == dataset.manifest.manifest_hash
+
+        verify = verify_historical_dataset_file(input_file=output)
+        assert verify["verified"] is True
+        assert verify["content_hash"] == dataset.manifest.content_hash
+    finally:
+        monkeypatch.undo()
 
 
 def test_historical_prepare_1001_records_two_pages_and_advances_deterministically(tmp_path):
@@ -214,10 +239,12 @@ def test_historical_prepare_rejects_gap_between_pages(tmp_path):
         )
 
 
-def test_historical_prepare_rejects_open_and_future_candles(tmp_path):
+def test_historical_prepare_rejects_open_candle(tmp_path, monkeypatch):
     output = _build_output(tmp_path, "open.json")
-    open_only = [_kline_row(BASE_START, close_delta=timedelta(hours=2))]
+    open_only = [_kline_row(BASE_START, close_delta=ONE_HOUR - ONE_MS)]
     provider = SequenceProvider([open_only])
+    frozen_now = BASE_START + timedelta(minutes=30)
+    monkeypatch.setattr(historical, "_utcnow", lambda: frozen_now)
     with pytest.raises(HistoricalDataValidationError, match="No closed candles available"):
         prepare_historical_dataset(
             output_file=output,
@@ -225,25 +252,97 @@ def test_historical_prepare_rejects_open_and_future_candles(tmp_path):
             symbol="BTCUSDT",
             interval="1h",
             requested_start_utc=BASE_START,
-            requested_end_utc=_request_end(BASE_START, 1),
+            requested_end_utc=frozen_now,
             page_size=1000,
             max_pages=2,
         )
 
-    future_output = _build_output(tmp_path, "future.json")
-    future_page = [_kline_row(BASE_START + timedelta(days=4000), base=9000)]
-    future_provider = SequenceProvider([future_page])
-    with pytest.raises(HistoricalDataValidationError, match="Future candle detected"):
-        prepare_historical_dataset(
-            output_file=future_output,
-            provider=future_provider,
+
+def test_historical_prepare_rejects_future_end_before_provider(tmp_path, monkeypatch):
+    output = _build_output(tmp_path, "future-end.json")
+    provider = SequenceProvider([_page(BASE_START, 1)])
+    frozen_now = _request_end(BASE_START, 1)
+    call_count = {"count": 0}
+
+    def _frozen_now():
+        call_count["count"] += 1
+        return frozen_now
+
+    monkeypatch.setattr(historical, "_utcnow", _frozen_now)
+
+    with pytest.raises(HistoricalDataValidationError, match="requested_end_utc must not be in the future"):
+        historical.fetch_historical_public_klines(
+            provider=provider,
             symbol="BTCUSDT",
             interval="1h",
             requested_start_utc=BASE_START,
-            requested_end_utc=_request_end(BASE_START, 1),
+            requested_end_utc=frozen_now + ONE_HOUR,
             page_size=1000,
             max_pages=2,
         )
+    assert call_count["count"] == 1
+    assert provider.calls == []
+
+
+def test_historical_prepare_rejects_future_candle_from_provider(tmp_path, monkeypatch):
+    output = _build_output(tmp_path, "future-candle.json")
+    future_open = _request_end(BASE_START, 1) + ONE_MS
+    provider = SequenceProvider([[ _kline_row(future_open, base=5000) ]])
+    frozen_now = _request_end(BASE_START, 1)
+    monkeypatch.setattr(historical, "_utcnow", lambda: frozen_now)
+
+    with pytest.raises(HistoricalDataValidationError, match="Future candle detected"):
+        prepare_historical_dataset(
+            output_file=output,
+            provider=provider,
+            symbol="BTCUSDT",
+            interval="1h",
+            requested_start_utc=BASE_START,
+            requested_end_utc=frozen_now,
+            page_size=1000,
+            max_pages=2,
+        )
+    assert len(provider.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "start_offset,label",
+    [(-ONE_HOUR, "early"), (ONE_HOUR, "late")],
+)
+def test_historical_prepare_rejects_misaligned_start(tmp_path, start_offset, label):
+    output = _build_output(tmp_path, f"start-{label}.json")
+    page_start = BASE_START + start_offset
+    provider = SequenceProvider([_page(page_start, 1, base=1500)])
+
+    with pytest.raises(HistoricalDataValidationError, match="Historical page must start at requested_start_utc"):
+        prepare_historical_dataset(
+            output_file=output,
+            provider=provider,
+            symbol="BTCUSDT",
+            interval="1h",
+            requested_start_utc=BASE_START,
+            requested_end_utc=_request_end(BASE_START, 2),
+            page_size=1000,
+            max_pages=2,
+        )
+
+
+def test_historical_prepare_rejects_missing_last_candle(tmp_path):
+    output = _build_output(tmp_path, "missing-last.json")
+    provider = SequenceProvider([_page(BASE_START, 1), []])
+
+    with pytest.raises(HistoricalDataValidationError, match="Empty or malformed response payload"):
+        prepare_historical_dataset(
+            output_file=output,
+            provider=provider,
+            symbol="BTCUSDT",
+            interval="1h",
+            requested_start_utc=BASE_START,
+            requested_end_utc=_request_end(BASE_START, 2),
+            page_size=1000,
+            max_pages=2,
+        )
+    assert len(provider.calls) == 2
 
 
 def test_historical_prepare_accepts_single_closed_page(tmp_path):
@@ -525,3 +624,120 @@ def test_historical_prepare_honors_max_pages_and_provider_errors(tmp_path):
                 page_size=1,
                 max_pages=2,
             )
+
+
+@pytest.mark.parametrize(
+    "invalid_max_pages",
+    [False, True, 0, -1, 1001, 1.5, "3"],
+)
+def test_historical_prepare_rejects_invalid_max_pages_strict(tmp_path, invalid_max_pages):
+    output = _build_output(tmp_path, f"max-pages-{invalid_max_pages}.json")
+    provider = SequenceProvider([_page(BASE_START, 1)])
+
+    with pytest.raises(HistoricalDataValidationError):
+        prepare_historical_dataset(
+            output_file=output,
+            provider=provider,
+            symbol="BTCUSDT",
+            interval="1h",
+            requested_start_utc=BASE_START,
+            requested_end_utc=_request_end(BASE_START, 1),
+            page_size=1000,
+            max_pages=invalid_max_pages,
+        )
+    assert provider.calls == []
+
+
+def test_historical_prepare_reuses_single_default_provider_instance(tmp_path, monkeypatch):
+    output = _build_output(tmp_path, "default-provider.json")
+
+    class CountingProvider:
+        provider_identity = "binance.public.klines"
+        base_url = BinancePublicKlinesProvider.base_url
+        trusted_market_data_provider = True
+        instances = 0
+
+        def __init__(self):
+            type(self).instances += 1
+            self.calls = []
+
+        def fetch_klines(self, symbol, interval, limit=500, *, start_time=None, end_time=None):
+            self.calls.append(
+                {
+                    "symbol": symbol,
+                    "interval": interval,
+                    "limit": limit,
+                    "start_time": start_time,
+                    "end_time": end_time,
+                }
+            )
+            return [_kline_row(BASE_START, base=100)]
+
+    monkeypatch.setattr(historical, "BinancePublicKlinesProvider", CountingProvider)
+
+    result = prepare_historical_dataset(
+        output_file=output,
+        provider=None,
+        symbol="BTCUSDT",
+        interval="1h",
+        requested_start_utc=BASE_START,
+        requested_end_utc=_request_end(BASE_START, 1),
+        page_size=1000,
+        max_pages=2,
+    )
+
+    assert result["candle_count"] == 1
+    assert CountingProvider.instances == 1
+
+
+def test_historical_dataset_loader_rejects_recomputed_tampering(tmp_path):
+    output = _build_output(tmp_path, "tamper-recomputed.json")
+    provider = SequenceProvider([_page(BASE_START, 3)])
+    prepare_historical_dataset(
+        output_file=output,
+        provider=provider,
+        symbol="BTCUSDT",
+        interval="1h",
+        requested_start_utc=BASE_START,
+        requested_end_utc=_request_end(BASE_START, 3),
+        page_size=1000,
+        max_pages=2,
+    )
+
+    cases = []
+
+    gap_payload = load_historical_dataset_file(output).as_dict()
+    del gap_payload["candles"][1]
+    _recompute_dataset_hashes(gap_payload)
+    cases.append((gap_payload, "Historical dataset candles are invalid."))
+
+    symbol_payload = load_historical_dataset_file(output).as_dict()
+    symbol_payload["candles"][0]["symbol"] = "ETHUSDT"
+    _recompute_dataset_hashes(symbol_payload)
+    cases.append((symbol_payload, "Historical dataset candle symbol mismatch."))
+
+    duration_payload = load_historical_dataset_file(output).as_dict()
+    duration_payload["candles"][0]["close_time"] = (
+        BASE_START + timedelta(minutes=30) - ONE_MS
+    ).isoformat().replace("+00:00", "Z")
+    _recompute_dataset_hashes(duration_payload)
+    cases.append((duration_payload, "Historical dataset candles are invalid."))
+
+    permissive_payload = load_historical_dataset_file(output).as_dict()
+    permissive_payload["manifest"]["closed_candles_only"] = False
+    _recompute_dataset_hashes(permissive_payload)
+    cases.append((permissive_payload, "closed_candles_only must be true."))
+
+    for payload, match in cases:
+        rewritten = output.parent / "tampered.json"
+        rewritten.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+        with pytest.raises(HistoricalDataIntegrityError, match=match):
+            load_historical_dataset_file(rewritten)
+        rewritten.unlink()
+
+
+def test_history_prepare_help_omits_provider_option(capsys):
+    with pytest.raises(SystemExit):
+        paper_ops.main(["history", "prepare", "--help"])
+    out = capsys.readouterr().out
+    assert "--provider" not in out

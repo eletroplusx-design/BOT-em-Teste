@@ -2410,7 +2410,6 @@ def build_parser() -> argparse.ArgumentParser:
     history_prepare.add_argument("--start-utc", required=True)
     history_prepare.add_argument("--end-utc", required=True)
     history_prepare.add_argument("--output", required=True)
-    history_prepare.add_argument("--provider", default=None)
     history_prepare.add_argument("--page-size", type=int, default=1000)
     history_prepare.add_argument("--max-pages", type=int, default=1000)
     history_status = history_sub.add_parser("status", help="Inspect a persisted historical public market dataset.")
@@ -2546,10 +2545,9 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "history":
             if args.history_command == "prepare":
-                provider = trusted_market_data_service.provider
                 _print_result(prepare_historical_dataset(
                     output_file=args.output,
-                    provider=provider,
+                    provider=trusted_market_data_service.provider,
                     symbol=args.symbol,
                     interval=args.interval,
                     requested_start_utc=args.start_utc,
