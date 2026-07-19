@@ -172,7 +172,7 @@ class HistoricalReplayProvenance:
             effective_start_utc=manifest.effective_start_utc,
             effective_end_utc=manifest.effective_end_utc,
             candle_count=manifest.candle_count,
-            schema_version=1,
+            schema_version=manifest.schema_version,
         )
 
     def as_dict(self) -> dict[str, Any]:

@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from backtesting import BacktestConfig, LeakFreeBacktestEngine
+from backtesting.adapters import dataframe_to_candles
 from domain import Candle, DataSource, Direction, Signal
 from historical_replay import (
     HistoricalBacktestReplay,
@@ -127,6 +128,7 @@ def _candidate(name: str = "alpha") -> CandidateConfig:
 
 def test_historical_replay_backtest_is_deterministic_and_hash_anchored(tmp_path):
     path, dataset = _historical_dataset(tmp_path, rows=12)
+    assert HistoricalReplayProvenance.from_dataset(dataset).schema_version == dataset.manifest.schema_version
     engine = LeakFreeBacktestEngine(
         BacktestConfig(
             initial_capital=Decimal("10000"),
@@ -155,6 +157,14 @@ def test_historical_replay_backtest_is_deterministic_and_hash_anchored(tmp_path)
     assert replay_a.result.config.paper_only is True
     assert replay_a.result.final_capital == replay_b.result.final_capital
     assert replay_a.result.symbol == "BTCUSDT"
+
+
+def test_historical_replay_dataframe_preserves_binance_source_round_trip(tmp_path):
+    _, dataset = _historical_dataset(tmp_path, rows=12)
+    frame = historical_dataset_to_dataframe(dataset)
+    candles = dataframe_to_candles(frame, symbol=dataset.manifest.symbol, interval=dataset.manifest.interval)
+    assert candles[0].source == DataSource.BINANCE
+    assert candles[-1].source == DataSource.BINANCE
 
 
 def test_historical_replay_backtest_hash_changes_with_dataset_and_contract(tmp_path):
