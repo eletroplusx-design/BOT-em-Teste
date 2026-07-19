@@ -63,6 +63,15 @@ function ConvertFrom-JsonCompatible {
     }
 }
 
+function Set-JsonObjectSourcePath {
+    param(
+        [Parameter(Mandatory = $true)]$Object,
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+    Add-Member -InputObject $Object -MemberType NoteProperty -Name '_source_path' -Value $Path -Force
+    return $Object
+}
+
 function Assert-StrictBool {
     param(
         [Parameter(Mandatory = $true)]$Value,
@@ -388,14 +397,14 @@ function Invoke-Prepare {
     $referenceResult = Invoke-PaperOperations @('phase5-reference', '--input', $ReferenceConfigFile)
     $referenceOutputPath = if ($referenceResult.output) { [string]$referenceResult.output } else { (Join-Path $PaperDataDir 'reference.json') }
     $reference = Read-JsonFileStrict -Path $referenceOutputPath -Label 'reference output'
-    $reference._source_path = $referenceOutputPath
+    Set-JsonObjectSourcePath -Object $reference -Path $referenceOutputPath | Out-Null
     Assert-OperationalReference -Reference $reference -ReferencePath $referenceOutputPath | Out-Null
 
     if (-not (Test-Path -LiteralPath $PromotionPolicyFile)) { Fail 'promotion policy file not found.' }
     $decisionResult = Invoke-PaperOperations @('promotion-decision', '--reference-file', $referenceOutputPath, '--policy-file', $PromotionPolicyFile)
     $decisionOutputPath = if ($decisionResult.output) { [string]$decisionResult.output } else { (Join-Path $PaperDataDir 'promotion_decision.json') }
     $decision = Read-JsonFileStrict -Path $decisionOutputPath -Label 'promotion decision output'
-    $decision._source_path = $decisionOutputPath
+    Set-JsonObjectSourcePath -Object $decision -Path $decisionOutputPath | Out-Null
     Assert-StringValue -Value $decision.decision_hash -Name 'decision_hash'
     Assert-StrictBool -Value $decision.paper_limits.paper_only -Name 'decision.paper_only' -Expected:$true
     if ($decision.status -ne 'APPROVED_FOR_MONITORED_PAPER') {
@@ -486,10 +495,10 @@ function Invoke-SessionStart {
     $planPath = Get-PlanPath
     $plan = Load-OperationalPlan -Path $planPath
     $reference = Read-JsonFileStrict -Path $plan.reference_output_path -Label 'reference output'
-    $reference._source_path = $plan.reference_output_path
+    Set-JsonObjectSourcePath -Object $reference -Path $plan.reference_output_path | Out-Null
     Assert-OperationalReference -Reference $reference -ReferencePath $plan.reference_output_path | Out-Null
     $decision = Read-JsonFileStrict -Path $plan.promotion_decision_path -Label 'promotion decision output'
-    $decision._source_path = $plan.promotion_decision_path
+    Set-JsonObjectSourcePath -Object $decision -Path $plan.promotion_decision_path | Out-Null
     Assert-StringValue -Value $decision.decision_hash -Name 'decision_hash'
     Assert-StrictBool -Value $decision.paper_limits.paper_only -Name 'decision.paper_only' -Expected:$true
     if ($decision.status -ne 'APPROVED_FOR_MONITORED_PAPER') {

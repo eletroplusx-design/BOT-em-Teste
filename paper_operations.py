@@ -413,6 +413,10 @@ def _reference_scope_hash(provenance: Mapping[str, Any]) -> str:
     return validation_manifest_hash(scope_payload)
 
 
+def _canonical_json_text(payload: Any) -> str:
+    return json.dumps(serialize_value(payload), ensure_ascii=False, sort_keys=True)
+
+
 def _persist_reference_contract(reference_db: Path, payload: Mapping[str, Any]) -> dict[str, Any]:
     _ensure_reference_schema(reference_db)
     provenance = payload.get(_REFERENCE_PROVENANCE_KEY)
@@ -500,6 +504,46 @@ def _load_reference_contract(reference_db: Path, reference_hash: str) -> dict[st
         if not isinstance(payload_json, str) or not payload_json.strip():
             raise PaperOperationsError("operational reference payload missing.")
         return dict(row)
+
+
+def _validate_existing_reference_output(
+    output_payload: Mapping[str, Any],
+    *,
+    config: Mapping[str, Any],
+    reference_db: Path,
+) -> Mapping[str, Any]:
+    provenance = output_payload.get(_REFERENCE_PROVENANCE_KEY)
+    walk_forward_payload = output_payload.get(_REFERENCE_PAYLOAD_KEY)
+    if not isinstance(provenance, Mapping):
+        raise PaperOperationsError("operational reference provenance is invalid.")
+    if not isinstance(walk_forward_payload, Mapping):
+        raise PaperOperationsError("operational reference payload is invalid.")
+    expected_fields = {
+        "symbol": config.get("symbol"),
+        "interval": config.get("interval"),
+        "limit_value": config.get("limit"),
+        "strategy_version": config.get("strategy_version"),
+        "provider": config.get("provider"),
+    }
+    for field_name, expected_value in expected_fields.items():
+        if provenance.get(field_name) != expected_value:
+            raise PaperOperationsError("operational reference configuration mismatch.")
+    if provenance.get("synthetic_test_data") is not False:
+        raise PaperOperationsError("operational reference must not be synthetic test data.")
+    if str(provenance.get("evidence_class", "")).strip().upper() != "OPERATIONAL_TRUSTED":
+        raise PaperOperationsError("operational reference evidence class mismatch.")
+    reference_hash = provenance.get("reference_hash")
+    if type(reference_hash) is not str or not reference_hash.strip():
+        raise PaperOperationsError("operational reference hash is invalid.")
+    record = _load_reference_contract(reference_db, reference_hash)
+    canonical_payload_json = _canonical_json_text(output_payload)
+    if record["payload_json"] != canonical_payload_json:
+        raise PaperOperationsError("operational reference registry mismatch.")
+    if record["scope_hash"] != provenance.get("scope_hash"):
+        raise PaperOperationsError("operational reference scope mismatch.")
+    if record["reference_hash"] != reference_hash:
+        raise PaperOperationsError("operational reference hash mismatch.")
+    return output_payload
 
 
 def _promotion_decision_from_payload(payload: Mapping[str, Any]) -> PromotionDecision:
@@ -1323,6 +1367,18 @@ def phase5_reference(*, input_file: str | Path, output_file: str | Path | None =
     with _acquire_operational_lock(output.parent, scope="phase5_reference"):
         _require_no_restore_recovery(_paths(output.parent))
         config = _load_reference_config(input_file)
+        reference_db = _reference_db_path(output.parent)
+        if output.exists():
+            existing = _load_json_file(output, label="reference output")
+            _validate_existing_reference_output(existing, config=config, reference_db=reference_db)
+            provenance = existing[_REFERENCE_PROVENANCE_KEY]
+            walk_forward_payload = existing[_REFERENCE_PAYLOAD_KEY]
+            return {
+                "output": str(output),
+                "manifest_hash": walk_forward_payload["manifest"].get("manifest_hash"),
+                "runner_trusted": walk_forward_payload["manifest"].get("runner_trusted"),
+                "synthetic_test_data": bool(provenance.get("synthetic_test_data", False)),
+            }
         payload, result = _run_operational_walk_forward(
             symbol=config["symbol"],
             interval=config["interval"],
@@ -1330,11 +1386,6 @@ def phase5_reference(*, input_file: str | Path, output_file: str | Path | None =
             strategy_version=config["strategy_version"],
             provider=config["provider"],
         )
-        reference_db = _reference_db_path(output.parent)
-        if output.exists():
-            existing = _load_json_file(output, label="reference output")
-            if existing != payload:
-                raise PaperOperationsError("operational reference already exists.")
         reference_hash = payload[_REFERENCE_PROVENANCE_KEY]["reference_hash"]
         existing_reference = None
         try:
@@ -1368,14 +1419,28 @@ def promotion_decision(*, reference_file: str | Path, policy_file: str | Path, o
         reference = _walk_forward_from_payload(walk_forward_payload)
         policy = _load_promotion_policy(policy_file)
         evidence = adapt_walk_forward_result(reference)
-        decision = evaluate_promotion(evidence, policy)
         if provenance.get("synthetic_test_data") is not False:
             raise PaperOperationsError("promotion decision cannot be created from synthetic test data.")
         reference_db = _reference_db_path(output.parent)
         if output.exists():
             existing = _load_json_file(output, label="promotion decision output")
-            if existing != decision.as_dict():
+            if type(existing.get("decision_hash")) is not str or not existing["decision_hash"].strip():
                 raise PaperOperationsError("promotion decision already exists.")
+            existing_decision = _load_promotion_decision_registry(reference_db, existing["decision_hash"])
+            if existing != existing_decision.as_dict():
+                raise PaperOperationsError("promotion decision already exists.")
+            expected_decision = evaluate_promotion(evidence, policy)
+            existing_without_timestamp = {k: v for k, v in existing.items() if k != "timestamp_utc"}
+            expected_without_timestamp = {k: v for k, v in expected_decision.as_dict().items() if k != "timestamp_utc"}
+            if existing_without_timestamp != expected_without_timestamp:
+                raise PaperOperationsError("promotion decision already exists.")
+            return {
+                "output": str(output),
+                "status": existing["status"],
+                "decision_hash": existing["decision_hash"],
+                "paper_limits_hash": existing["paper_limits_hash"],
+            }
+        decision = evaluate_promotion(evidence, policy)
         existing_decision = None
         try:
             existing_decision = _load_promotion_decision_registry(reference_db, decision.decision_hash)
