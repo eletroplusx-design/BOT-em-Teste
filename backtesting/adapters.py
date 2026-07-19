@@ -23,6 +23,7 @@ def dataframe_to_candles(df: pd.DataFrame, *, symbol: str, interval: str, source
         raise BacktestDataError(f"Missing candle columns: {sorted(missing)!r}")
     candles = []
     for row in df.to_dict("records"):
+        row_source = row.get("source", source)
         try:
             candles.append(
                 Candle.from_dict(
@@ -36,7 +37,7 @@ def dataframe_to_candles(df: pd.DataFrame, *, symbol: str, interval: str, source
                         "volume": row["volume"],
                         "symbol": symbol,
                         "interval": interval,
-                        "source": source,
+                        "source": row_source,
                     }
                 )
             )
