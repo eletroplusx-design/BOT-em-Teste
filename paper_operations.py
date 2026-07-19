@@ -36,6 +36,8 @@ from config import (
 from domain import DataSource, Direction, OrderStatus, PaperOrder, Signal, TradingMode
 from domain.serialization import serialize_value
 from market_data import trusted_market_data_service
+from market_data import HistoricalDataError, MarketDataError
+from market_data.historical import prepare_historical_dataset, status_historical_dataset, verify_historical_dataset_file
 from market_data.service import MarketDataProvenance, package_to_dataframe
 from paper_runtime import PaperRuntimeSession, PaperRuntimeStore, create_monitored_session, get_monitored_session, load_active_runtime_session, new_session_id
 from paper_runtime.errors import PaperRuntimeAuditError, PaperRuntimeSessionError, PaperRuntimeStoreError
@@ -2400,6 +2402,22 @@ def build_parser() -> argparse.ArgumentParser:
     phase5.add_argument("--input", required=True, help="Path to a canonical WalkForwardResult JSON file.")
     phase5.add_argument("--output", default=None, help="Output reference JSON path.")
 
+    history = subparsers.add_parser("history", help="Prepare, inspect, or verify historical public market data.")
+    history_sub = history.add_subparsers(dest="history_command", required=True)
+    history_prepare = history_sub.add_parser("prepare", help="Fetch and persist a historical public market dataset.")
+    history_prepare.add_argument("--symbol", required=True)
+    history_prepare.add_argument("--interval", required=True)
+    history_prepare.add_argument("--start-utc", required=True)
+    history_prepare.add_argument("--end-utc", required=True)
+    history_prepare.add_argument("--output", required=True)
+    history_prepare.add_argument("--provider", default=None)
+    history_prepare.add_argument("--page-size", type=int, default=1000)
+    history_prepare.add_argument("--max-pages", type=int, default=1000)
+    history_status = history_sub.add_parser("status", help="Inspect a persisted historical public market dataset.")
+    history_status.add_argument("--input", required=True)
+    history_verify = history_sub.add_parser("verify", help="Verify a persisted historical public market dataset.")
+    history_verify.add_argument("--input", required=True)
+
     promotion = subparsers.add_parser("promotion-decision", help="Evaluate a real promotion decision from a trusted reference.")
     promotion.add_argument("--reference-file", required=True)
     promotion.add_argument("--policy-file", required=True)
@@ -2526,6 +2544,26 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "phase5-reference":
             _print_result(phase5_reference(input_file=args.input, output_file=args.output))
             return 0
+        if args.command == "history":
+            if args.history_command == "prepare":
+                provider = trusted_market_data_service.provider
+                _print_result(prepare_historical_dataset(
+                    output_file=args.output,
+                    provider=provider,
+                    symbol=args.symbol,
+                    interval=args.interval,
+                    requested_start_utc=args.start_utc,
+                    requested_end_utc=args.end_utc,
+                    page_size=args.page_size,
+                    max_pages=args.max_pages,
+                ))
+                return 0
+            if args.history_command == "status":
+                _print_result(status_historical_dataset(input_file=args.input))
+                return 0
+            if args.history_command == "verify":
+                _print_result(verify_historical_dataset_file(input_file=args.input))
+                return 0
         if args.command == "promotion-decision":
             _print_result(promotion_decision(reference_file=args.reference_file, policy_file=args.policy_file, output_file=args.output))
             return 0
@@ -2627,7 +2665,7 @@ def main(argv: list[str] | None = None) -> int:
             _print_result(report(data_dir=args.data_dir, campaign_id=args.campaign_id, session_id=args.session_id))
             return 0
         raise PaperOperationsError("unknown command.")
-    except (PaperOperationsError, PaperCampaignError, PaperRuntimeSessionError, PaperRuntimeStoreError, PaperRuntimeAuditError, PaperCampaignManifestError, PaperCampaignPolicyError, PaperCampaignReadError, PromotionDecisionError, PromotionPolicyError, PromotionValidationError) as exc:
+    except (PaperOperationsError, PaperCampaignError, PaperRuntimeSessionError, PaperRuntimeStoreError, PaperRuntimeAuditError, PaperCampaignManifestError, PaperCampaignPolicyError, PaperCampaignReadError, PromotionDecisionError, PromotionPolicyError, PromotionValidationError, HistoricalDataError, MarketDataError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except Exception:
