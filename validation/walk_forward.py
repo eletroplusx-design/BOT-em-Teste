@@ -4,7 +4,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Mapping
 
 import pandas as pd
 
@@ -38,6 +38,7 @@ class WalkForwardValidator:
         *,
         execution_contract: dict[str, Any],
         window_signatures: dict[str, Any],
+        historical_provenance: Mapping[str, Any] | None,
         runner_trusted: bool,
     ) -> dict[str, Any]:
         return build_manifest(
@@ -48,6 +49,7 @@ class WalkForwardValidator:
             selection_criteria=self.selection_criteria.as_dict(),
             execution_contract=execution_contract,
             window_signatures=window_signatures,
+            historical_provenance=historical_provenance,
             runner_trusted=runner_trusted,
             split_config=self.split_config,
             candidate_grid=candidates,
@@ -170,6 +172,7 @@ class WalkForwardValidator:
         runner,
         execution_contract: dict[str, Any] | None = None,
         window_signatures: dict[str, Any] | None = None,
+        historical_provenance: Mapping[str, Any] | None = None,
         runner_trusted: bool = False,
     ) -> WalkForwardWindowResult:
         segment_views = build_window_segment_views(df, window, self.split_config.warmup_bars)
@@ -209,6 +212,7 @@ class WalkForwardValidator:
             signatures["test"],
             execution_contract=execution_contract or {},
             window_signatures=signatures,
+            historical_provenance=historical_provenance,
             runner_trusted=runner_trusted,
         )
         if not outcome.approved or outcome.candidate is None:
@@ -249,6 +253,7 @@ class WalkForwardValidator:
         runner,
         execution_contract: dict[str, Any] | None = None,
         window_signatures: dict[str, Any] | None = None,
+        historical_provenance: Mapping[str, Any] | None = None,
         runner_trusted: bool = False,
     ) -> WalkForwardWindowResult:
         if not window_result.approved or window_result.selected_candidate is None or window_result.frozen_selection is None:
@@ -291,6 +296,7 @@ class WalkForwardValidator:
         candidate_grid: Sequence[CandidateConfig],
         *,
         runner,
+        historical_provenance: Mapping[str, Any] | None = None,
     ) -> WalkForwardWindowResult:
         contract, runner_trusted = self._window_contract(runner)
         segment_views = build_window_segment_views(df, window, self.split_config.warmup_bars)
@@ -302,6 +308,7 @@ class WalkForwardValidator:
             runner=runner,
             execution_contract=contract,
             window_signatures=window_signatures,
+            historical_provenance=historical_provenance,
             runner_trusted=runner_trusted,
         )
         return self._evaluate_window_test(
@@ -310,10 +317,18 @@ class WalkForwardValidator:
             runner=runner,
             execution_contract=contract,
             window_signatures=window_signatures,
+            historical_provenance=historical_provenance,
             runner_trusted=runner_trusted,
         )
 
-    def run(self, df: pd.DataFrame, candidate_grid: Sequence[CandidateConfig], *, runner) -> WalkForwardResult:
+    def run(
+        self,
+        df: pd.DataFrame,
+        candidate_grid: Sequence[CandidateConfig],
+        *,
+        runner,
+        historical_provenance: Mapping[str, Any] | None = None,
+    ) -> WalkForwardResult:
         if self._session_consumed:
             raise ValidationFreezeError("validator session already consumed; create a new instance to rerun.")
         windows = build_windows(df, self.split_config)
@@ -330,6 +345,7 @@ class WalkForwardValidator:
                 runner=runner,
                 execution_contract=contract,
                 window_signatures=window_signatures,
+                historical_provenance=historical_provenance,
                 runner_trusted=runner_trusted,
             )
             for window, window_signatures in zip(windows, window_signatures_list)
@@ -341,6 +357,7 @@ class WalkForwardValidator:
                 runner=runner,
                 execution_contract=contract,
                 window_signatures=window_signatures,
+                historical_provenance=historical_provenance,
                 runner_trusted=runner_trusted,
             )
             for window_result, window_signatures in zip(selection_results, window_signatures_list)
@@ -354,6 +371,7 @@ class WalkForwardValidator:
             selection_criteria=self.selection_criteria.as_dict(),
             execution_contract=contract,
             window_signatures={"windows": window_signatures_list},
+            historical_provenance=historical_provenance,
             runner_trusted=runner_trusted,
             split_config=self.split_config,
             candidate_grid=candidate_grid,
@@ -373,7 +391,7 @@ class WalkForwardValidator:
         return WalkForwardResult(windows=tuple(results), summary=summary, manifest=manifest)
 
 
-def run_walk_forward_validation(df: pd.DataFrame, candidate_grid: Sequence[CandidateConfig], *, runner, split_config: ValidationSplitConfig | None = None, selection_criteria: SelectionCriteria | None = None, strategy_version: str = "v4_walk_forward", symbol: str = "BTCUSDT", interval: str = "1h", costs: dict[str, Any] | None = None, seed: int | None = None, require_trusted_runner: bool = True) -> WalkForwardResult:
+def run_walk_forward_validation(df: pd.DataFrame, candidate_grid: Sequence[CandidateConfig], *, runner, split_config: ValidationSplitConfig | None = None, selection_criteria: SelectionCriteria | None = None, strategy_version: str = "v4_walk_forward", symbol: str = "BTCUSDT", interval: str = "1h", costs: dict[str, Any] | None = None, seed: int | None = None, require_trusted_runner: bool = True, historical_provenance: Mapping[str, Any] | None = None) -> WalkForwardResult:
     validator = WalkForwardValidator(
         split_config=split_config or ValidationSplitConfig(),
         selection_criteria=selection_criteria or SelectionCriteria(),
@@ -384,4 +402,4 @@ def run_walk_forward_validation(df: pd.DataFrame, candidate_grid: Sequence[Candi
         seed=seed,
         require_trusted_runner=require_trusted_runner,
     )
-    return validator.run(df, candidate_grid, runner=runner)
+    return validator.run(df, candidate_grid, runner=runner, historical_provenance=historical_provenance)

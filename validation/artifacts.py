@@ -104,6 +104,7 @@ def build_manifest(
     selection_criteria: Mapping[str, Any] | None = None,
     execution_contract: Mapping[str, Any] | None = None,
     window_signatures: Mapping[str, Any] | None = None,
+    historical_provenance: Mapping[str, Any] | None = None,
     runner_trusted: bool = False,
     seed: int | None = None,
 ) -> dict[str, Any]:
@@ -115,13 +116,15 @@ def build_manifest(
         "selection_criteria": dict(selection_criteria or {}),
         "execution_contract": dict(execution_contract or {}),
         "window_signatures": dict(window_signatures or {}),
-        "runner_trusted": runner_trusted,
         "split_config": split_config,
         "candidate_grid": [candidate.as_dict() for candidate in candidate_grid],
         "windows": [window.as_dict() for window in windows],
         "data_signature": dict(data_signature),
         "seed": seed,
     }
+    if historical_provenance is not None:
+        manifest["historical_provenance"] = dict(historical_provenance)
+    manifest["runner_trusted"] = runner_trusted
     manifest["manifest_hash"] = manifest_hash(manifest)
     return manifest
 

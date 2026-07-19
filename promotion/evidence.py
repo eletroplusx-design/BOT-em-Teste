@@ -172,6 +172,13 @@ def build_promotion_evidence(result: WalkForwardResult) -> PromotionEvidence:
     manifest_hash_value = _normalize_str(manifest.get("manifest_hash", ""))
     if not manifest_hash_value:
         raise PromotionEvidenceError("manifest hash is required.")
+    historical_provenance = manifest.get("historical_provenance")
+    if historical_provenance is not None:
+        if not isinstance(historical_provenance, Mapping):
+            raise PromotionEvidenceError("historical provenance must be a mapping.")
+        classification = _normalize_str(historical_provenance.get("classification", ""))
+        if classification == "historical_research_only" or historical_provenance.get("operational_evidence") is False or historical_provenance.get("paper_promotion_eligible") is False:
+            raise PromotionEvidenceError("historical replay results cannot be used as promotion evidence.")
     manifest_payload = dict(manifest)
     manifest_payload.pop("manifest_hash", None)
     if manifest_hash(manifest_payload) != manifest_hash_value:
