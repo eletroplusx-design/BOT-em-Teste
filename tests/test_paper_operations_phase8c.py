@@ -1475,9 +1475,6 @@ def test_start_campaign_script_contains_session_active_recovery_and_atomic_write
     script = Path("start-paper-campaign.ps1").read_text(encoding="utf-8")
     assert "ConvertFrom-JsonCompatible" in script
     assert "ConvertFrom-Json -Depth" not in script
-    assert "Get-PaperOperationsSubcommand" in script
-    assert "Format-PaperOperationsStreamSummary" in script
-    assert "Get-PaperOperationsStreamSummary" in script
     assert "session active" in script
     assert "SESSION_STARTING" in script
     assert "SESSION_STARTED" in script
@@ -1509,14 +1506,6 @@ def test_start_campaign_script_contains_session_active_recovery_and_atomic_write
     assert "session start revalidation failed." in script
     assert "active runtime session decision hash mismatch." in script
     assert "persisted runtime session decision hash mismatch." in script
-    assert "paper operations command failed." in script
-    assert "subcommand: {0}" in script
-    assert "exit_code: {0}" in script
-    assert "stdout: {0}" in script
-    assert "stderr: {0}" in script
-    assert "<empty>" in script
-    assert "<unavailable>" in script
-    assert "<truncated>" in script
     assert "recoveredPlan.session_state = 'RUNNING'" in script
     assert "recoveredPlan.status = 'SESSION_STARTED'" in script
     assert "cohort hash mismatch." in script
@@ -1528,6 +1517,17 @@ def test_start_campaign_script_contains_session_active_recovery_and_atomic_write
     assert "campaign inclusion_rule mismatch." in script
     assert "binding_hash mismatch." in script
     assert "Recovered active session" in script
+    assert "Get-PaperOperationsSubcommand" in script
+    assert "Format-PaperOperationsStreamSummary" in script
+    assert "Get-PaperOperationsStreamSummary" in script
+    assert "paper operations command failed." in script
+    assert "subcommand: {0}" in script
+    assert "exit_code: {0}" in script
+    assert "stdout: {0}" in script
+    assert "stderr: {0}" in script
+    assert "<empty>" in script
+    assert "<unavailable>" in script
+    assert "<truncated>" in script
 
 
 def test_start_campaign_script_review_is_read_only_and_ps51_json_round_trip(tmp_path):
@@ -1622,7 +1622,7 @@ def test_start_campaign_script_review_is_read_only_and_ps51_json_round_trip(tmp_
     assert not review_dir.exists()
 
 
-def test_invoke_paper_operations_reports_sanitized_failure_and_cleans_temp_files(tmp_path):
+def test_invoke_paper_operations_preserves_success_json_and_sanitizes_failures(tmp_path):
     project_root = Path.cwd()
     script_path = project_root / "start-paper-campaign.ps1"
     powershell = shutil.which("powershell.exe") or shutil.which("pwsh")
@@ -1650,36 +1650,76 @@ def test_invoke_paper_operations_reports_sanitized_failure_and_cleans_temp_files
                 "        [string]$RedirectStandardError,",
                 "        [object[]]$ArgumentList",
                 "    )",
-                "    $argsText = @($ArgumentList)",
-                "    if ($argsText -contains 'success') {",
-                "        Set-Content -LiteralPath $RedirectStandardOutput -Value (@('{\"ok\":true,\"echo\":[\"success\"]}') -join [Environment]::NewLine) -Encoding UTF8",
+                "    $argsText = (@($ArgumentList) -join ' ')",
+                "    if ($argsText -match 'success-long') {",
+                "        $payload = [pscustomobject]@{",
+                "            ok = $true",
+                "            message = ('x' * 900)",
+                "            nested = [pscustomobject]@{",
+                "                items = @(",
+                "                    [pscustomobject]@{ id = 1; tags = @('alpha', 'beta') },",
+                "                    [pscustomobject]@{ id = 2; tags = @('gamma') }",
+                "                )",
+                "                matrix = @(@(1, 2), @(3, 4))",
+                "            }",
+                "        } | ConvertTo-Json -Depth 10",
+                "        Set-Content -LiteralPath $RedirectStandardOutput -Value $payload -Encoding UTF8",
                 "        Set-Content -LiteralPath $RedirectStandardError -Value '' -Encoding UTF8",
                 "        return [pscustomobject]@{ ExitCode = 0 }",
                 "    }",
-                "    Set-Content -LiteralPath $RedirectStandardOutput -Value 'stdout token=abc123 secret=def456 api_key=ghi789 Authorization: Bearer verysecret' -Encoding UTF8",
-                "    Set-Content -LiteralPath $RedirectStandardError -Value 'stderr token=abc123 secret=def456 api_key=ghi789 Authorization: Bearer verysecret' -Encoding UTF8",
+                "    if ($argsText -match 'success-multiline') {",
+                "        $payload = @'",
+                "    {",
+                '      "ok": true,',
+                '      "outer": {',
+                '        "inner": 42,',
+                '        "items": [',
+                '          { "x": 1 },',
+                '          { "x": 2 }',
+                "        ]",
+                "      }",
+                "    }",
+                "'@",
+                "        Set-Content -LiteralPath $RedirectStandardOutput -Value $payload -Encoding UTF8",
+                "        Set-Content -LiteralPath $RedirectStandardError -Value '' -Encoding UTF8",
+                "        return [pscustomobject]@{ ExitCode = 0 }",
+                "    }",
+                "    $stdoutLines = @(",
+                "        'stdout token=abc123 secret=def456 api_key=ghi789 Authorization: Bearer verysecret',",
+                "        ('stdout line 2 ' + ('z' * 200)),",
+                "        ('stdout line 3 ' + ('z' * 200)),",
+                "        ('stdout line 4 ' + ('z' * 200)),",
+                "        ('stdout line 5 ' + ('z' * 200)),",
+                "        ('stdout line 6 ' + ('z' * 200))",
+                "    )",
+                "    $stderrLines = @(",
+                "        'stderr token=abc123 secret=def456 api_key=ghi789 Authorization: Bearer verysecret',",
+                "        ('stderr line 2 ' + ('y' * 200)),",
+                "        ('stderr line 3 ' + ('y' * 200)),",
+                "        ('stderr line 4 ' + ('y' * 200)),",
+                "        ('stderr line 5 ' + ('y' * 200)),",
+                "        ('stderr line 6 ' + ('y' * 200))",
+                "    )",
+                "    Set-Content -LiteralPath $RedirectStandardOutput -Value $stdoutLines -Encoding UTF8",
+                "    Set-Content -LiteralPath $RedirectStandardError -Value $stderrLines -Encoding UTF8",
                 "    return [pscustomobject]@{ ExitCode = 1 }",
                 "}",
                 f'. "{script_path}" -Review -ProjectRoot "{project_root}" -PaperDataDir "{tmp_path / "paper_data"}" -ReferenceConfigFile "{project_root / "reference-config.json"}" -PromotionPolicyFile "{project_root / "promotion_policy.json"}" -CampaignPolicyFile "{project_root / "campaign_policy.json"}" -PythonExe "{sys.executable}"',
-                "$success = Invoke-PaperOperations @('success')",
-                "if ($success.ok -ne $true -or $success.echo[0] -ne 'success') { exit 1 }",
-                "try {",
-                "    Invoke-PaperOperations @('promotion-decision', '--reference-file', 'ref.json', '--policy-file', 'policy.json') | Out-Null",
-                "    exit 1",
-                "} catch {",
-                "    $message = $_.Exception.Message",
-                "    if ($message -notmatch 'paper operations command failed\\.') { exit 1 }",
-                "    if ($message -notmatch 'subcommand: promotion-decision') { exit 1 }",
-                "    if ($message -notmatch 'exit_code: 1') { exit 1 }",
-                "    if ($message -notmatch 'stdout:') { exit 1 }",
-                "    if ($message -notmatch 'stderr:') { exit 1 }",
-                "    if ($message -match 'abc123|def456|ghi789|verysecret') { exit 1 }",
-                "    if ($message -notmatch '<redacted>') { exit 1 }",
-                "}",
-            ]
-        ),
-        encoding="utf-8",
-    )
+                "$successLong = Invoke-PaperOperations @('success-long')",
+                "if ($successLong.ok -ne $true) { exit 1 }",
+                "if ($successLong.message.Length -lt 900) { exit 1 }",
+                "if ($successLong.nested.items.Count -ne 2) { exit 1 }",
+                "if ($successLong.nested.items[1].tags[0] -ne 'gamma') { exit 1 }",
+                "if ($successLong.nested.matrix[1][1] -ne 4) { exit 1 }",
+                "$successMultiline = Invoke-PaperOperations @('success-multiline')",
+                "if ($successMultiline.ok -ne $true) { exit 1 }",
+                "if ($successMultiline.outer.inner -ne 42) { exit 1 }",
+                "if ($successMultiline.outer.items[1].x -ne 2) { exit 1 }",
+                    "Invoke-PaperOperations @('promotion-decision', '--reference-file', 'ref.json', '--policy-file', 'policy.json') | Out-Null",
+                ]
+            ),
+            encoding="utf-8",
+        )
 
     completed = subprocess.run(
         [
@@ -1692,9 +1732,23 @@ def test_invoke_paper_operations_reports_sanitized_failure_and_cleans_temp_files
         ],
         capture_output=True,
         text=True,
-        check=True,
+        check=False,
     )
-    assert completed.returncode == 0
+    assert completed.returncode != 0
+    assert "<truncated>" in completed.stdout
+    assert "abc123" not in completed.stdout
+    assert "def456" not in completed.stdout
+    assert "ghi789" not in completed.stdout
+    assert "verysecret" not in completed.stdout
+    assert "paper_operations command failed." in completed.stderr
+    assert "subcommand: promotion-decision" in completed.stderr
+    assert "exit_code: 1" in completed.stderr
+    assert "stdout:" in completed.stderr
+    assert "stderr:" in completed.stderr
+    assert "abc123" not in completed.stderr
+    assert "def456" not in completed.stderr
+    assert "ghi789" not in completed.stderr
+    assert "verysecret" not in completed.stderr
     assert not any(temp_root.iterdir())
 
 
