@@ -201,7 +201,7 @@ def test_dataset_round_trip_save_load_verify_preserves_provider_qualification(tm
 @pytest.mark.parametrize(
     ("field", "value", "expected"),
     [
-        ("provider_id", "alt.provider", "provider qualification mismatch"),
+        ("provider_id", "alt.provider", "unsupported historical provider."),
         ("provider_version", "v2", "provider qualification mismatch"),
         ("market_type", "futures", "provider qualification mismatch"),
         ("exchange", "other", "provider qualification mismatch"),

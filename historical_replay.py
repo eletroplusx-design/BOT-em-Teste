@@ -163,7 +163,7 @@ class HistoricalReplayProvenance:
             raise HistoricalReplayValidationError("operational_evidence must be false.")
         if self.paper_promotion_eligible is not False:
             raise HistoricalReplayValidationError("paper_promotion_eligible must be false.")
-        expected_qualification = HistoricalProviderQualification.binance_public_spot(symbol=self.symbol, interval=self.interval)
+        expected_qualification = HistoricalProviderQualification.expected_for_provider(self.provider_qualification.provider_id, symbol=self.symbol, interval=self.interval)
         if self.provider_qualification != expected_qualification:
             raise HistoricalReplayValidationError("provider qualification mismatch.")
         if self.provider_qualification.provider_id != self.provider:

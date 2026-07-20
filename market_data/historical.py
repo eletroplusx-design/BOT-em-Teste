@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from domain import Candle, MarketSnapshot
+from domain import Candle, DataSource, MarketSnapshot
 
 from .errors import (
     HistoricalDataConflictError,
@@ -17,6 +17,7 @@ from .errors import (
     MarketDataValidationError,
 )
 from .provider import BinancePublicKlinesProvider
+from .kucoin_provider import KuCoinPublicSpotKlinesProvider
 from .historical_manifest import build_historical_dataset, build_historical_manifest, historical_content_hash
 from .historical_models import HistoricalDataset, HistoricalDatasetRequest
 from .provider_qualification import HistoricalProviderQualification
@@ -68,7 +69,8 @@ def _build_request(
     endpoint: str,
 ) -> HistoricalDatasetRequest:
     symbol, interval = validate_symbol_interval(symbol, interval)
-    page_size = validate_limit(page_size)
+    page_limit = provider_qualification.pagination_limit or MAX_BINANCE_LIMIT
+    page_size = validate_limit(page_size, maximum=page_limit)
     return HistoricalDatasetRequest(
         provider=provider_qualification.provider_id,
         provider_qualification=provider_qualification,
@@ -124,9 +126,9 @@ def _finalize_dataset(
     return dataset
 
 
-def _validate_page_candles(*, payload: Any, symbol: str, interval: str, now: datetime) -> list[Candle]:
+def _validate_page_candles(*, payload: Any, symbol: str, interval: str, now: datetime, source: DataSource = DataSource.BINANCE) -> list[Candle]:
     try:
-        return validate_klines_payload(payload, symbol=symbol, interval=interval, now=now)
+        return validate_klines_payload(payload, symbol=symbol, interval=interval, now=now, source=source)
     except MarketDataValidationError as exc:
         raise HistoricalDataValidationError(str(exc)) from exc
 
@@ -175,7 +177,13 @@ def fetch_historical_public_klines(
             start_time=current_start_ms,
             end_time=end_ms,
         )
-        page_candles = _validate_page_candles(payload=payload, symbol=request.symbol, interval=request.interval, now=operation_now)
+        page_candles = _validate_page_candles(
+            payload=payload,
+            symbol=request.symbol,
+            interval=request.interval,
+            now=operation_now,
+            source=getattr(provider, "historical_source", DataSource.BINANCE),
+        )
         if not page_candles:
             raise HistoricalDataValidationError("Historical page did not return closed candles.")
         if page_count == 0:
@@ -224,6 +232,7 @@ def fetch_historical_public_klines(
         symbol=request.symbol,
         interval=request.interval,
         now=operation_now,
+        source=getattr(provider, "historical_source", DataSource.BINANCE),
     )
     return _finalize_dataset(request=request, candles=final_candles, created_at_utc=operation_now, page_count=page_count)
 
@@ -241,14 +250,19 @@ def prepare_historical_dataset(
 ) -> dict[str, Any]:
     resolved_provider = provider or BinancePublicKlinesProvider()
     output_path = Path(output_file)
+    provider_qualification = resolved_provider.historical_qualification(symbol=symbol, interval=interval)
+    page_limit = provider_qualification.pagination_limit or MAX_BINANCE_LIMIT
+    page_size_checked = validate_limit(page_size, maximum=page_limit)
+    requested_start = _require_utc(requested_start_utc, "requested_start_utc")
+    requested_end = _require_utc(requested_end_utc, "requested_end_utc")
+    symbol_checked, interval_checked = validate_symbol_interval(symbol, interval)
     if output_path.exists():
         existing = load_historical_dataset(output_path)
-        requested_start = _require_utc(requested_start_utc, "requested_start_utc")
-        requested_end = _require_utc(requested_end_utc, "requested_end_utc")
-        page_size_checked = validate_limit(page_size)
-        symbol_checked, interval_checked = validate_symbol_interval(symbol, interval)
         if (
-            existing.manifest.symbol != symbol_checked
+            existing.manifest.provider != resolved_provider.provider_identity
+            or existing.manifest.provider_qualification != provider_qualification
+            or existing.manifest.endpoint != getattr(resolved_provider, "base_url", HISTORICAL_ENDPOINT)
+            or existing.manifest.symbol != symbol_checked
             or existing.manifest.interval != interval_checked
             or existing.manifest.requested_start_utc != requested_start
             or existing.manifest.requested_end_utc != requested_end
@@ -267,7 +281,6 @@ def prepare_historical_dataset(
             "reused": True,
         }
 
-    provider_qualification = resolved_provider.historical_qualification(symbol=symbol, interval=interval)
     dataset = fetch_historical_public_klines(
         provider=resolved_provider,
         provider_qualification=provider_qualification,
@@ -289,6 +302,28 @@ def prepare_historical_dataset(
         "page_size": saved.manifest.page_size,
         "reused": False,
     }
+
+
+def prepare_historical_dataset_kucoin(
+    *,
+    output_file: str | Path,
+    symbol: str,
+    interval: str,
+    requested_start_utc: datetime | str,
+    requested_end_utc: datetime | str,
+    page_size: int = KuCoinPublicSpotKlinesProvider.historical_pagination_limit,
+    max_pages: int = HISTORICAL_MAX_PAGES,
+) -> dict[str, Any]:
+    return prepare_historical_dataset(
+        output_file=output_file,
+        provider=KuCoinPublicSpotKlinesProvider(),
+        symbol=symbol,
+        interval=interval,
+        requested_start_utc=requested_start_utc,
+        requested_end_utc=requested_end_utc,
+        page_size=page_size,
+        max_pages=max_pages,
+    )
 
 
 def status_historical_dataset(*, input_file: str | Path) -> dict[str, Any]:

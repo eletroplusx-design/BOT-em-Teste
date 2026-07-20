@@ -509,7 +509,7 @@ def test_historical_prepare_is_write_once_idempotent_and_rejects_divergence(tmp_
     assert second["reused"] is True
     assert len(provider.calls) == 1
 
-    with pytest.raises(HistoricalDataConflictError):
+    with pytest.raises(HistoricalDataValidationError, match="binance public spot provider only supports BTCUSDT 1h."):
         prepare_historical_dataset(
             output_file=output,
             provider=provider,
