@@ -21,7 +21,7 @@ from historical_replay import (
     replay_historical_backtest,
     replay_historical_walk_forward,
 )
-from market_data import HistoricalDataIntegrityError, HistoricalDataset, HistoricalDatasetRequest, historical_content_hash, load_historical_dataset_file
+from market_data import HistoricalDataIntegrityError, HistoricalDataset, HistoricalDatasetRequest, HistoricalProviderQualification, historical_content_hash, load_historical_dataset_file
 from market_data.historical_store import save_historical_dataset
 from market_data.historical_manifest import build_historical_manifest
 from promotion.adapters import adapt_walk_forward_result
@@ -55,6 +55,7 @@ def _historical_dataset(tmp_path: Path, *, rows: int = 260, symbol: str = "BTCUS
     candles = tuple(_historical_candle(start + idx * ONE_HOUR, base=100 + idx, symbol=symbol, interval=interval) for idx in range(rows))
     request = HistoricalDatasetRequest(
         provider="binance.public.klines",
+        provider_qualification=HistoricalProviderQualification.binance_public_spot(symbol=symbol, interval=interval),
         endpoint="https://api.binance.com/api/v3/klines",
         symbol=symbol,
         interval=interval,
@@ -204,6 +205,7 @@ def test_historical_replay_backtest_hash_changes_with_dataset_and_contract(tmp_p
     altered_manifest = build_historical_manifest(
         request=HistoricalDatasetRequest(
             provider=dataset.manifest.provider,
+            provider_qualification=dataset.manifest.provider_qualification,
             endpoint=dataset.manifest.endpoint,
             symbol=dataset.manifest.symbol,
             interval=dataset.manifest.interval,

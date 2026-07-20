@@ -19,12 +19,13 @@ from .errors import (
 from .provider import BinancePublicKlinesProvider
 from .historical_manifest import build_historical_dataset, build_historical_manifest, historical_content_hash
 from .historical_models import HistoricalDataset, HistoricalDatasetRequest
+from .provider_qualification import HistoricalProviderQualification
 from .historical_store import historical_dataset_status, load_historical_dataset, save_historical_dataset, verify_historical_dataset
 from .validation import MAX_BINANCE_LIMIT, validate_klines_payload, validate_limit, validate_symbol_interval
 
 
 HISTORICAL_ENDPOINT = BinancePublicKlinesProvider.base_url
-HISTORICAL_SCHEMA_VERSION = 1
+HISTORICAL_SCHEMA_VERSION = 2
 HISTORICAL_MAX_PAGES = 1000
 
 
@@ -63,13 +64,14 @@ def _build_request(
     requested_start_utc: datetime | str,
     requested_end_utc: datetime | str,
     page_size: int,
-    provider_identity: str,
+    provider_qualification: HistoricalProviderQualification,
     endpoint: str,
 ) -> HistoricalDatasetRequest:
     symbol, interval = validate_symbol_interval(symbol, interval)
     page_size = validate_limit(page_size)
     return HistoricalDatasetRequest(
-        provider=provider_identity,
+        provider=provider_qualification.provider_id,
+        provider_qualification=provider_qualification,
         endpoint=endpoint,
         symbol=symbol,
         interval=interval,
@@ -132,6 +134,7 @@ def _validate_page_candles(*, payload: Any, symbol: str, interval: str, now: dat
 def fetch_historical_public_klines(
     *,
     provider: BinancePublicKlinesProvider | None = None,
+    provider_qualification: HistoricalProviderQualification | None = None,
     symbol: str,
     interval: str,
     requested_start_utc: datetime | str,
@@ -141,13 +144,14 @@ def fetch_historical_public_klines(
 ) -> HistoricalDataset:
     provider = provider or BinancePublicKlinesProvider()
     max_pages = _require_max_pages(max_pages)
+    provider_qualification = provider_qualification or provider.historical_qualification(symbol=symbol, interval=interval)
     request = _build_request(
         symbol=symbol,
         interval=interval,
         requested_start_utc=requested_start_utc,
         requested_end_utc=requested_end_utc,
         page_size=page_size,
-        provider_identity=getattr(provider, "provider_identity", provider.__class__.__name__),
+        provider_qualification=provider_qualification,
         endpoint=getattr(provider, "base_url", HISTORICAL_ENDPOINT),
     )
     operation_now = _utcnow()
@@ -237,18 +241,20 @@ def prepare_historical_dataset(
 ) -> dict[str, Any]:
     resolved_provider = provider or BinancePublicKlinesProvider()
     output_path = Path(output_file)
-    request = _build_request(
-        symbol=symbol,
-        interval=interval,
-        requested_start_utc=requested_start_utc,
-        requested_end_utc=requested_end_utc,
-        page_size=page_size,
-        provider_identity=getattr(resolved_provider, "provider_identity", "binance.public.klines"),
-        endpoint=getattr(resolved_provider, "base_url", HISTORICAL_ENDPOINT),
-    )
     if output_path.exists():
         existing = load_historical_dataset(output_path)
-        if not _request_matches_dataset(request, existing):
+        requested_start = _require_utc(requested_start_utc, "requested_start_utc")
+        requested_end = _require_utc(requested_end_utc, "requested_end_utc")
+        page_size_checked = validate_limit(page_size)
+        symbol_checked, interval_checked = validate_symbol_interval(symbol, interval)
+        if (
+            existing.manifest.symbol != symbol_checked
+            or existing.manifest.interval != interval_checked
+            or existing.manifest.requested_start_utc != requested_start
+            or existing.manifest.requested_end_utc != requested_end
+            or existing.manifest.page_size != page_size_checked
+            or existing.manifest.closed_candles_only is not True
+        ):
             raise HistoricalDataConflictError("Historical dataset already exists and differs.")
         return {
             "output": str(output_path),
@@ -261,8 +267,10 @@ def prepare_historical_dataset(
             "reused": True,
         }
 
+    provider_qualification = resolved_provider.historical_qualification(symbol=symbol, interval=interval)
     dataset = fetch_historical_public_klines(
         provider=resolved_provider,
+        provider_qualification=provider_qualification,
         symbol=symbol,
         interval=interval,
         requested_start_utc=requested_start_utc,

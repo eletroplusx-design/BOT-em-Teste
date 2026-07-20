@@ -14,6 +14,7 @@ from market_data import (
     HistoricalDataConflictError,
     HistoricalDataIntegrityError,
     HistoricalDataValidationError,
+    HistoricalProviderQualification,
     MarketDataHTTPError,
     MarketDataJSONError,
     MarketDataNetworkError,
@@ -40,6 +41,9 @@ class SequenceProvider:
     def __init__(self, responses):
         self.responses = list(responses)
         self.calls = []
+
+    def historical_qualification(self, symbol="BTCUSDT", interval="1h"):
+        return HistoricalProviderQualification.binance_public_spot(symbol=symbol, interval=interval)
 
     def fetch_klines(self, symbol, interval, limit=500, *, start_time=None, end_time=None):
         self.calls.append(
@@ -660,6 +664,9 @@ def test_historical_prepare_reuses_single_default_provider_instance(tmp_path, mo
         def __init__(self):
             type(self).instances += 1
             self.calls = []
+
+        def historical_qualification(self, symbol="BTCUSDT", interval="1h"):
+            return HistoricalProviderQualification.binance_public_spot(symbol=symbol, interval=interval)
 
         def fetch_klines(self, symbol, interval, limit=500, *, start_time=None, end_time=None):
             self.calls.append(

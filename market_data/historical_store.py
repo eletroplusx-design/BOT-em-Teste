@@ -78,6 +78,7 @@ def verify_historical_dataset(path: str | Path) -> dict[str, Any]:
         "candle_count": dataset.manifest.candle_count,
         "page_count": dataset.manifest.page_count,
         "page_size": dataset.manifest.page_size,
+        "provider_qualification": dataset.manifest.provider_qualification.as_dict(),
     }
 
 
@@ -87,6 +88,7 @@ def historical_dataset_status(path: str | Path) -> dict[str, Any]:
         "exists": True,
         "dataset_id": dataset.manifest.dataset_id,
         "provider": dataset.manifest.provider,
+        "provider_qualification": dataset.manifest.provider_qualification.as_dict(),
         "endpoint": dataset.manifest.endpoint,
         "symbol": dataset.manifest.symbol,
         "interval": dataset.manifest.interval,

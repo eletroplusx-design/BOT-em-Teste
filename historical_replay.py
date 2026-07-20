@@ -17,6 +17,7 @@ from domain.serialization import serialize_value
 from validation import CandidateConfig, SelectionCriteria, TrustedLeakFreeBacktestRunner, ValidationSplitConfig, WalkForwardResult, WalkForwardValidator
 
 from market_data import HistoricalDataset, HistoricalDataIntegrityError, HistoricalDataValidationError, load_historical_dataset_file
+from market_data.provider_qualification import HistoricalProviderQualification
 
 
 class HistoricalReplayError(Exception):
@@ -125,13 +126,14 @@ class HistoricalReplayProvenance:
     content_hash: str
     manifest_hash: str
     provider: str
+    provider_qualification: HistoricalProviderQualification
     endpoint: str
     symbol: str
     interval: str
     effective_start_utc: datetime
     effective_end_utc: datetime
     candle_count: int
-    schema_version: int = 1
+    schema_version: int = 2
     classification: str = "historical_research_only"
     operational_evidence: bool = False
     paper_promotion_eligible: bool = False
@@ -141,6 +143,8 @@ class HistoricalReplayProvenance:
         object.__setattr__(self, "content_hash", _require_str(self.content_hash, "content_hash"))
         object.__setattr__(self, "manifest_hash", _require_str(self.manifest_hash, "manifest_hash"))
         object.__setattr__(self, "provider", _require_str(self.provider, "provider"))
+        if not isinstance(self.provider_qualification, HistoricalProviderQualification):
+            raise HistoricalReplayValidationError("provider_qualification must be a HistoricalProviderQualification instance.")
         object.__setattr__(self, "endpoint", _require_str(self.endpoint, "endpoint"))
         object.__setattr__(self, "symbol", _require_str(self.symbol, "symbol").upper())
         object.__setattr__(self, "interval", _require_str(self.interval, "interval"))
@@ -148,6 +152,8 @@ class HistoricalReplayProvenance:
         object.__setattr__(self, "effective_end_utc", _require_utc_datetime(self.effective_end_utc, "effective_end_utc"))
         object.__setattr__(self, "candle_count", _require_int(self.candle_count, "candle_count"))
         object.__setattr__(self, "schema_version", _require_int(self.schema_version, "schema_version"))
+        if self.schema_version != 2:
+            raise HistoricalReplayValidationError("schema_version must be 2.")
         object.__setattr__(self, "classification", _require_str(self.classification, "classification"))
         object.__setattr__(self, "operational_evidence", _require_bool(self.operational_evidence, "operational_evidence"))
         object.__setattr__(self, "paper_promotion_eligible", _require_bool(self.paper_promotion_eligible, "paper_promotion_eligible"))
@@ -157,6 +163,38 @@ class HistoricalReplayProvenance:
             raise HistoricalReplayValidationError("operational_evidence must be false.")
         if self.paper_promotion_eligible is not False:
             raise HistoricalReplayValidationError("paper_promotion_eligible must be false.")
+        expected_qualification = HistoricalProviderQualification.binance_public_spot(symbol=self.symbol, interval=self.interval)
+        if self.provider_qualification != expected_qualification:
+            raise HistoricalReplayValidationError("provider qualification mismatch.")
+        if self.provider_qualification.provider_id != self.provider:
+            raise HistoricalReplayValidationError("provider qualification provider_id must match provider.")
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "HistoricalReplayProvenance":
+        if not isinstance(data, Mapping):
+            raise HistoricalReplayValidationError("historical replay provenance must be a mapping.")
+        mapping = dict(data)
+        try:
+            provider_qualification = HistoricalProviderQualification.from_dict(mapping["provider_qualification"])
+            return cls(
+                dataset_id=mapping["dataset_id"],
+                content_hash=mapping["content_hash"],
+                manifest_hash=mapping["manifest_hash"],
+                provider=mapping["provider"],
+                provider_qualification=provider_qualification,
+                endpoint=mapping["endpoint"],
+                symbol=mapping["symbol"],
+                interval=mapping["interval"],
+                effective_start_utc=mapping["effective_start_utc"],
+                effective_end_utc=mapping["effective_end_utc"],
+                candle_count=mapping["candle_count"],
+                schema_version=mapping["schema_version"],
+                classification=mapping["classification"],
+                operational_evidence=mapping["operational_evidence"],
+                paper_promotion_eligible=mapping["paper_promotion_eligible"],
+            )
+        except KeyError as exc:
+            raise HistoricalReplayValidationError("historical replay provenance is incomplete.") from exc
 
     @classmethod
     def from_dataset(cls, dataset: HistoricalDataset) -> "HistoricalReplayProvenance":
@@ -166,6 +204,7 @@ class HistoricalReplayProvenance:
             content_hash=manifest.content_hash,
             manifest_hash=manifest.manifest_hash,
             provider=manifest.provider,
+            provider_qualification=manifest.provider_qualification,
             endpoint=manifest.endpoint,
             symbol=manifest.symbol,
             interval=manifest.interval,
@@ -181,6 +220,7 @@ class HistoricalReplayProvenance:
             "content_hash": self.content_hash,
             "manifest_hash": self.manifest_hash,
             "provider": self.provider,
+            "provider_qualification": self.provider_qualification.as_dict(),
             "endpoint": self.endpoint,
             "symbol": self.symbol,
             "interval": self.interval,
@@ -255,6 +295,7 @@ def historical_dataset_to_dataframe(source: str | Path | HistoricalDataset) -> p
     frame.attrs["historical_dataset_id"] = dataset.manifest.dataset_id
     frame.attrs["historical_content_hash"] = dataset.manifest.content_hash
     frame.attrs["historical_manifest_hash"] = dataset.manifest.manifest_hash
+    frame.attrs["historical_provider_qualification"] = dataset.manifest.provider_qualification.as_dict()
     frame.attrs["historical_schema_version"] = dataset.manifest.schema_version
     frame.attrs["historical_classification"] = "historical_research_only"
     return frame

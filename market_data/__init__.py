@@ -26,6 +26,7 @@ from .historical import (
 from .historical_manifest import historical_content_hash
 from .historical_models import HistoricalDataset, HistoricalDatasetManifest, HistoricalDatasetRequest
 from .provider import BinancePublicKlinesProvider
+from .provider_qualification import HistoricalProviderQualification
 from .service import MarketDataPackage, MarketDataProvenance, TrustedMarketDataService, trusted_market_data_service
 from .validation import (
     ALLOWED_INTERVALS,
@@ -38,6 +39,7 @@ from .validation import (
 __all__ = [
     "ALLOWED_INTERVALS",
     "BinancePublicKlinesProvider",
+    "HistoricalProviderQualification",
     "MarketDataCache",
     "MarketDataCacheEntry",
     "MarketDataError",
