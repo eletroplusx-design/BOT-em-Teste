@@ -10,6 +10,8 @@ from typing import Any, Mapping, Sequence
 from domain import Candle, DataSource, MarketSnapshot
 from domain.serialization import serialize_value
 
+from .provider_qualification import HistoricalProviderQualification
+
 from .errors import HistoricalDataIntegrityError, HistoricalDataValidationError
 from .validation import validate_klines_payload
 
@@ -75,6 +77,7 @@ def candles_content_hash(candles: Sequence[Candle]) -> str:
 @dataclass(frozen=True, slots=True)
 class HistoricalDatasetRequest:
     provider: str
+    provider_qualification: HistoricalProviderQualification
     endpoint: str
     symbol: str
     interval: str
@@ -85,6 +88,8 @@ class HistoricalDatasetRequest:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "provider", _require_str(self.provider, "provider"))
+        if not isinstance(self.provider_qualification, HistoricalProviderQualification):
+            raise HistoricalDataValidationError("provider_qualification must be a HistoricalProviderQualification instance.")
         object.__setattr__(self, "endpoint", _require_str(self.endpoint, "endpoint"))
         object.__setattr__(self, "symbol", _require_str(self.symbol, "symbol").upper())
         object.__setattr__(self, "interval", _require_str(self.interval, "interval"))
@@ -96,10 +101,16 @@ class HistoricalDatasetRequest:
             raise HistoricalDataValidationError("requested_end_utc must be after requested_start_utc.")
         if self.page_size > 1000:
             raise HistoricalDataValidationError("page_size must be <= 1000.")
+        expected_qualification = HistoricalProviderQualification.binance_public_spot(symbol=self.symbol, interval=self.interval)
+        if self.provider_qualification != expected_qualification:
+            raise HistoricalDataValidationError("provider qualification mismatch.")
+        if self.provider_qualification.provider_id != self.provider:
+            raise HistoricalDataValidationError("provider qualification provider_id must match provider.")
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "provider": self.provider,
+            "provider_qualification": self.provider_qualification.as_dict(),
             "endpoint": self.endpoint,
             "symbol": self.symbol,
             "interval": self.interval,
@@ -115,6 +126,7 @@ class HistoricalDatasetManifest:
     schema_version: int
     dataset_id: str
     provider: str
+    provider_qualification: HistoricalProviderQualification
     endpoint: str
     symbol: str
     interval: str
@@ -134,8 +146,12 @@ class HistoricalDatasetManifest:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "schema_version", _require_int(self.schema_version, "schema_version"))
+        if self.schema_version != 2:
+            raise HistoricalDataValidationError("schema_version must be 2.")
         object.__setattr__(self, "dataset_id", _require_str(self.dataset_id, "dataset_id"))
         object.__setattr__(self, "provider", _require_str(self.provider, "provider"))
+        if not isinstance(self.provider_qualification, HistoricalProviderQualification):
+            raise HistoricalDataValidationError("provider_qualification must be a HistoricalProviderQualification instance.")
         object.__setattr__(self, "endpoint", _require_str(self.endpoint, "endpoint"))
         object.__setattr__(self, "symbol", _require_str(self.symbol, "symbol").upper())
         object.__setattr__(self, "interval", _require_str(self.interval, "interval"))
@@ -157,6 +173,11 @@ class HistoricalDatasetManifest:
             raise HistoricalDataValidationError("requested_end_utc must be after requested_start_utc.")
         if self.effective_end_utc < self.effective_start_utc:
             raise HistoricalDataValidationError("effective_end_utc must not be before effective_start_utc.")
+        expected_qualification = HistoricalProviderQualification.binance_public_spot(symbol=self.symbol, interval=self.interval)
+        if self.provider_qualification != expected_qualification:
+            raise HistoricalDataValidationError("provider qualification mismatch.")
+        if self.provider_qualification.provider_id != self.provider:
+            raise HistoricalDataValidationError("provider qualification provider_id must match provider.")
         if self.manifest_hash:
             object.__setattr__(self, "manifest_hash", _require_str(self.manifest_hash, "manifest_hash"))
 
@@ -165,6 +186,7 @@ class HistoricalDatasetManifest:
             "schema_version": self.schema_version,
             "dataset_id": self.dataset_id,
             "provider": self.provider,
+            "provider_qualification": self.provider_qualification.as_dict(),
             "endpoint": self.endpoint,
             "symbol": self.symbol,
             "interval": self.interval,
@@ -186,28 +208,35 @@ class HistoricalDatasetManifest:
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "HistoricalDatasetManifest":
+        if not isinstance(data, Mapping):
+            raise HistoricalDataValidationError("historical dataset manifest must be a mapping.")
         mapping = dict(data)
-        return cls(
-            schema_version=mapping.get("schema_version", 1),
-            dataset_id=mapping["dataset_id"],
-            provider=mapping["provider"],
-            endpoint=mapping["endpoint"],
-            symbol=mapping["symbol"],
-            interval=mapping["interval"],
-            requested_start_utc=mapping["requested_start_utc"],
-            requested_end_utc=mapping["requested_end_utc"],
-            effective_start_utc=mapping["effective_start_utc"],
-            effective_end_utc=mapping["effective_end_utc"],
-            created_at_utc=mapping["created_at_utc"],
-            candle_count=mapping["candle_count"],
-            page_count=mapping["page_count"],
-            page_size=mapping["page_size"],
-            closed_candles_only=mapping["closed_candles_only"],
-            gap_count=mapping["gap_count"],
-            duplicate_count=mapping["duplicate_count"],
-            content_hash=mapping["content_hash"],
-            manifest_hash=mapping.get("manifest_hash", ""),
-        )
+        try:
+            provider_qualification = HistoricalProviderQualification.from_dict(mapping["provider_qualification"])
+            return cls(
+                schema_version=mapping["schema_version"],
+                dataset_id=mapping["dataset_id"],
+                provider=mapping["provider"],
+                provider_qualification=provider_qualification,
+                endpoint=mapping["endpoint"],
+                symbol=mapping["symbol"],
+                interval=mapping["interval"],
+                requested_start_utc=mapping["requested_start_utc"],
+                requested_end_utc=mapping["requested_end_utc"],
+                effective_start_utc=mapping["effective_start_utc"],
+                effective_end_utc=mapping["effective_end_utc"],
+                created_at_utc=mapping["created_at_utc"],
+                candle_count=mapping["candle_count"],
+                page_count=mapping["page_count"],
+                page_size=mapping["page_size"],
+                closed_candles_only=mapping["closed_candles_only"],
+                gap_count=mapping["gap_count"],
+                duplicate_count=mapping["duplicate_count"],
+                content_hash=mapping["content_hash"],
+                manifest_hash=mapping.get("manifest_hash", ""),
+            )
+        except KeyError as exc:
+            raise HistoricalDataValidationError("historical dataset manifest is incomplete.") from exc
 
     def canonical_payload(self) -> dict[str, Any]:
         payload = self.as_dict()
@@ -217,6 +246,7 @@ class HistoricalDatasetManifest:
     def matches_request(self, request: HistoricalDatasetRequest) -> bool:
         return (
             self.provider == request.provider
+            and self.provider_qualification == request.provider_qualification
             and self.endpoint == request.endpoint
             and self.symbol == request.symbol
             and self.interval == request.interval
@@ -241,6 +271,11 @@ class HistoricalDataset:
             raise HistoricalDataIntegrityError("manifest candle_count does not match candles.")
         if self.manifest.closed_candles_only is not True:
             raise HistoricalDataIntegrityError("closed_candles_only must be true.")
+        if not isinstance(self.manifest.provider_qualification, HistoricalProviderQualification):
+            raise HistoricalDataIntegrityError("provider qualification must be present.")
+        expected_qualification = HistoricalProviderQualification.binance_public_spot(symbol=self.manifest.symbol, interval=self.manifest.interval)
+        if self.manifest.provider_qualification != expected_qualification:
+            raise HistoricalDataIntegrityError("provider qualification mismatch.")
         if self.manifest.gap_count != 0:
             raise HistoricalDataIntegrityError("gap_count must be zero.")
         if self.manifest.duplicate_count != 0:

@@ -301,7 +301,7 @@ class HistoricalExperimentPlan:
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "HistoricalExperimentPlan":
         mapping = dict(data)
-        provenance = HistoricalReplayProvenance(**mapping["historical_provenance"])
+        provenance = HistoricalReplayProvenance.from_dict(mapping["historical_provenance"])
         strategy_fingerprint = HistoricalStrategyFingerprint.from_dict(mapping["strategy_fingerprint"])
         candidate_grid = tuple(
             CandidateConfig.from_mapping(candidate["name"], candidate.get("parameters", {}))
@@ -456,7 +456,7 @@ class HistoricalExperimentReport:
     def from_dict(cls, data: Mapping[str, Any]) -> "HistoricalExperimentReport":
         mapping = dict(data)
         plan = HistoricalExperimentPlan.from_dict(mapping["plan"])
-        provenance = HistoricalReplayProvenance(**mapping["historical_provenance"])
+        provenance = HistoricalReplayProvenance.from_dict(mapping["historical_provenance"])
         historical_dataset = mapping["historical_dataset"]
         replay = mapping["replay"]
         result = mapping["result"]

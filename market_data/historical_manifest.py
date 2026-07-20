@@ -34,9 +34,10 @@ def build_historical_manifest(
     content_hash: str,
 ) -> HistoricalDatasetManifest:
     manifest = HistoricalDatasetManifest(
-        schema_version=1,
+        schema_version=2,
         dataset_id=content_hash,
         provider=request.provider,
+        provider_qualification=request.provider_qualification,
         endpoint=request.endpoint,
         symbol=request.symbol,
         interval=request.interval,

@@ -11,7 +11,7 @@ from domain import Candle, DataSource, MarketSnapshot, Direction
 from historical_experiments import HistoricalExperimentValidationError, build_historical_experiment_plan
 from validation.errors import ValidationSelectionError
 from historical_replay import HistoricalDataset
-from market_data import HistoricalDatasetRequest, historical_content_hash
+from market_data import HistoricalDatasetRequest, HistoricalProviderQualification, historical_content_hash
 from market_data.historical_manifest import build_historical_manifest
 from market_data.historical_store import save_historical_dataset
 from strategies.baseline_a import (
@@ -222,6 +222,7 @@ def test_historical_plan_rejects_divergent_contract(tmp_path):
     candles = _bullish_pullback_history(count=260)
     request = HistoricalDatasetRequest(
         provider="binance.public.klines",
+        provider_qualification=HistoricalProviderQualification.binance_public_spot(symbol=BASELINE_A_SYMBOL, interval=BASELINE_A_INTERVAL),
         endpoint="https://api.binance.com/api/v3/klines",
         symbol=BASELINE_A_SYMBOL,
         interval=BASELINE_A_INTERVAL,
@@ -444,6 +445,7 @@ def test_historical_experiment_plan_is_compatible_and_not_promotional(tmp_path):
     candles = _bullish_pullback_history(count=260)
     request = HistoricalDatasetRequest(
         provider="binance.public.klines",
+        provider_qualification=HistoricalProviderQualification.binance_public_spot(symbol=BASELINE_A_SYMBOL, interval=BASELINE_A_INTERVAL),
         endpoint="https://api.binance.com/api/v3/klines",
         symbol=BASELINE_A_SYMBOL,
         interval=BASELINE_A_INTERVAL,
