@@ -109,6 +109,41 @@ class CountingKuCoinProvider(KuCoinPublicSpotKlinesProvider):
         normalized_rows.sort(key=lambda item: item[0])
         return normalized_rows
 
+class BoundaryKuCoinProvider(KuCoinPublicSpotKlinesProvider):
+    instantiations = 0
+    qualification_calls = 0
+    fetch_calls = 0
+    calls: list[dict[str, int | None]] = []
+    responses: list[dict[str, Any]] = []
+
+    def __init__(self):
+        type(self).instantiations += 1
+        super().__init__()
+        self._responses = [dict(response) for response in type(self).responses]
+
+    @classmethod
+    def reset(cls, responses):
+        cls.instantiations = 0
+        cls.qualification_calls = 0
+        cls.fetch_calls = 0
+        cls.calls = []
+        cls.responses = [dict(response) for response in responses]
+
+    def historical_qualification(self, symbol: str = "BTCUSDT", interval: str = "1h"):
+        type(self).qualification_calls += 1
+        return super().historical_qualification(symbol=symbol, interval=interval)
+
+    def fetch_klines(self, symbol: str, interval: str, limit: int = 1500, *, start_time=None, end_time=None):
+        type(self).fetch_calls += 1
+        type(self).calls.append({"start_time": start_time, "end_time": end_time, "limit": limit})
+        if not self._responses:
+            raise AssertionError("unexpected extra historical fetch")
+        expected = self._responses.pop(0)
+        if start_time != expected["start_time"] or end_time != expected["end_time"]:
+            raise AssertionError(f"unexpected KuCoin page bounds: {start_time!r}..{end_time!r}")
+        return expected["payload"]
+
+
 
 def _kucoin_raw_row(open_time: datetime, *, base: int = 100):
     return [
@@ -125,6 +160,26 @@ def _kucoin_raw_row(open_time: datetime, *, base: int = 100):
 def _kucoin_raw_page(start: datetime, count: int, *, base: int = 100):
     rows = [_kucoin_raw_row(start + idx * ONE_HOUR, base=base + idx) for idx in range(count)]
     return list(reversed(rows))
+
+
+def _kucoin_normalized_page(start: datetime, count: int, *, base: int = 100):
+    return [
+        [
+            int((start + idx * ONE_HOUR).timestamp() * 1000),
+            str(base + idx),
+            str(base + idx + 3),
+            str(base + idx - 2),
+            str(base + idx + 1),
+            str(1000 + base + idx),
+            int((start + idx * ONE_HOUR + ONE_HOUR - ONE_MS).timestamp() * 1000),
+            0,
+            0,
+            0,
+            0,
+            0,
+        ]
+        for idx in range(count)
+    ]
 
 
 def _dataset_rows(count: int = 12):
@@ -161,7 +216,7 @@ def _kucoin_dataset(tmp_path: Path, *, count: int = 12) -> tuple[Path, Historica
         interval="1h",
         requested_start_utc=candles[0].open_time,
         requested_end_utc=candles[-1].close_time,
-        page_size=1500,
+        page_size=1000,
         closed_candles_only=True,
     )
     manifest = build_historical_manifest(
@@ -298,6 +353,171 @@ def test_prepare_historical_dataset_kucoin_round_trip_preserves_provider_qualifi
     verify = verify_historical_dataset_file(input_file=output)
     assert status["provider_qualification"] == _kucoin_qualification().as_dict()
     assert verify["provider_qualification"] == _kucoin_qualification().as_dict()
+
+
+class BoundaryBinanceProvider(historical.BinancePublicKlinesProvider):
+    instantiations = 0
+    qualification_calls = 0
+    fetch_calls = 0
+    calls: list[dict[str, int | None]] = []
+    responses: list[dict[str, Any]] = []
+
+    def __init__(self):
+        type(self).instantiations += 1
+        super().__init__()
+        self._responses = [dict(response) for response in type(self).responses]
+
+    @classmethod
+    def reset(cls, responses):
+        cls.instantiations = 0
+        cls.qualification_calls = 0
+        cls.fetch_calls = 0
+        cls.calls = []
+        cls.responses = [dict(response) for response in responses]
+
+    def historical_qualification(self, symbol: str = "BTCUSDT", interval: str = "1h"):
+        type(self).qualification_calls += 1
+        return super().historical_qualification(symbol=symbol, interval=interval)
+
+    def fetch_klines(self, symbol: str, interval: str, limit: int = 1000, *, start_time=None, end_time=None):
+        type(self).fetch_calls += 1
+        type(self).calls.append({"start_time": start_time, "end_time": end_time, "limit": limit})
+        if not self._responses:
+            raise AssertionError("unexpected extra historical fetch")
+        expected = self._responses.pop(0)
+        if start_time != expected["start_time"] or end_time != expected["end_time"]:
+            raise AssertionError(f"unexpected Binance page bounds: {start_time!r}..{end_time!r}")
+        return expected["payload"]
+
+
+
+def test_prepare_historical_dataset_kucoin_pages_with_exact_1600_candle_boundaries(tmp_path, monkeypatch):
+    requested_start = BASE_START
+    requested_end = requested_start + 1600 * ONE_HOUR - ONE_MS
+    first_page_end = requested_start + 1500 * ONE_HOUR - ONE_MS
+    second_start = requested_start + 1500 * ONE_HOUR
+    responses = [
+        {
+            "start_time": int(requested_start.timestamp() * 1000),
+            "end_time": int(first_page_end.timestamp() * 1000),
+            "payload": _kucoin_normalized_page(requested_start, 1500),
+        },
+        {
+            "start_time": int(second_start.timestamp() * 1000),
+            "end_time": int(requested_end.timestamp() * 1000),
+            "payload": _kucoin_normalized_page(second_start, 100, base=5000),
+        },
+    ]
+    BoundaryKuCoinProvider.reset(responses)
+    monkeypatch.setattr(historical, "KuCoinPublicSpotKlinesProvider", BoundaryKuCoinProvider)
+    output = tmp_path / "kucoin-1600.json"
+
+    result = prepare_historical_dataset_kucoin(
+        output_file=output,
+        symbol="BTCUSDT",
+        interval="1h",
+        requested_start_utc=requested_start,
+        requested_end_utc=requested_end,
+        page_size=1500,
+        max_pages=2,
+    )
+
+    assert result["reused"] is False
+    assert result["page_count"] == 2
+    assert result["candle_count"] == 1600
+    assert BoundaryKuCoinProvider.instantiations == 1
+    assert BoundaryKuCoinProvider.qualification_calls == 1
+    assert BoundaryKuCoinProvider.fetch_calls == 2
+    assert len(BoundaryKuCoinProvider.calls) == 2
+    assert BoundaryKuCoinProvider.calls[0]["start_time"] == int(requested_start.timestamp() * 1000)
+    assert BoundaryKuCoinProvider.calls[0]["end_time"] == int(first_page_end.timestamp() * 1000)
+    assert BoundaryKuCoinProvider.calls[1]["start_time"] == int(second_start.timestamp() * 1000)
+    assert BoundaryKuCoinProvider.calls[1]["end_time"] == int(requested_end.timestamp() * 1000)
+
+    dataset = load_historical_dataset_file(output)
+    assert len(dataset.candles) == 1600
+    assert dataset.manifest.page_count == 2
+    assert dataset.manifest.candle_count == 1600
+    assert dataset.manifest.provider_qualification == _kucoin_qualification()
+    assert dataset.candles[0].open_time == requested_start
+    assert dataset.candles[-1].close_time == requested_end
+
+    status = status_historical_dataset(input_file=output)
+    verify = verify_historical_dataset_file(input_file=output)
+    assert status["provider_qualification"] == _kucoin_qualification().as_dict()
+    assert verify["provider_qualification"] == _kucoin_qualification().as_dict()
+
+
+def test_prepare_historical_dataset_binance_pages_with_exact_1600_candle_boundaries(tmp_path):
+    requested_start = BASE_START
+    requested_end = requested_start + 1600 * ONE_HOUR - ONE_MS
+    first_page_end = requested_start + 1000 * ONE_HOUR - ONE_MS
+    second_start = requested_start + 1000 * ONE_HOUR
+    responses = [
+        {
+            "start_time": int(requested_start.timestamp() * 1000),
+            "end_time": int(first_page_end.timestamp() * 1000),
+            "payload": [
+                [
+                    int((requested_start + idx * ONE_HOUR).timestamp() * 1000),
+                    str(100 + idx),
+                    str(106 + idx),
+                    str(96 + idx),
+                    str(102 + idx),
+                    str(1000 + idx),
+                    int((requested_start + idx * ONE_HOUR + ONE_HOUR - ONE_MS).timestamp() * 1000),
+                ]
+                for idx in range(1000)
+            ],
+        },
+        {
+            "start_time": int(second_start.timestamp() * 1000),
+            "end_time": int(requested_end.timestamp() * 1000),
+            "payload": [
+                [
+                    int((second_start + idx * ONE_HOUR).timestamp() * 1000),
+                    str(200 + idx),
+                    str(206 + idx),
+                    str(196 + idx),
+                    str(202 + idx),
+                    str(2000 + idx),
+                    int((second_start + idx * ONE_HOUR + ONE_HOUR - ONE_MS).timestamp() * 1000),
+                ]
+                for idx in range(600)
+            ],
+        },
+    ]
+    BoundaryBinanceProvider.reset(responses)
+    output = tmp_path / "binance-1600.json"
+
+    result = historical.prepare_historical_dataset(
+        output_file=output,
+        provider=BoundaryBinanceProvider(),
+        symbol="BTCUSDT",
+        interval="1h",
+        requested_start_utc=requested_start,
+        requested_end_utc=requested_end,
+        page_size=1000,
+        max_pages=2,
+    )
+
+    assert result["reused"] is False
+    assert result["page_count"] == 2
+    assert result["candle_count"] == 1600
+    assert BoundaryBinanceProvider.instantiations == 1
+    assert BoundaryBinanceProvider.qualification_calls == 1
+    assert BoundaryBinanceProvider.fetch_calls == 2
+    assert len(BoundaryBinanceProvider.calls) == 2
+    assert BoundaryBinanceProvider.calls[0]["start_time"] == int(requested_start.timestamp() * 1000)
+    assert BoundaryBinanceProvider.calls[0]["end_time"] == int(first_page_end.timestamp() * 1000)
+    assert BoundaryBinanceProvider.calls[1]["start_time"] == int(second_start.timestamp() * 1000)
+    assert BoundaryBinanceProvider.calls[1]["end_time"] == int(requested_end.timestamp() * 1000)
+
+    dataset = load_historical_dataset_file(output)
+    assert len(dataset.candles) == 1600
+    assert dataset.manifest.page_count == 2
+    assert dataset.candles[0].open_time == requested_start
+    assert dataset.candles[-1].close_time == requested_end
 
 
 def test_prepare_historical_dataset_kucoin_rejects_future_end_before_network(tmp_path, monkeypatch):

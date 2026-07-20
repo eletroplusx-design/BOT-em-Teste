@@ -58,6 +58,42 @@ def _next_open_time(candle: Candle) -> datetime:
     return candle.close_time + timedelta(milliseconds=1)
 
 
+_PAGE_INTERVAL_SECONDS = {
+    "1m": 60,
+    "3m": 180,
+    "5m": 300,
+    "15m": 900,
+    "30m": 1800,
+    "1h": 3600,
+    "2h": 7200,
+    "4h": 14400,
+    "6h": 21600,
+    "8h": 28800,
+    "12h": 43200,
+    "1d": 86400,
+    "3d": 259200,
+    "1w": 604800,
+}
+
+
+def _advance_open_time(open_time: datetime, interval: str, steps: int) -> datetime:
+    if interval == "1M":
+        current = open_time
+        for _ in range(steps):
+            year = current.year + (1 if current.month == 12 else 0)
+            month = 1 if current.month == 12 else current.month + 1
+            current = datetime(year, month, 1, tzinfo=timezone.utc)
+        return current
+    if interval not in _PAGE_INTERVAL_SECONDS:
+        raise HistoricalDataValidationError(f"unsupported interval for historical paging: {interval!r}")
+    return open_time + timedelta(seconds=_PAGE_INTERVAL_SECONDS[interval] * steps)
+
+
+def _page_end_utc(current_start: datetime, interval: str, page_size: int, requested_end_utc: datetime) -> datetime:
+    page_end = _advance_open_time(current_start, interval, page_size) - timedelta(milliseconds=1)
+    return min(requested_end_utc, page_end)
+
+
 def _build_request(
     *,
     symbol: str,
@@ -162,7 +198,6 @@ def fetch_historical_public_klines(
 
     current_start = request.requested_start_utc
     current_start_ms = int(current_start.timestamp() * 1000)
-    end_ms = int(request.requested_end_utc.timestamp() * 1000)
     candles: list[Candle] = []
     page_count = 0
     last_open_time: datetime | None = None
@@ -170,12 +205,13 @@ def fetch_historical_public_klines(
     while True:
         if page_count >= max_pages:
             raise HistoricalDataValidationError("Maximum historical page count exceeded.")
+        page_end_utc = _page_end_utc(current_start, request.interval, request.page_size, request.requested_end_utc)
         payload = provider.fetch_klines(
             request.symbol,
             request.interval,
             request.page_size,
             start_time=current_start_ms,
-            end_time=end_ms,
+            end_time=int(page_end_utc.timestamp() * 1000),
         )
         page_candles = _validate_page_candles(
             payload=payload,
@@ -203,7 +239,8 @@ def fetch_historical_public_klines(
         page_count += 1
         last_open_time = candles[-1].open_time
         if candles[-1].close_time < request.requested_end_utc:
-            current_start_ms = int((_next_open_time(candles[-1])).timestamp() * 1000)
+            current_start = _next_open_time(candles[-1])
+            current_start_ms = int(current_start.timestamp() * 1000)
             continue
         if candles[-1].close_time != request.requested_end_utc:
             raise HistoricalDataValidationError("Historical dataset does not end at requested_end_utc.")
