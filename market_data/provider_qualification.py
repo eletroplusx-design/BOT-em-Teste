@@ -24,10 +24,19 @@ def _require_str(value: Any, field_name: str) -> str:
     return value.strip()
 
 
-def _require_int(value: Any, field_name: str) -> int:
+def _require_optional_str(value: Any, field_name: str) -> str:
+    if value in (None, ""):
+        return ""
+    return _require_str(value, field_name)
+
+
+def _require_int(value: Any, field_name: str, *, allow_zero: bool = False) -> int:
     if type(value) is bool or not isinstance(value, int):
         raise HistoricalDataValidationError(f"{field_name} must be an integer.")
-    if value <= 0:
+    if allow_zero:
+        if value < 0:
+            raise HistoricalDataValidationError(f"{field_name} cannot be negative.")
+    elif value <= 0:
         raise HistoricalDataValidationError(f"{field_name} must be greater than zero.")
     return int(value)
 
@@ -46,6 +55,13 @@ def _require_access_type(value: Any) -> str:
     return access_type
 
 
+def _require_http_url(value: Any, field_name: str) -> str:
+    url = _require_str(value, field_name)
+    if not url.lower().startswith(("https://", "http://")):
+        raise HistoricalDataValidationError(f"{field_name} must be a URL.")
+    return url
+
+
 @dataclass(frozen=True, slots=True)
 class HistoricalProviderQualification:
     provider_id: str
@@ -57,6 +73,11 @@ class HistoricalProviderQualification:
     time_semantics: str
     access_type: str
     data_contract_version: int
+    external_symbol: str = ""
+    endpoint_url: str = ""
+    documentation_url: str = ""
+    pagination_limit: int = 0
+    close_time_rule: str = ""
     qualification_hash: str = ""
 
     def __post_init__(self) -> None:
@@ -69,8 +90,31 @@ class HistoricalProviderQualification:
         object.__setattr__(self, "time_semantics", _require_str(self.time_semantics, "time_semantics").lower())
         object.__setattr__(self, "access_type", _require_access_type(self.access_type))
         object.__setattr__(self, "data_contract_version", _require_int(self.data_contract_version, "data_contract_version"))
+        object.__setattr__(self, "external_symbol", _require_optional_str(self.external_symbol, "external_symbol").upper())
+        object.__setattr__(self, "endpoint_url", _require_optional_str(self.endpoint_url, "endpoint_url"))
+        object.__setattr__(self, "documentation_url", _require_optional_str(self.documentation_url, "documentation_url"))
+        object.__setattr__(self, "pagination_limit", _require_int(self.pagination_limit, "pagination_limit", allow_zero=True))
+        object.__setattr__(self, "close_time_rule", _require_optional_str(self.close_time_rule, "close_time_rule"))
         if self.time_semantics != "utc":
             raise HistoricalDataValidationError("time_semantics must be utc.")
+        if self.data_contract_version == 1:
+            if any((self.external_symbol, self.endpoint_url, self.documentation_url, self.pagination_limit, self.close_time_rule)):
+                raise HistoricalDataValidationError("data_contract_version 1 does not allow extended provider metadata.")
+        elif self.data_contract_version >= 2:
+            if not self.external_symbol:
+                raise HistoricalDataValidationError("external_symbol is required for provider contract version 2.")
+            if self.external_symbol == self.symbol:
+                raise HistoricalDataValidationError("external_symbol must differ from canonical symbol for version 2.")
+            if not self.endpoint_url:
+                raise HistoricalDataValidationError("endpoint_url is required for provider contract version 2.")
+            if not self.documentation_url:
+                raise HistoricalDataValidationError("documentation_url is required for provider contract version 2.")
+            if self.pagination_limit <= 0:
+                raise HistoricalDataValidationError("pagination_limit is required for provider contract version 2.")
+            if not self.close_time_rule:
+                raise HistoricalDataValidationError("close_time_rule is required for provider contract version 2.")
+        else:
+            raise HistoricalDataValidationError("data_contract_version must be greater than zero.")
         if self.qualification_hash:
             object.__setattr__(self, "qualification_hash", _require_str(self.qualification_hash, "qualification_hash"))
             if self.qualification_hash != _hash_payload(self.canonical_payload()):
@@ -104,10 +148,69 @@ class HistoricalProviderQualification:
         )
 
     @classmethod
+    def kucoin_public_spot(
+        cls,
+        *,
+        symbol: str = "BTCUSDT",
+        interval: str = "1h",
+        provider_version: str = "v1",
+        data_contract_version: int = 2,
+    ) -> "HistoricalProviderQualification":
+        normalized_symbol = _require_str(symbol, "symbol").upper()
+        normalized_interval = _require_str(interval, "interval")
+        if normalized_symbol != "BTCUSDT" or normalized_interval != "1h":
+            raise HistoricalDataValidationError("kucoin public spot provider only supports BTCUSDT 1h.")
+        return cls(
+            provider_id="kucoin.public.klines",
+            provider_version=provider_version,
+            market_type="spot",
+            exchange="kucoin",
+            symbol=normalized_symbol,
+            interval=normalized_interval,
+            time_semantics="utc",
+            access_type="public_no_auth",
+            data_contract_version=data_contract_version,
+            external_symbol="BTC-USDT",
+            endpoint_url="https://api.kucoin.com/api/v1/market/candles",
+            documentation_url="https://www.kucoin.com/docs-new/3470071w0",
+            pagination_limit=1500,
+            close_time_rule="open_time + 1h - 1ms",
+        )
+
+    @classmethod
+    def expected_for_provider(cls, provider_id: str, *, symbol: str, interval: str) -> "HistoricalProviderQualification":
+        provider_id = _require_str(provider_id, "provider_id")
+        if provider_id == "binance.public.klines":
+            return cls.binance_public_spot(symbol=symbol, interval=interval)
+        if provider_id == "kucoin.public.klines":
+            return cls.kucoin_public_spot(symbol=symbol, interval=interval)
+        raise HistoricalDataValidationError("unsupported historical provider.")
+
+    @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "HistoricalProviderQualification":
         if not isinstance(data, Mapping):
             raise HistoricalDataValidationError("provider qualification must be a mapping.")
         mapping = dict(data)
+        allowed = {
+            "provider_id",
+            "provider_version",
+            "market_type",
+            "exchange",
+            "symbol",
+            "interval",
+            "time_semantics",
+            "access_type",
+            "data_contract_version",
+            "external_symbol",
+            "endpoint_url",
+            "documentation_url",
+            "pagination_limit",
+            "close_time_rule",
+            "qualification_hash",
+        }
+        extra = sorted(set(mapping) - allowed)
+        if extra:
+            raise HistoricalDataValidationError(f"unexpected provider qualification fields: {', '.join(extra)}.")
         try:
             return cls(
                 provider_id=mapping["provider_id"],
@@ -119,13 +222,18 @@ class HistoricalProviderQualification:
                 time_semantics=mapping["time_semantics"],
                 access_type=mapping["access_type"],
                 data_contract_version=mapping["data_contract_version"],
+                external_symbol=mapping.get("external_symbol", ""),
+                endpoint_url=mapping.get("endpoint_url", ""),
+                documentation_url=mapping.get("documentation_url", ""),
+                pagination_limit=mapping.get("pagination_limit", 0),
+                close_time_rule=mapping.get("close_time_rule", ""),
                 qualification_hash=mapping.get("qualification_hash", ""),
             )
         except KeyError as exc:
             raise HistoricalDataValidationError("provider qualification is incomplete.") from exc
 
     def canonical_payload(self) -> dict[str, Any]:
-        return {
+        payload = {
             "provider_id": self.provider_id,
             "provider_version": self.provider_version,
             "market_type": self.market_type,
@@ -136,6 +244,17 @@ class HistoricalProviderQualification:
             "access_type": self.access_type,
             "data_contract_version": self.data_contract_version,
         }
+        if self.data_contract_version >= 2:
+            payload.update(
+                {
+                    "external_symbol": self.external_symbol,
+                    "endpoint_url": self.endpoint_url,
+                    "documentation_url": self.documentation_url,
+                    "pagination_limit": self.pagination_limit,
+                    "close_time_rule": self.close_time_rule,
+                }
+            )
+        return payload
 
     def as_dict(self) -> dict[str, Any]:
         payload = self.canonical_payload()
@@ -145,3 +264,8 @@ class HistoricalProviderQualification:
     def requires_spot(self) -> bool:
         return self.market_type == "spot"
 
+    def matches_symbol_interval(self, *, symbol: str, interval: str) -> bool:
+        return self.symbol == _require_str(symbol, "symbol").upper() and self.interval == _require_str(interval, "interval")
+
+    def matches_provider(self, provider_id: str) -> bool:
+        return self.provider_id == _require_str(provider_id, "provider_id")

@@ -20,12 +20,14 @@ from .historical import (
     fetch_historical_public_klines,
     load_historical_dataset_file,
     prepare_historical_dataset,
+    prepare_historical_dataset_kucoin,
     status_historical_dataset,
     verify_historical_dataset_file,
 )
 from .historical_manifest import historical_content_hash
 from .historical_models import HistoricalDataset, HistoricalDatasetManifest, HistoricalDatasetRequest
 from .provider import BinancePublicKlinesProvider
+from .kucoin_provider import KuCoinPublicSpotKlinesProvider
 from .provider_qualification import HistoricalProviderQualification
 from .service import MarketDataPackage, MarketDataProvenance, TrustedMarketDataService, trusted_market_data_service
 from .validation import (
@@ -39,6 +41,7 @@ from .validation import (
 __all__ = [
     "ALLOWED_INTERVALS",
     "BinancePublicKlinesProvider",
+    "KuCoinPublicSpotKlinesProvider",
     "HistoricalProviderQualification",
     "MarketDataCache",
     "MarketDataCacheEntry",
@@ -65,6 +68,7 @@ __all__ = [
     "historical_content_hash",
     "load_historical_dataset_file",
     "prepare_historical_dataset",
+    "prepare_historical_dataset_kucoin",
     "status_historical_dataset",
     "verify_historical_dataset_file",
     "TrustedMarketDataService",

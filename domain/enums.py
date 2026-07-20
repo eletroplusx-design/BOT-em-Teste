@@ -31,6 +31,7 @@ class TradeResultStatus(str, Enum):
 
 class DataSource(str, Enum):
     BINANCE = "BINANCE"
+    KUCOIN = "KUCOIN"
     YAHOO = "YAHOO"
     PAPER = "PAPER"
     LEGACY = "LEGACY"

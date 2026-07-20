@@ -37,7 +37,7 @@ from domain import DataSource, Direction, OrderStatus, PaperOrder, Signal, Tradi
 from domain.serialization import serialize_value
 from market_data import trusted_market_data_service
 from market_data import HistoricalDataError, MarketDataError
-from market_data.historical import prepare_historical_dataset, status_historical_dataset, verify_historical_dataset_file
+from market_data.historical import prepare_historical_dataset, prepare_historical_dataset_kucoin, status_historical_dataset, verify_historical_dataset_file
 from market_data.service import MarketDataProvenance, package_to_dataframe
 from paper_runtime import PaperRuntimeSession, PaperRuntimeStore, create_monitored_session, get_monitored_session, load_active_runtime_session, new_session_id
 from paper_runtime.errors import PaperRuntimeAuditError, PaperRuntimeSessionError, PaperRuntimeStoreError
@@ -2412,6 +2412,14 @@ def build_parser() -> argparse.ArgumentParser:
     history_prepare.add_argument("--output", required=True)
     history_prepare.add_argument("--page-size", type=int, default=1000)
     history_prepare.add_argument("--max-pages", type=int, default=1000)
+    history_prepare_kucoin = history_sub.add_parser("prepare-kucoin", help="Fetch and persist a historical public market dataset from KuCoin spot.")
+    history_prepare_kucoin.add_argument("--symbol", required=True)
+    history_prepare_kucoin.add_argument("--interval", required=True)
+    history_prepare_kucoin.add_argument("--start-utc", required=True)
+    history_prepare_kucoin.add_argument("--end-utc", required=True)
+    history_prepare_kucoin.add_argument("--output", required=True)
+    history_prepare_kucoin.add_argument("--page-size", type=int, default=1500)
+    history_prepare_kucoin.add_argument("--max-pages", type=int, default=1000)
     history_status = history_sub.add_parser("status", help="Inspect a persisted historical public market dataset.")
     history_status.add_argument("--input", required=True)
     history_verify = history_sub.add_parser("verify", help="Verify a persisted historical public market dataset.")
@@ -2548,6 +2556,17 @@ def main(argv: list[str] | None = None) -> int:
                 _print_result(prepare_historical_dataset(
                     output_file=args.output,
                     provider=trusted_market_data_service.provider,
+                    symbol=args.symbol,
+                    interval=args.interval,
+                    requested_start_utc=args.start_utc,
+                    requested_end_utc=args.end_utc,
+                    page_size=args.page_size,
+                    max_pages=args.max_pages,
+                ))
+                return 0
+            if args.history_command == "prepare-kucoin":
+                _print_result(prepare_historical_dataset_kucoin(
+                    output_file=args.output,
                     symbol=args.symbol,
                     interval=args.interval,
                     requested_start_utc=args.start_utc,

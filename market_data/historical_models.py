@@ -69,6 +69,15 @@ def _utc_iso(value: datetime) -> str:
     return _require_utc_datetime(value, "datetime").isoformat().replace("+00:00", "Z")
 
 
+def _expected_source_for_exchange(exchange: str) -> DataSource:
+    normalized = _require_str(exchange, "exchange").lower()
+    if normalized == "binance":
+        return DataSource.BINANCE
+    if normalized == "kucoin":
+        return DataSource.KUCOIN
+    raise HistoricalDataValidationError(f"unsupported historical exchange: {exchange!r}")
+
+
 def candles_content_hash(candles: Sequence[Candle]) -> str:
     payload = [candle.to_dict() for candle in candles]
     return _hash_payload(payload)
@@ -99,9 +108,14 @@ class HistoricalDatasetRequest:
         object.__setattr__(self, "closed_candles_only", _require_bool(self.closed_candles_only, "closed_candles_only"))
         if self.requested_end_utc <= self.requested_start_utc:
             raise HistoricalDataValidationError("requested_end_utc must be after requested_start_utc.")
-        if self.page_size > 1000:
-            raise HistoricalDataValidationError("page_size must be <= 1000.")
-        expected_qualification = HistoricalProviderQualification.binance_public_spot(symbol=self.symbol, interval=self.interval)
+        page_limit = self.provider_qualification.pagination_limit or 1000
+        if self.page_size > page_limit:
+            raise HistoricalDataValidationError(f"page_size must be <= {page_limit}.")
+        expected_qualification = HistoricalProviderQualification.expected_for_provider(
+            self.provider_qualification.provider_id,
+            symbol=self.symbol,
+            interval=self.interval,
+        )
         if self.provider_qualification != expected_qualification:
             raise HistoricalDataValidationError("provider qualification mismatch.")
         if self.provider_qualification.provider_id != self.provider:
@@ -167,13 +181,18 @@ class HistoricalDatasetManifest:
         object.__setattr__(self, "gap_count", _require_int(self.gap_count, "gap_count", allow_zero=True))
         object.__setattr__(self, "duplicate_count", _require_int(self.duplicate_count, "duplicate_count", allow_zero=True))
         object.__setattr__(self, "content_hash", _require_str(self.content_hash, "content_hash"))
-        if self.page_size > 1000:
-            raise HistoricalDataValidationError("page_size must be <= 1000.")
+        page_limit = self.provider_qualification.pagination_limit or 1000
+        if self.page_size > page_limit:
+            raise HistoricalDataValidationError(f"page_size must be <= {page_limit}.")
         if self.requested_end_utc <= self.requested_start_utc:
             raise HistoricalDataValidationError("requested_end_utc must be after requested_start_utc.")
         if self.effective_end_utc < self.effective_start_utc:
             raise HistoricalDataValidationError("effective_end_utc must not be before effective_start_utc.")
-        expected_qualification = HistoricalProviderQualification.binance_public_spot(symbol=self.symbol, interval=self.interval)
+        expected_qualification = HistoricalProviderQualification.expected_for_provider(
+            self.provider_qualification.provider_id,
+            symbol=self.symbol,
+            interval=self.interval,
+        )
         if self.provider_qualification != expected_qualification:
             raise HistoricalDataValidationError("provider qualification mismatch.")
         if self.provider_qualification.provider_id != self.provider:
@@ -273,7 +292,11 @@ class HistoricalDataset:
             raise HistoricalDataIntegrityError("closed_candles_only must be true.")
         if not isinstance(self.manifest.provider_qualification, HistoricalProviderQualification):
             raise HistoricalDataIntegrityError("provider qualification must be present.")
-        expected_qualification = HistoricalProviderQualification.binance_public_spot(symbol=self.manifest.symbol, interval=self.manifest.interval)
+        expected_qualification = HistoricalProviderQualification.expected_for_provider(
+            self.manifest.provider_qualification.provider_id,
+            symbol=self.manifest.symbol,
+            interval=self.manifest.interval,
+        )
         if self.manifest.provider_qualification != expected_qualification:
             raise HistoricalDataIntegrityError("provider qualification mismatch.")
         if self.manifest.gap_count != 0:
@@ -284,7 +307,8 @@ class HistoricalDataset:
             raise HistoricalDataIntegrityError("Historical dataset candle symbol mismatch.")
         if any(candle.interval != self.manifest.interval for candle in self.candles):
             raise HistoricalDataIntegrityError("Historical dataset candle interval mismatch.")
-        if any(candle.source != DataSource.BINANCE for candle in self.candles):
+        expected_source = _expected_source_for_exchange(self.manifest.provider_qualification.exchange)
+        if any(candle.source != expected_source for candle in self.candles):
             raise HistoricalDataIntegrityError("Historical dataset candle source mismatch.")
         if self.candles[0].open_time != self.manifest.requested_start_utc:
             raise HistoricalDataIntegrityError("requested_start_utc does not match candles.")
@@ -318,6 +342,7 @@ class HistoricalDataset:
                 symbol=self.manifest.symbol,
                 interval=self.manifest.interval,
                 now=self.manifest.effective_end_utc,
+                source=expected_source,
             )
         except Exception as exc:
             raise HistoricalDataIntegrityError("Historical dataset candles are invalid.") from exc

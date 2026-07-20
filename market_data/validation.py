@@ -91,17 +91,17 @@ def validate_symbol_interval(symbol: str, interval: str) -> tuple[str, str]:
     return symbol.strip().upper(), interval
 
 
-def validate_limit(limit: Any) -> int:
+def validate_limit(limit: Any, *, maximum: int = MAX_BINANCE_LIMIT) -> int:
     if isinstance(limit, bool) or not isinstance(limit, int):
         raise MarketDataValidationError("limit must be an integer.")
     if limit <= 0:
         raise MarketDataValidationError("limit must be greater than zero.")
-    if limit > MAX_BINANCE_LIMIT:
-        raise MarketDataValidationError(f"limit must be <= {MAX_BINANCE_LIMIT}.")
+    if limit > maximum:
+        raise MarketDataValidationError(f"limit must be <= {maximum}.")
     return limit
 
 
-def _row_to_candle(row: Sequence[Any], symbol: str, interval: str) -> Candle:
+def _row_to_candle(row: Sequence[Any], symbol: str, interval: str, *, source: DataSource = DataSource.BINANCE) -> Candle:
     if len(row) < 7:
         raise MarketDataValidationError("Kline payload is partial.")
     open_time_ms, open_, high, low, close, volume, close_time_ms = row[:7]
@@ -122,7 +122,7 @@ def _row_to_candle(row: Sequence[Any], symbol: str, interval: str) -> Candle:
                 "volume": _finite_decimal(volume, "volume"),
                 "symbol": symbol,
                 "interval": interval,
-                "source": DataSource.BINANCE,
+                "source": source,
             }
         )
     except DomainValidationError as exc:
@@ -136,6 +136,7 @@ def validate_klines_payload(
     symbol: str,
     interval: str,
     now: datetime | None = None,
+    source: DataSource = DataSource.BINANCE,
 ) -> list[Candle]:
     symbol, interval = validate_symbol_interval(symbol, interval)
     if not isinstance(payload, list) or not payload:
@@ -152,7 +153,7 @@ def validate_klines_payload(
     for idx, row in enumerate(payload):
         if not isinstance(row, (list, tuple)):
             raise MarketDataValidationError("Malformed kline row.")
-        candle = _row_to_candle(row, symbol, interval)
+        candle = _row_to_candle(row, symbol, interval, source=source)
         if candle.open_time >= candle.close_time:
             raise MarketDataValidationError("Candle timestamps are incoherent.")
         if candle.open_time in seen_open_times:

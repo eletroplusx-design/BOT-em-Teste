@@ -5,6 +5,7 @@ from typing import Any
 
 import requests
 
+from domain import DataSource
 from .provider_qualification import HistoricalProviderQualification
 from .errors import (
     HistoricalDataValidationError,
@@ -18,6 +19,7 @@ from .errors import (
 class BinancePublicKlinesProvider:
     base_url = "https://api.binance.com/api/v3/klines"
     trusted_market_data_provider = True
+    historical_source = DataSource.BINANCE
     provider_identity = "binance.public.klines"
     provider_version = "v1"
     historical_market_type = "spot"
