@@ -38,6 +38,7 @@ from domain.serialization import serialize_value
 from market_data import trusted_market_data_service
 from market_data import HistoricalDataError, MarketDataError
 from market_data.historical import prepare_historical_dataset, prepare_historical_dataset_kucoin, status_historical_dataset, verify_historical_dataset_file
+from market_data.provider_qualification import KUCOIN_PUBLIC_SPOT_INTERVALS
 from market_data.service import MarketDataProvenance, package_to_dataframe
 from paper_runtime import PaperRuntimeSession, PaperRuntimeStore, create_monitored_session, get_monitored_session, load_active_runtime_session, new_session_id
 from paper_runtime.errors import PaperRuntimeAuditError, PaperRuntimeSessionError, PaperRuntimeStoreError
@@ -2414,7 +2415,7 @@ def build_parser() -> argparse.ArgumentParser:
     history_prepare.add_argument("--max-pages", type=int, default=1000)
     history_prepare_kucoin = history_sub.add_parser("prepare-kucoin", help="Fetch and persist a historical public market dataset from KuCoin spot.")
     history_prepare_kucoin.add_argument("--symbol", required=True)
-    history_prepare_kucoin.add_argument("--interval", required=True)
+    history_prepare_kucoin.add_argument("--interval", required=True, choices=KUCOIN_PUBLIC_SPOT_INTERVALS)
     history_prepare_kucoin.add_argument("--start-utc", required=True)
     history_prepare_kucoin.add_argument("--end-utc", required=True)
     history_prepare_kucoin.add_argument("--output", required=True)

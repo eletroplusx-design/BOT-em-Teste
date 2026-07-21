@@ -10,6 +10,30 @@ from domain.serialization import serialize_value
 from .errors import HistoricalDataValidationError
 
 
+KUCOIN_PUBLIC_SPOT_INTERVALS: tuple[str, ...] = ("15m", "1h", "4h")
+KUCOIN_PUBLIC_SPOT_INTERVAL_CODES: dict[str, str] = {
+    "15m": "15min",
+    "1h": "1hour",
+    "4h": "4hour",
+}
+KUCOIN_PUBLIC_SPOT_INTERVAL_SECONDS: dict[str, int] = {
+    "15m": 900,
+    "1h": 3600,
+    "4h": 14400,
+}
+_KUCOIN_PUBLIC_SPOT_INTERVAL_CLOSE_TIME_RULE = "open_time + interval_duration_seconds - 1ms"
+
+
+def kucoin_public_spot_interval_contract(interval: str) -> tuple[str, int]:
+    normalized_interval = _require_str(interval, "interval")
+    if normalized_interval not in KUCOIN_PUBLIC_SPOT_INTERVALS:
+        raise HistoricalDataValidationError("kucoin public spot provider only supports BTCUSDT 15m, 1h, or 4h.")
+    return (
+        KUCOIN_PUBLIC_SPOT_INTERVAL_CODES[normalized_interval],
+        KUCOIN_PUBLIC_SPOT_INTERVAL_SECONDS[normalized_interval],
+    )
+
+
 def _canonical_json(payload: Any) -> str:
     return json.dumps(serialize_value(payload), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
@@ -74,6 +98,8 @@ class HistoricalProviderQualification:
     access_type: str
     data_contract_version: int
     external_symbol: str = ""
+    interval_code: str = ""
+    interval_duration_seconds: int = 0
     endpoint_url: str = ""
     documentation_url: str = ""
     pagination_limit: int = 0
@@ -91,6 +117,8 @@ class HistoricalProviderQualification:
         object.__setattr__(self, "access_type", _require_access_type(self.access_type))
         object.__setattr__(self, "data_contract_version", _require_int(self.data_contract_version, "data_contract_version"))
         object.__setattr__(self, "external_symbol", _require_optional_str(self.external_symbol, "external_symbol").upper())
+        object.__setattr__(self, "interval_code", _require_optional_str(self.interval_code, "interval_code").lower())
+        object.__setattr__(self, "interval_duration_seconds", _require_int(self.interval_duration_seconds, "interval_duration_seconds", allow_zero=True))
         object.__setattr__(self, "endpoint_url", _require_optional_str(self.endpoint_url, "endpoint_url"))
         object.__setattr__(self, "documentation_url", _require_optional_str(self.documentation_url, "documentation_url"))
         object.__setattr__(self, "pagination_limit", _require_int(self.pagination_limit, "pagination_limit", allow_zero=True))
@@ -98,13 +126,15 @@ class HistoricalProviderQualification:
         if self.time_semantics != "utc":
             raise HistoricalDataValidationError("time_semantics must be utc.")
         if self.data_contract_version == 1:
-            if any((self.external_symbol, self.endpoint_url, self.documentation_url, self.pagination_limit, self.close_time_rule)):
+            if any((self.external_symbol, self.interval_code, self.interval_duration_seconds, self.endpoint_url, self.documentation_url, self.pagination_limit, self.close_time_rule)):
                 raise HistoricalDataValidationError("data_contract_version 1 does not allow extended provider metadata.")
-        elif self.data_contract_version >= 2:
+        elif self.data_contract_version == 2:
             if not self.external_symbol:
                 raise HistoricalDataValidationError("external_symbol is required for provider contract version 2.")
             if self.external_symbol == self.symbol:
                 raise HistoricalDataValidationError("external_symbol must differ from canonical symbol for version 2.")
+            if self.interval_code or self.interval_duration_seconds:
+                raise HistoricalDataValidationError("data_contract_version 2 does not allow interval_code or interval_duration_seconds.")
             if not self.endpoint_url:
                 raise HistoricalDataValidationError("endpoint_url is required for provider contract version 2.")
             if not self.documentation_url:
@@ -113,6 +143,24 @@ class HistoricalProviderQualification:
                 raise HistoricalDataValidationError("pagination_limit is required for provider contract version 2.")
             if not self.close_time_rule:
                 raise HistoricalDataValidationError("close_time_rule is required for provider contract version 2.")
+        elif self.data_contract_version == 3:
+            expected_interval_code, expected_duration_seconds = kucoin_public_spot_interval_contract(self.interval)
+            if self.external_symbol != "BTC-USDT":
+                raise HistoricalDataValidationError("external_symbol is required for provider contract version 3.")
+            if self.external_symbol == self.symbol:
+                raise HistoricalDataValidationError("external_symbol must differ from canonical symbol for version 3.")
+            if self.interval_code != expected_interval_code:
+                raise HistoricalDataValidationError("interval_code mismatch for provider contract version 3.")
+            if self.interval_duration_seconds != expected_duration_seconds:
+                raise HistoricalDataValidationError("interval_duration_seconds mismatch for provider contract version 3.")
+            if not self.endpoint_url:
+                raise HistoricalDataValidationError("endpoint_url is required for provider contract version 3.")
+            if not self.documentation_url:
+                raise HistoricalDataValidationError("documentation_url is required for provider contract version 3.")
+            if self.pagination_limit <= 0:
+                raise HistoricalDataValidationError("pagination_limit is required for provider contract version 3.")
+            if self.close_time_rule != _KUCOIN_PUBLIC_SPOT_INTERVAL_CLOSE_TIME_RULE:
+                raise HistoricalDataValidationError("close_time_rule is required for provider contract version 3.")
         else:
             raise HistoricalDataValidationError("data_contract_version must be greater than zero.")
         if self.qualification_hash:
@@ -154,12 +202,23 @@ class HistoricalProviderQualification:
         symbol: str = "BTCUSDT",
         interval: str = "1h",
         provider_version: str = "v1",
-        data_contract_version: int = 2,
+        data_contract_version: int | None = None,
     ) -> "HistoricalProviderQualification":
         normalized_symbol = _require_str(symbol, "symbol").upper()
         normalized_interval = _require_str(interval, "interval")
-        if normalized_symbol != "BTCUSDT" or normalized_interval != "1h":
-            raise HistoricalDataValidationError("kucoin public spot provider only supports BTCUSDT 1h.")
+        if normalized_symbol != "BTCUSDT":
+            raise HistoricalDataValidationError("kucoin public spot provider only supports BTCUSDT.")
+        interval_code, interval_duration_seconds = kucoin_public_spot_interval_contract(normalized_interval)
+        if normalized_interval == "1h":
+            expected_version = 2
+            expected_close_time_rule = "open_time + 1h - 1ms"
+        else:
+            expected_version = 3
+            expected_close_time_rule = _KUCOIN_PUBLIC_SPOT_INTERVAL_CLOSE_TIME_RULE
+        if data_contract_version is None:
+            data_contract_version = expected_version
+        if data_contract_version != expected_version:
+            raise HistoricalDataValidationError("kucoin public spot provider interval is incompatible with the requested contract version.")
         return cls(
             provider_id="kucoin.public.klines",
             provider_version=provider_version,
@@ -171,10 +230,12 @@ class HistoricalProviderQualification:
             access_type="public_no_auth",
             data_contract_version=data_contract_version,
             external_symbol="BTC-USDT",
+            interval_code=interval_code if data_contract_version >= 3 else "",
+            interval_duration_seconds=interval_duration_seconds if data_contract_version >= 3 else 0,
             endpoint_url="https://api.kucoin.com/api/v1/market/candles",
             documentation_url="https://www.kucoin.com/docs-new/3470071w0",
             pagination_limit=1500,
-            close_time_rule="open_time + 1h - 1ms",
+            close_time_rule=expected_close_time_rule,
         )
 
     @classmethod
@@ -191,6 +252,7 @@ class HistoricalProviderQualification:
         if not isinstance(data, Mapping):
             raise HistoricalDataValidationError("provider qualification must be a mapping.")
         mapping = dict(data)
+        version = mapping.get("data_contract_version")
         allowed = {
             "provider_id",
             "provider_version",
@@ -208,6 +270,8 @@ class HistoricalProviderQualification:
             "close_time_rule",
             "qualification_hash",
         }
+        if version == 3:
+            allowed.update({"interval_code", "interval_duration_seconds"})
         extra = sorted(set(mapping) - allowed)
         if extra:
             raise HistoricalDataValidationError(f"unexpected provider qualification fields: {', '.join(extra)}.")
@@ -223,6 +287,8 @@ class HistoricalProviderQualification:
                 access_type=mapping["access_type"],
                 data_contract_version=mapping["data_contract_version"],
                 external_symbol=mapping.get("external_symbol", ""),
+                interval_code=mapping.get("interval_code", ""),
+                interval_duration_seconds=mapping.get("interval_duration_seconds", 0),
                 endpoint_url=mapping.get("endpoint_url", ""),
                 documentation_url=mapping.get("documentation_url", ""),
                 pagination_limit=mapping.get("pagination_limit", 0),
@@ -245,9 +311,21 @@ class HistoricalProviderQualification:
             "data_contract_version": self.data_contract_version,
         }
         if self.data_contract_version >= 2:
+            payload["external_symbol"] = self.external_symbol
+        if self.data_contract_version == 2:
             payload.update(
                 {
-                    "external_symbol": self.external_symbol,
+                    "endpoint_url": self.endpoint_url,
+                    "documentation_url": self.documentation_url,
+                    "pagination_limit": self.pagination_limit,
+                    "close_time_rule": self.close_time_rule,
+                }
+            )
+        if self.data_contract_version >= 3:
+            payload.update(
+                {
+                    "interval_code": self.interval_code,
+                    "interval_duration_seconds": self.interval_duration_seconds,
                     "endpoint_url": self.endpoint_url,
                     "documentation_url": self.documentation_url,
                     "pagination_limit": self.pagination_limit,
