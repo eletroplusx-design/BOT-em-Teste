@@ -25,6 +25,19 @@ from .historical import (
     verify_historical_dataset_file,
 )
 from .historical_manifest import historical_content_hash
+from .historical_manifest import build_historical_manifest
+from .historical_alignment import (
+    HISTORICAL_MULTITIMEFRAME_ALIGNMENT_RULE,
+    HISTORICAL_MULTITIMEFRAME_BASE_INTERVAL,
+    HISTORICAL_MULTITIMEFRAME_SCHEMA_VERSION,
+    HISTORICAL_MULTITIMEFRAME_SUPPORTING_INTERVALS,
+    HistoricalMultiTimeframeAlignmentPoint,
+    HistoricalMultiTimeframeBundle,
+    HistoricalMultiTimeframeSnapshot,
+    align_historical_multitimeframe_series,
+    align_historical_multitimeframe_snapshot,
+    build_historical_multitimeframe_bundle,
+)
 from .historical_models import HistoricalDataset, HistoricalDatasetManifest, HistoricalDatasetRequest
 from .provider import BinancePublicKlinesProvider
 from .kucoin_provider import KuCoinPublicSpotKlinesProvider
@@ -61,9 +74,20 @@ __all__ = [
     "HistoricalDataset",
     "HistoricalDatasetManifest",
     "HistoricalDatasetRequest",
+    "HISTORICAL_MULTITIMEFRAME_ALIGNMENT_RULE",
+    "HISTORICAL_MULTITIMEFRAME_BASE_INTERVAL",
+    "HISTORICAL_MULTITIMEFRAME_SCHEMA_VERSION",
+    "HISTORICAL_MULTITIMEFRAME_SUPPORTING_INTERVALS",
+    "HistoricalMultiTimeframeAlignmentPoint",
+    "HistoricalMultiTimeframeBundle",
+    "HistoricalMultiTimeframeSnapshot",
     "HISTORICAL_ENDPOINT",
     "HISTORICAL_MAX_PAGES",
     "HISTORICAL_SCHEMA_VERSION",
+    "align_historical_multitimeframe_series",
+    "align_historical_multitimeframe_snapshot",
+    "build_historical_multitimeframe_bundle",
+    "build_historical_manifest",
     "fetch_historical_public_klines",
     "historical_content_hash",
     "load_historical_dataset_file",
