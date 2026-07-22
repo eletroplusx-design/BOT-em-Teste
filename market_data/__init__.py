@@ -38,6 +38,17 @@ from .historical_alignment import (
     align_historical_multitimeframe_snapshot,
     build_historical_multitimeframe_bundle,
 )
+from .historical_context import (
+    HISTORICAL_MULTITIMEFRAME_CONTEXT_RULE,
+    HISTORICAL_MULTITIMEFRAME_CONTEXT_SCHEMA_VERSION,
+    HistoricalMultiTimeframeDecisionContextPolicy,
+    HistoricalMultiTimeframeDecisionWindow,
+    HistoricalMultiTimeframeDecisionContext,
+    HistoricalMultiTimeframeDecisionContextSeries,
+    build_historical_multitimeframe_decision_context_policy,
+    build_historical_multitimeframe_decision_context,
+    build_historical_multitimeframe_decision_context_series,
+)
 from .historical_models import HistoricalDataset, HistoricalDatasetManifest, HistoricalDatasetRequest
 from .provider import BinancePublicKlinesProvider
 from .kucoin_provider import KuCoinPublicSpotKlinesProvider
@@ -78,15 +89,24 @@ __all__ = [
     "HISTORICAL_MULTITIMEFRAME_BASE_INTERVAL",
     "HISTORICAL_MULTITIMEFRAME_SCHEMA_VERSION",
     "HISTORICAL_MULTITIMEFRAME_SUPPORTING_INTERVALS",
+    "HISTORICAL_MULTITIMEFRAME_CONTEXT_RULE",
+    "HISTORICAL_MULTITIMEFRAME_CONTEXT_SCHEMA_VERSION",
     "HistoricalMultiTimeframeAlignmentPoint",
     "HistoricalMultiTimeframeBundle",
     "HistoricalMultiTimeframeSnapshot",
+    "HistoricalMultiTimeframeDecisionContextPolicy",
+    "HistoricalMultiTimeframeDecisionWindow",
+    "HistoricalMultiTimeframeDecisionContext",
+    "HistoricalMultiTimeframeDecisionContextSeries",
     "HISTORICAL_ENDPOINT",
     "HISTORICAL_MAX_PAGES",
     "HISTORICAL_SCHEMA_VERSION",
     "align_historical_multitimeframe_series",
     "align_historical_multitimeframe_snapshot",
     "build_historical_multitimeframe_bundle",
+    "build_historical_multitimeframe_decision_context_policy",
+    "build_historical_multitimeframe_decision_context",
+    "build_historical_multitimeframe_decision_context_series",
     "build_historical_manifest",
     "fetch_historical_public_klines",
     "historical_content_hash",
