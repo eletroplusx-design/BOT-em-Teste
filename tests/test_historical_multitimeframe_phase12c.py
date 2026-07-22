@@ -109,6 +109,21 @@ def test_report_is_write_once_hostile_and_never_promotion_evidence(tmp_path):
         save_historical_multitimeframe_experiment_report(path, changed)
 
 
+def test_concurrent_write_with_divergent_report_fails_closed(tmp_path, monkeypatch):
+    report = run_historical_multitimeframe_experiment(_replay(tmp_path), runner_factory=_runner_factory)
+    divergent = run_historical_multitimeframe_experiment(_replay(tmp_path), runner_factory=_other_runner_factory)
+    path = tmp_path / "reports" / "mtf.json"
+
+    def concurrent_publish(_source, destination):
+        destination.write_text(json.dumps(report.as_dict()), encoding="utf-8")
+        raise FileExistsError
+
+    monkeypatch.setattr("historical_multitimeframe_experiments.os.link", concurrent_publish)
+    with pytest.raises(HistoricalMultiTimeframeExperimentConflictError):
+        save_historical_multitimeframe_experiment_report(path, divergent)
+    assert load_historical_multitimeframe_experiment_report(path).report_hash == report.report_hash
+
+
 def test_loader_rejects_payload_and_provenance_tampering(tmp_path):
     report = run_historical_multitimeframe_experiment(_replay(tmp_path), runner_factory=_runner_factory)
     path = tmp_path / "mtf.json"
