@@ -306,9 +306,28 @@ def save_historical_multitimeframe_experiment_report(path: str | Path, report: H
     file_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = file_path.with_name(f".{file_path.name}.{os.getpid()}.{id(report)}.tmp")
     try:
-        tmp.write_text(_canonical_json(payload), encoding="utf-8"); os.replace(tmp, file_path)
+        # A rename can overwrite a report written between the existence check and
+        # the replacement.  Publish the fully-written temporary file through a
+        # hard link instead: link creation is exclusive, so a concurrent writer
+        # can only leave an identical report or cause a fail-closed conflict.
+        tmp.write_text(_canonical_json(payload), encoding="utf-8")
+        try:
+            os.link(tmp, file_path)
+        except FileExistsError:
+            existing = load_historical_multitimeframe_experiment_report(file_path)
+            if existing.as_dict() != payload:
+                raise HistoricalMultiTimeframeExperimentConflictError(
+                    "multi-timeframe report already exists and differs."
+                )
+            return existing
     except Exception as exc:
-        tmp.unlink(missing_ok=True); raise HistoricalMultiTimeframeExperimentValidationError("failed to write multi-timeframe report atomically.") from exc
+        if isinstance(exc, HistoricalMultiTimeframeExperimentConflictError):
+            raise
+        raise HistoricalMultiTimeframeExperimentValidationError(
+            "failed to write multi-timeframe report atomically."
+        ) from exc
+    finally:
+        tmp.unlink(missing_ok=True)
     return report
 
 
