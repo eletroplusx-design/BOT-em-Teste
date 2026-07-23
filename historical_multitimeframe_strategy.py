@@ -50,6 +50,23 @@ def _hash_payload(payload: Any) -> str:
     return sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
 
 
+def _deserialize_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _deserialize_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_deserialize_value(item) for item in value]
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            pass
+        try:
+            return Decimal(value)
+        except Exception:
+            return value
+    return value
+
+
 def _require_str(value: Any, field_name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise HistoricalMultiTimeframeFirstStrategyValidationError(f"{field_name} is required.")
@@ -363,7 +380,7 @@ class HistoricalMultiTimeframeFirstStrategyRuleResult:
                 name=mapping["name"],
                 passed=mapping["passed"],
                 reason=mapping["reason"],
-                details=mapping.get("details", {}),
+                details=_deserialize_value(mapping.get("details", {})),
             )
         except KeyError as exc:
             raise HistoricalMultiTimeframeFirstStrategyValidationError("rule result is incomplete.") from exc
