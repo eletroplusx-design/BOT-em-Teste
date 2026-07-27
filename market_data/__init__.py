@@ -91,6 +91,13 @@ from .research_artifact_registry import (
     save_research_artifact_registry,
     validate_research_artifact_registry_entry,
 )
+from .research_artifact_registry_verification import (
+    ResearchArtifactRegistryVerificationError,
+    ResearchArtifactRegistryVerificationIntegrityError,
+    ResearchArtifactRegistryVerificationReport,
+    ResearchArtifactRegistryVerificationValidationError,
+    verify_okx_research_artifact_registry,
+)
 from .provider import BinancePublicKlinesProvider
 from .kucoin_provider import KuCoinPublicSpotKlinesProvider
 from .provider_qualification import HistoricalProviderQualification
@@ -166,6 +173,10 @@ __all__ = [
     "RESEARCH_ARTIFACT_REGISTRY_DISALLOWED_USE_CASES",
     "RESEARCH_ARTIFACT_REGISTRY_SCHEMA_VERSION",
     "ResearchArtifactRegistryEntry",
+    "ResearchArtifactRegistryVerificationError",
+    "ResearchArtifactRegistryVerificationIntegrityError",
+    "ResearchArtifactRegistryVerificationReport",
+    "ResearchArtifactRegistryVerificationValidationError",
     "HISTORICAL_ENDPOINT",
     "HISTORICAL_MAX_PAGES",
     "HISTORICAL_SCHEMA_VERSION",
@@ -192,6 +203,7 @@ __all__ = [
     "register_okx_historical_research_artifact",
     "save_research_artifact_registry",
     "validate_research_artifact_registry_entry",
+    "verify_okx_research_artifact_registry",
     "verify_historical_dataset_file",
     "TrustedMarketDataService",
     "candles_to_dataframe",
