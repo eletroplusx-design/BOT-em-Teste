@@ -98,6 +98,18 @@ from .research_artifact_registry_verification import (
     ResearchArtifactRegistryVerificationValidationError,
     verify_okx_research_artifact_registry,
 )
+from .offline_research_experiment_authorization import (
+    OFFLINE_RESEARCH_EXPERIMENT_AUTHORIZATION_ALLOWED_USE_CASES,
+    OFFLINE_RESEARCH_EXPERIMENT_AUTHORIZATION_NON_OPERATIONAL_DECLARATION,
+    OFFLINE_RESEARCH_EXPERIMENT_AUTHORIZATION_PROHIBITED_USE_CASES,
+    OFFLINE_RESEARCH_EXPERIMENT_AUTHORIZATION_PURPOSE,
+    OFFLINE_RESEARCH_EXPERIMENT_AUTHORIZATION_SCHEMA_VERSION,
+    OfflineResearchExperimentAuthorization,
+    OfflineResearchExperimentAuthorizationError,
+    OfflineResearchExperimentAuthorizationIntegrityError,
+    OfflineResearchExperimentAuthorizationValidationError,
+    authorize_offline_research_experiment,
+)
 from .provider import BinancePublicKlinesProvider
 from .kucoin_provider import KuCoinPublicSpotKlinesProvider
 from .provider_qualification import HistoricalProviderQualification
@@ -177,6 +189,15 @@ __all__ = [
     "ResearchArtifactRegistryVerificationIntegrityError",
     "ResearchArtifactRegistryVerificationReport",
     "ResearchArtifactRegistryVerificationValidationError",
+    "OFFLINE_RESEARCH_EXPERIMENT_AUTHORIZATION_ALLOWED_USE_CASES",
+    "OFFLINE_RESEARCH_EXPERIMENT_AUTHORIZATION_NON_OPERATIONAL_DECLARATION",
+    "OFFLINE_RESEARCH_EXPERIMENT_AUTHORIZATION_PROHIBITED_USE_CASES",
+    "OFFLINE_RESEARCH_EXPERIMENT_AUTHORIZATION_PURPOSE",
+    "OFFLINE_RESEARCH_EXPERIMENT_AUTHORIZATION_SCHEMA_VERSION",
+    "OfflineResearchExperimentAuthorization",
+    "OfflineResearchExperimentAuthorizationError",
+    "OfflineResearchExperimentAuthorizationIntegrityError",
+    "OfflineResearchExperimentAuthorizationValidationError",
     "HISTORICAL_ENDPOINT",
     "HISTORICAL_MAX_PAGES",
     "HISTORICAL_SCHEMA_VERSION",
@@ -198,6 +219,7 @@ __all__ = [
     "status_historical_dataset",
     "save_okx_historical_dataset",
     "verify_okx_historical_dataset",
+    "authorize_offline_research_experiment",
     "build_okx_research_artifact_registry_entry",
     "load_research_artifact_registry",
     "register_okx_historical_research_artifact",
