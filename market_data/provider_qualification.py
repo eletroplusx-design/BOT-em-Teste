@@ -22,6 +22,10 @@ KUCOIN_PUBLIC_SPOT_INTERVAL_SECONDS: dict[str, int] = {
     "4h": 14400,
 }
 _KUCOIN_PUBLIC_SPOT_INTERVAL_CLOSE_TIME_RULE = "open_time + interval_duration_seconds - 1ms"
+OKX_PUBLIC_SPOT_ENDPOINT_URL = "https://www.okx.com/api/v5/market/history-candles"
+OKX_PUBLIC_SPOT_DOCUMENTATION_URL = "https://www.okx.com/docs-v5/en/"
+OKX_PUBLIC_SPOT_PAGINATION_LIMIT = 100
+OKX_PUBLIC_SPOT_CLOSE_TIME_RULE = "confirm=0 means incomplete; confirm=1 means completed"
 
 
 def kucoin_public_spot_interval_contract(interval: str) -> tuple[str, int]:
@@ -239,12 +243,46 @@ class HistoricalProviderQualification:
         )
 
     @classmethod
+    def okx_public_spot(
+        cls,
+        *,
+        symbol: str = "BTCUSDT",
+        interval: str = "1H",
+        provider_version: str = "v1",
+        data_contract_version: int = 2,
+    ) -> "HistoricalProviderQualification":
+        normalized_symbol = _require_str(symbol, "symbol").upper()
+        normalized_interval = _require_str(interval, "interval")
+        if normalized_symbol != "BTCUSDT" or normalized_interval != "1H":
+            raise HistoricalDataValidationError("okx public spot provider only supports BTCUSDT 1H.")
+        if data_contract_version != 2:
+            raise HistoricalDataValidationError("okx public spot provider only supports contract version 2.")
+        return cls(
+            provider_id="okx.public.klines",
+            provider_version=provider_version,
+            market_type="spot",
+            exchange="okx",
+            symbol=normalized_symbol,
+            interval=normalized_interval,
+            time_semantics="utc",
+            access_type="public_no_auth",
+            data_contract_version=data_contract_version,
+            external_symbol="BTC-USDT",
+            endpoint_url=OKX_PUBLIC_SPOT_ENDPOINT_URL,
+            documentation_url=OKX_PUBLIC_SPOT_DOCUMENTATION_URL,
+            pagination_limit=OKX_PUBLIC_SPOT_PAGINATION_LIMIT,
+            close_time_rule=OKX_PUBLIC_SPOT_CLOSE_TIME_RULE,
+        )
+
+    @classmethod
     def expected_for_provider(cls, provider_id: str, *, symbol: str, interval: str) -> "HistoricalProviderQualification":
         provider_id = _require_str(provider_id, "provider_id")
         if provider_id == "binance.public.klines":
             return cls.binance_public_spot(symbol=symbol, interval=interval)
         if provider_id == "kucoin.public.klines":
             return cls.kucoin_public_spot(symbol=symbol, interval=interval)
+        if provider_id == "okx.public.klines":
+            return cls.okx_public_spot(symbol=symbol, interval=interval)
         raise HistoricalDataValidationError("unsupported historical provider.")
 
     @classmethod
