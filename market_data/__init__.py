@@ -110,6 +110,20 @@ from .offline_research_experiment_authorization import (
     OfflineResearchExperimentAuthorizationValidationError,
     authorize_offline_research_experiment,
 )
+from .offline_research_strategy_compatibility import (
+    OFFLINE_RESEARCH_STRATEGY_COMPATIBILITY_ALLOWED_USE_CASES,
+    OFFLINE_RESEARCH_STRATEGY_COMPATIBILITY_NON_OPERATIONAL_DECLARATION,
+    OFFLINE_RESEARCH_STRATEGY_COMPATIBILITY_PROHIBITED_USE_CASES,
+    OFFLINE_RESEARCH_STRATEGY_COMPATIBILITY_PURPOSE,
+    OFFLINE_RESEARCH_STRATEGY_COMPATIBILITY_SCHEMA_VERSION,
+    OFFLINE_RESEARCH_STRATEGY_COMPATIBILITY_STATUS_COMPATIBLE_FOR_FUTURE_OFFLINE_RESEARCH,
+    OfflineResearchStrategyCompatibilityContract,
+    OfflineResearchStrategyCompatibilityDecision,
+    OfflineResearchStrategyCompatibilityError,
+    OfflineResearchStrategyCompatibilityIntegrityError,
+    OfflineResearchStrategyCompatibilityValidationError,
+    evaluate_offline_research_strategy_compatibility,
+)
 from .provider import BinancePublicKlinesProvider
 from .kucoin_provider import KuCoinPublicSpotKlinesProvider
 from .provider_qualification import HistoricalProviderQualification
@@ -198,6 +212,17 @@ __all__ = [
     "OfflineResearchExperimentAuthorizationError",
     "OfflineResearchExperimentAuthorizationIntegrityError",
     "OfflineResearchExperimentAuthorizationValidationError",
+    "OFFLINE_RESEARCH_STRATEGY_COMPATIBILITY_ALLOWED_USE_CASES",
+    "OFFLINE_RESEARCH_STRATEGY_COMPATIBILITY_NON_OPERATIONAL_DECLARATION",
+    "OFFLINE_RESEARCH_STRATEGY_COMPATIBILITY_PROHIBITED_USE_CASES",
+    "OFFLINE_RESEARCH_STRATEGY_COMPATIBILITY_PURPOSE",
+    "OFFLINE_RESEARCH_STRATEGY_COMPATIBILITY_SCHEMA_VERSION",
+    "OFFLINE_RESEARCH_STRATEGY_COMPATIBILITY_STATUS_COMPATIBLE_FOR_FUTURE_OFFLINE_RESEARCH",
+    "OfflineResearchStrategyCompatibilityContract",
+    "OfflineResearchStrategyCompatibilityDecision",
+    "OfflineResearchStrategyCompatibilityError",
+    "OfflineResearchStrategyCompatibilityIntegrityError",
+    "OfflineResearchStrategyCompatibilityValidationError",
     "HISTORICAL_ENDPOINT",
     "HISTORICAL_MAX_PAGES",
     "HISTORICAL_SCHEMA_VERSION",
@@ -220,6 +245,7 @@ __all__ = [
     "save_okx_historical_dataset",
     "verify_okx_historical_dataset",
     "authorize_offline_research_experiment",
+    "evaluate_offline_research_strategy_compatibility",
     "build_okx_research_artifact_registry_entry",
     "load_research_artifact_registry",
     "register_okx_historical_research_artifact",
