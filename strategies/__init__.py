@@ -10,6 +10,23 @@ from .baseline_a import (
     baseline_a_strategy_factory,
     baseline_a_trusted_runner,
 )
+from .baseline_a_okx_btc_usdt_research import (
+    BASELINE_A_OKX_BTC_USDT_RESEARCH_ALLOWED_DECISIONS,
+    BASELINE_A_OKX_BTC_USDT_RESEARCH_CONTRACT_SCHEMA_VERSION,
+    BASELINE_A_OKX_BTC_USDT_RESEARCH_DECISION_LONG_SETUP_DETECTED,
+    BASELINE_A_OKX_BTC_USDT_RESEARCH_DECISION_NO_SETUP,
+    BASELINE_A_OKX_BTC_USDT_RESEARCH_PROHIBITED_USE_CASES,
+    BASELINE_A_OKX_BTC_USDT_RESEARCH_PURPOSE,
+    BASELINE_A_OKX_BTC_USDT_RESEARCH_STRATEGY_ID,
+    BASELINE_A_OKX_BTC_USDT_RESEARCH_STRATEGY_VERSION,
+    BaselineAOkxBtcUsdtResearchContract,
+    BaselineAOkxBtcUsdtResearchDecision,
+    BaselineAOkxBtcUsdtResearchError,
+    BaselineAOkxBtcUsdtResearchIntegrityError,
+    BaselineAOkxBtcUsdtResearchValidationError,
+    build_baseline_a_okx_btc_usdt_research_contract,
+    evaluate_baseline_a_okx_btc_usdt_research,
+)
 
 __all__ = [
     "BASELINE_A_CANDIDATE",
@@ -22,4 +39,19 @@ __all__ = [
     "baseline_a_strategy",
     "baseline_a_strategy_factory",
     "baseline_a_trusted_runner",
+    "BASELINE_A_OKX_BTC_USDT_RESEARCH_ALLOWED_DECISIONS",
+    "BASELINE_A_OKX_BTC_USDT_RESEARCH_CONTRACT_SCHEMA_VERSION",
+    "BASELINE_A_OKX_BTC_USDT_RESEARCH_DECISION_LONG_SETUP_DETECTED",
+    "BASELINE_A_OKX_BTC_USDT_RESEARCH_DECISION_NO_SETUP",
+    "BASELINE_A_OKX_BTC_USDT_RESEARCH_PROHIBITED_USE_CASES",
+    "BASELINE_A_OKX_BTC_USDT_RESEARCH_PURPOSE",
+    "BASELINE_A_OKX_BTC_USDT_RESEARCH_STRATEGY_ID",
+    "BASELINE_A_OKX_BTC_USDT_RESEARCH_STRATEGY_VERSION",
+    "BaselineAOkxBtcUsdtResearchContract",
+    "BaselineAOkxBtcUsdtResearchDecision",
+    "BaselineAOkxBtcUsdtResearchError",
+    "BaselineAOkxBtcUsdtResearchIntegrityError",
+    "BaselineAOkxBtcUsdtResearchValidationError",
+    "build_baseline_a_okx_btc_usdt_research_contract",
+    "evaluate_baseline_a_okx_btc_usdt_research",
 ]
