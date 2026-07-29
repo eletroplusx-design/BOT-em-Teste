@@ -267,7 +267,7 @@ class ResearchArtifactRegistryVerificationReport:
     def canonical_payload(self, *, include_verification_hash: bool = True) -> dict[str, Any]:
         payload = {
             "schema_version": self.schema_version,
-            "registry_file": str(self.registry_file),
+            "registry_file": self.registry_file.as_posix(),
             "verified_at_utc": _utc_iso(self.verified_at_utc),
             "approved": self.approved,
             "artifact_id": self.artifact_id,

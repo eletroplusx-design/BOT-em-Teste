@@ -90,6 +90,7 @@ def test_offline_research_experiment_authorization_accepts_verified_report_and_s
     assert authorization_record.manifest_sha256 == registry.OKX_RESEARCH_ARTIFACT_EXPECTED_MANIFEST_SHA256
     assert authorization_record.manifest_hash == registry.OKX_RESEARCH_ARTIFACT_EXPECTED_MANIFEST_HASH
     assert authorization_record.verification_registry_file == report.registry_file
+    assert authorization_record.canonical_payload()["verification_registry_file"] == report.registry_file.as_posix()
     assert authorization_record.verification_result_hash == report.verification_hash
     assert authorization_record.verification_audit_status == "passed"
     assert authorization_record.historical_research_only is True

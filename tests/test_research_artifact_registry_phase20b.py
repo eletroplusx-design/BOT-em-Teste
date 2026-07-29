@@ -101,6 +101,7 @@ def test_okx_research_artifact_registry_verification_accepts_valid_registry_and_
     assert report.external_artifact_ref == "artifact://okx/phase19c/research-only"
     assert report.external_artifact_ref_is_opaque is True
     assert report.external_artifact_ref_is_local is True
+    assert report.canonical_payload()["registry_file"] == registry_file.as_posix()
     assert report.historical_research_only is True
     assert report.operational_evidence is False
     assert report.paper_promotion_eligible is False
