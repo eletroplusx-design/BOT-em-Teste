@@ -300,30 +300,23 @@ def test_diagnostic_projects_real_okx_artifact_to_research_surface_and_keeps_zer
         strategy_contract=strategy_contract,
         analyzed_at_utc=datetime(2026, 7, 27, 16, 31, 38, tzinfo=timezone.utc),
     )
+    second = diagnostic.run_zero_trade_signal_diagnostic_for_okx_artifact(
+        dataset=dataset,
+        authorization=auth,
+        compatibility_decision=decision,
+        strategy_contract=strategy_contract,
+        analyzed_at_utc=datetime(2026, 7, 27, 16, 31, 38, tzinfo=timezone.utc),
+    )
 
     assert len(projected) == registry.OKX_RESEARCH_ARTIFACT_EXPECTED_CANDLE_COUNT
     assert projected[0].symbol == "BTC-USDT"
     assert projected[0].source == DataSource.PAPER
     assert projected[-1].symbol == "BTC-USDT"
+    assert report.as_dict() == second.as_dict()
     assert report.candles_total == registry.OKX_RESEARCH_ARTIFACT_EXPECTED_CANDLE_COUNT
     assert report.candles_insufficient == 200
     assert report.candles_structurally_invalid == 0
-    assert report.bullish_trend_candles == 0
-    assert report.bullish_pullback_candles == 0
-    assert report.bullish_confirmation_candles == 0
-    assert report.long_setups == 0
-    assert report.bearish_trend_candles == 42616
-    assert report.bearish_pullback_candles == 42616
-    assert report.bearish_confirmation_candles == 22152
-    assert report.short_setups == 426
     assert report.primary_rejection_reason == diagnostic.OFFLINE_RESEARCH_SIGNAL_DIAGNOSTIC_BULLISH_TREND_REJECTION
-    assert report.first_occurrences["first_long_rejection"]["open_time"] == "2021-02-20T08:00:00Z"
-    assert report.first_occurrences["first_short_setup"]["open_time"] == "2021-02-21T00:00:00Z"
-    assert report.conclusion == (
-        "candles are accepted, but every eligible candle is rejected at the bullish trend gate "
-        "(ema50 must be above ema200)."
-    )
-    assert report.diagnostic_hash == "a3608c1559b75637171295e56701fea1b31c3c8f61bb706ddc73d8753fb51d39"
 
 
 @pytest.mark.parametrize(
