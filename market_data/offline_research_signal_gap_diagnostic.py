@@ -83,7 +83,9 @@ BASELINE_A_OKX_BTC_USDT_1H_SIGNAL_GAP_DIAGNOSTIC_PROHIBITED_USE_CASES: tuple[str
 )
 BASELINE_A_OKX_BTC_USDT_1H_SIGNAL_GAP_DIAGNOSTIC_NON_OPERATIONAL_DECLARATION = (
     "This signal-gap diagnostic is research-only and does not authorize replay, backtest, walk-forward, "
-    "performance, ranking, paper trading, live trading, execution, or order submission."
+    "performance, ranking, paper trading, live trading, execution, or order submission. "
+    "Artifacts discovered under .pytest_tmp are temporary research/test fixtures only and do not constitute "
+    "operational evidence or authorization for paper/live use."
 )
 BASELINE_A_OKX_BTC_USDT_1H_SIGNAL_GAP_DIAGNOSTIC_SETUP_GATES: tuple[str, ...] = (
     "warmup_complete",
@@ -444,14 +446,14 @@ def _build_warmup_real_gate_results() -> dict[str, bool]:
     return {
         "contract_valid": True,
         "warmup_complete": False,
-        "trend_alignment": True,
-        "close_above_ema200": True,
-        "ema50_rising": True,
-        "close_above_ema20": True,
-        "close_breaks_prior_high": True,
-        "recent_pullback_touch": True,
-        "atr_positive": True,
-        "risk_targets_valid": True,
+        "trend_alignment": False,
+        "close_above_ema200": False,
+        "ema50_rising": False,
+        "close_above_ema20": False,
+        "close_breaks_prior_high": False,
+        "recent_pullback_touch": False,
+        "atr_positive": False,
+        "risk_targets_valid": False,
         "signal_emitted": False,
     }
 
@@ -598,6 +600,10 @@ class SignalGapDiagnosticRecord:
     atr14: Decimal | None
     setup_gates: Mapping[str, bool]
     real_gates: Mapping[str, bool]
+    setup_gate_terminal: str
+    real_gate_terminal: str
+    setup_not_reached_gates: tuple[str, ...]
+    real_not_reached_gates: tuple[str, ...]
     setup_detected: bool
     signal_emitted: bool
     first_real_failed_gate: str | None
@@ -626,6 +632,10 @@ class SignalGapDiagnosticRecord:
             "atr14": _decimal_str(self.atr14),
             "setup_gates": dict(self.setup_gates),
             "real_gates": dict(self.real_gates),
+            "setup_gate_terminal": self.setup_gate_terminal,
+            "real_gate_terminal": self.real_gate_terminal,
+            "setup_not_reached_gates": self.setup_not_reached_gates,
+            "real_not_reached_gates": self.real_not_reached_gates,
             "setup_detected": self.setup_detected,
             "signal_emitted": self.signal_emitted,
             "first_real_failed_gate": self.first_real_failed_gate,
@@ -655,8 +665,10 @@ class SignalGapDiagnosticReport:
     not_reached: int
     setup_gate_pass_counts: Mapping[str, int]
     setup_gate_fail_counts: Mapping[str, int]
+    setup_gate_not_reached_counts: Mapping[str, int]
     real_gate_pass_counts: Mapping[str, int]
     real_gate_fail_counts: Mapping[str, int]
+    real_gate_not_reached_counts: Mapping[str, int]
     first_occurrences: Mapping[str, Any]
     primary_rejection_reason: str
     primary_rejection_reason_count: int
@@ -679,8 +691,10 @@ class SignalGapDiagnosticReport:
         object.__setattr__(self, "not_reached", _require_int(self.not_reached, "not_reached"))
         object.__setattr__(self, "setup_gate_pass_counts", dict(self.setup_gate_pass_counts))
         object.__setattr__(self, "setup_gate_fail_counts", dict(self.setup_gate_fail_counts))
+        object.__setattr__(self, "setup_gate_not_reached_counts", dict(self.setup_gate_not_reached_counts))
         object.__setattr__(self, "real_gate_pass_counts", dict(self.real_gate_pass_counts))
         object.__setattr__(self, "real_gate_fail_counts", dict(self.real_gate_fail_counts))
+        object.__setattr__(self, "real_gate_not_reached_counts", dict(self.real_gate_not_reached_counts))
         object.__setattr__(self, "first_occurrences", dict(self.first_occurrences))
         object.__setattr__(self, "primary_rejection_reason", _require_str(self.primary_rejection_reason, "primary_rejection_reason"))
         object.__setattr__(self, "primary_rejection_reason_count", _require_int(self.primary_rejection_reason_count, "primary_rejection_reason_count"))
@@ -712,8 +726,10 @@ class SignalGapDiagnosticReport:
             "not_reached": self.not_reached,
             "setup_gate_pass_counts": dict(sorted(self.setup_gate_pass_counts.items())),
             "setup_gate_fail_counts": dict(sorted(self.setup_gate_fail_counts.items())),
+            "setup_gate_not_reached_counts": dict(sorted(self.setup_gate_not_reached_counts.items())),
             "real_gate_pass_counts": dict(sorted(self.real_gate_pass_counts.items())),
             "real_gate_fail_counts": dict(sorted(self.real_gate_fail_counts.items())),
+            "real_gate_not_reached_counts": dict(sorted(self.real_gate_not_reached_counts.items())),
             "first_occurrences": dict(sorted(self.first_occurrences.items())),
             "primary_rejection_reason": self.primary_rejection_reason,
             "primary_rejection_reason_count": self.primary_rejection_reason_count,
@@ -845,13 +861,12 @@ def _indicator_step(
         "atr14": atr14,
         "recent_pullback_touch": any(recent_pullbacks),
         "insufficient": (
-            len(closes) < mid_period + 1
+            len(closes) < slow_period + 1
             or ema20 is None
             or ema50 is None
             or ema200 is None
             or prev_ema50 is None
             or atr14 is None
-            or len(recent_pullbacks) < pullback_lookback
         ),
     }
 
@@ -955,6 +970,35 @@ def _normalized_failure_reason(reason: str | None) -> str | None:
     }
     return mapping.get(reason, reason)
 
+def _evaluate_gate_sequence(
+    gates: Mapping[str, bool],
+    order: Sequence[str],
+) -> tuple[dict[str, str], str, tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    outcomes: dict[str, str] = {}
+    passed: list[str] = []
+    failed: list[str] = []
+    not_reached: list[str] = []
+    gate_terminal = "not_reached"
+    blocked = False
+    for gate_name in order:
+        if blocked:
+            outcomes[gate_name] = "not_reached"
+            not_reached.append(gate_name)
+            continue
+        passed_gate = bool(gates.get(gate_name, False))
+        if passed_gate:
+            outcomes[gate_name] = "passed"
+            passed.append(gate_name)
+            gate_terminal = gate_name
+            continue
+        outcomes[gate_name] = "failed"
+        failed.append(gate_name)
+        gate_terminal = gate_name
+        blocked = True
+    if not blocked and order:
+        gate_terminal = order[-1]
+    return outcomes, gate_terminal, tuple(passed), tuple(failed), tuple(not_reached)
+
 
 def analyze_baseline_a_okx_btc_usdt_1h_signal_gap_research(
     candles: Sequence[Candle],
@@ -987,8 +1031,10 @@ def analyze_baseline_a_okx_btc_usdt_1h_signal_gap_research(
     }
     setup_pass_counts: Counter[str] = Counter()
     setup_fail_counts: Counter[str] = Counter()
+    setup_not_reached_counts: Counter[str] = Counter()
     real_pass_counts: Counter[str] = Counter()
     real_fail_counts: Counter[str] = Counter()
+    real_not_reached_counts: Counter[str] = Counter()
     first_occurrences: dict[str, Any] = {}
     signal_gap_records: list[SignalGapDiagnosticRecord] = []
     setup_candles = 0
@@ -1009,7 +1055,11 @@ def analyze_baseline_a_okx_btc_usdt_1h_signal_gap_research(
             atr_period=strategy_contract.atr_period,
         )
         setup_gates = _build_setup_gate_results(candle=candle, previous_candle=previous_candle, indicators=indicators)
-        setup_detected = all(setup_gates.values())
+        setup_gate_outcomes, setup_gate_terminal, setup_passed_gates, setup_failed_gates, setup_not_reached_gates = _evaluate_gate_sequence(
+            setup_gates,
+            BASELINE_A_OKX_BTC_USDT_1H_SIGNAL_GAP_DIAGNOSTIC_SETUP_GATES,
+        )
+        setup_detected = len(setup_failed_gates) == 0 and len(setup_not_reached_gates) == 0
         if index + 1 < strategy_contract.minimum_candles_required:
             real_gates = _build_warmup_real_gate_results()
         else:
@@ -1018,27 +1068,34 @@ def analyze_baseline_a_okx_btc_usdt_1h_signal_gap_research(
                 previous_candle=previous_candle,
                 indicators=indicators,
             )
-        real_failures = _gate_failures_in_order(real_gates, BASELINE_A_OKX_BTC_USDT_1H_SIGNAL_GAP_DIAGNOSTIC_REAL_GATES)
-        real_failure_reason = _first_failure_reason(real_failures)
+        real_gate_outcomes, real_gate_terminal, real_passed_gates, real_failed_gates, real_not_reached_gates = _evaluate_gate_sequence(
+            real_gates,
+            BASELINE_A_OKX_BTC_USDT_1H_SIGNAL_GAP_DIAGNOSTIC_REAL_GATES,
+        )
+        real_failure_reason = _first_failure_reason(real_failed_gates)
         normalized_reason = _normalized_failure_reason(real_failure_reason)
         signal_emitted = bool(real_gates["signal_emitted"])
         if setup_detected:
             setup_candles += 1
         if signal_emitted:
             signal_emitted_candles += 1
-        if not setup_detected and not signal_emitted and index < strategy_contract.minimum_candles_required:
+        if not setup_detected and not signal_emitted and index + 1 < strategy_contract.minimum_candles_required:
             not_reached += 1
 
-        for gate_name, passed in setup_gates.items():
-            if passed:
+        for gate_name, outcome in setup_gate_outcomes.items():
+            if outcome == "passed":
                 setup_pass_counts[gate_name] += 1
-            else:
+            elif outcome == "failed":
                 setup_fail_counts[gate_name] += 1
-        for gate_name, passed in real_gates.items():
-            if passed:
-                real_pass_counts[gate_name] += 1
             else:
+                setup_not_reached_counts[gate_name] += 1
+        for gate_name, outcome in real_gate_outcomes.items():
+            if outcome == "passed":
+                real_pass_counts[gate_name] += 1
+            elif outcome == "failed":
                 real_fail_counts[gate_name] += 1
+            else:
+                real_not_reached_counts[gate_name] += 1
 
         if real_failure_reason is not None:
             real_failure_frequency[normalized_reason or real_failure_reason] += 1
@@ -1087,10 +1144,14 @@ def analyze_baseline_a_okx_btc_usdt_1h_signal_gap_research(
                     atr14=indicators["atr14"],
                     setup_gates=dict(setup_gates),
                     real_gates=dict(real_gates),
+                    setup_gate_terminal=setup_gate_terminal,
+                    real_gate_terminal=real_gate_terminal,
+                    setup_not_reached_gates=setup_not_reached_gates,
+                    real_not_reached_gates=real_not_reached_gates,
                     setup_detected=setup_detected,
                     signal_emitted=signal_emitted,
                     first_real_failed_gate=real_failure_reason,
-                    failed_real_gates=real_failures,
+                    failed_real_gates=real_failed_gates,
                     normalized_rejection_reason=normalized_reason,
                     setup_reason=BASELINE_A_OKX_BTC_USDT_RESEARCH_DECISION_LONG_SETUP_DETECTED if setup_detected else None,
                     signal_reason=BASELINE_A_OKX_BTC_USDT_RESEARCH_DECISION_LONG_SETUP_DETECTED if signal_emitted else None,
@@ -1146,8 +1207,10 @@ def analyze_baseline_a_okx_btc_usdt_1h_signal_gap_research(
         not_reached=not_reached,
         setup_gate_pass_counts=dict(sorted(setup_pass_counts.items())),
         setup_gate_fail_counts=dict(sorted(setup_fail_counts.items())),
+        setup_gate_not_reached_counts=dict(sorted(setup_not_reached_counts.items())),
         real_gate_pass_counts=dict(sorted(real_pass_counts.items())),
         real_gate_fail_counts=dict(sorted(real_fail_counts.items())),
+        real_gate_not_reached_counts=dict(sorted(real_not_reached_counts.items())),
         first_occurrences=dict(sorted(first_occurrences.items())),
         primary_rejection_reason=primary_reason,
         primary_rejection_reason_count=primary_reason_count,
