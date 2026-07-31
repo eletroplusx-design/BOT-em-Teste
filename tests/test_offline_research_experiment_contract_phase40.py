@@ -191,6 +191,24 @@ def _default_extra_parameters() -> dict[str, object]:
     }
 
 
+def _extra_parameters_with_nested_set(*, labels: tuple[str, ...]) -> dict[str, object]:
+    return {
+        "safety": {
+            "labels": set(labels),
+            "historical_research_only": True,
+            "operational_evidence": False,
+            "paper_promotion_eligible": False,
+        },
+        "costs": {
+            "entry_fee_rate": "0.0004",
+            "exit_fee_rate": "0.0004",
+            "spread_bps": "5",
+            "slippage_bps": "5",
+        },
+        "notes": ["offline", "read-only"],
+    }
+
+
 def _build_contract(
     persistent_artifact,
     *,
@@ -302,6 +320,50 @@ def test_offline_research_experiment_contract_is_deeply_immutable_and_source_ind
     assert contract.artifact_reference["historical_research_only"] is True
     assert contract.artifact_reference["operational_evidence"] is False
     assert contract.artifact_reference["paper_promotion_eligible"] is False
+
+
+def test_offline_research_experiment_contract_supports_nested_sets_deterministically(
+    persistent_artifact,
+):
+    _, reference = _qualified_reference(persistent_artifact)
+    _, _, strategy_contract = _baseline_strategy_contract()
+    extra_parameters_a = _extra_parameters_with_nested_set(labels=("beta", "alpha", "gamma"))
+    extra_parameters_b = _extra_parameters_with_nested_set(labels=("gamma", "alpha", "beta"))
+
+    contract_a = _build_contract(
+        persistent_artifact,
+        reference=reference,
+        strategy_contract=strategy_contract,
+        extra_parameters=extra_parameters_a,
+    )
+    contract_b = _build_contract(
+        persistent_artifact,
+        reference=reference,
+        strategy_contract=strategy_contract,
+        extra_parameters=extra_parameters_b,
+    )
+
+    assert contract_a.contract_hash == contract_b.contract_hash
+    assert contract_a.as_dict() == contract_b.as_dict()
+    assert isinstance(contract_a.extra_parameters["safety"]["labels"], frozenset)
+    assert contract_a.extra_parameters["safety"]["labels"] == frozenset({"alpha", "beta", "gamma"})
+
+    with pytest.raises(AttributeError):
+        contract_a.extra_parameters["safety"]["labels"].add("delta")
+
+    extra_parameters_a["safety"]["labels"].add("delta")
+    extra_parameters_a["notes"].append("mutated")
+    assert contract_a.extra_parameters["safety"]["labels"] == frozenset({"alpha", "beta", "gamma"})
+    assert contract_a.extra_parameters["notes"] == ("offline", "read-only")
+
+    extra_parameters_c = _extra_parameters_with_nested_set(labels=("alpha", "beta", "delta"))
+    contract_c = _build_contract(
+        persistent_artifact,
+        reference=reference,
+        strategy_contract=strategy_contract,
+        extra_parameters=extra_parameters_c,
+    )
+    assert contract_c.contract_hash != contract_a.contract_hash
 
 
 @pytest.mark.parametrize(

@@ -157,8 +157,21 @@ def _thaw_read_only_value(value: Any) -> Any:
         return [_thaw_read_only_value(item) for item in value]
     if isinstance(value, tuple):
         return tuple(_thaw_read_only_value(item) for item in value)
-    if isinstance(value, set):
-        return frozenset(_thaw_read_only_value(item) for item in value)
+    if isinstance(value, frozenset):
+        thawed_items = [_thaw_read_only_value(item) for item in value]
+        return tuple(
+            item
+            for _, item in sorted(
+                (
+                    (
+                        _canonical_json(_thaw_read_only_value(item)),
+                        _thaw_read_only_value(item),
+                    )
+                    for item in thawed_items
+                ),
+                key=lambda pair: pair[0],
+            )
+        )
     return value
 
 
