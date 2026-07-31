@@ -7,6 +7,7 @@ from decimal import Decimal
 from hashlib import sha256
 import json
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Callable, Mapping, Sequence
 
 from backtesting import BacktestConfig, BacktestResult, LeakFreeBacktestEngine
@@ -203,6 +204,18 @@ def _canonical_external_artifact_ref(value: str | Path) -> str:
     return Path(ref).expanduser().resolve(strict=False).as_posix()
 
 
+def _freeze_read_only_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _freeze_read_only_value(item) for key, item in value.items()})
+    if isinstance(value, list):
+        return tuple(_freeze_read_only_value(item) for item in value)
+    if isinstance(value, tuple):
+        return tuple(_freeze_read_only_value(item) for item in value)
+    if isinstance(value, set):
+        return frozenset(_freeze_read_only_value(item) for item in value)
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class OkxPersistentResearchArtifactResolution:
     registry_file: Path
@@ -234,6 +247,7 @@ class OkxPersistentResearchArtifactResolution:
 @dataclass(frozen=True, slots=True)
 class OkxOfflineResearchArtifactReference:
     resolution: OkxPersistentResearchArtifactResolution = field(repr=False)
+    dataset_report: Mapping[str, Any] = field(repr=False)
     read_only: bool = True
     historical_research_only: bool = True
     operational_evidence: bool = False
@@ -255,6 +269,7 @@ class OkxOfflineResearchArtifactReference:
             raise OfflineResearchBacktestValidationError("paper_promotion_eligible must be false.")
         if self.purpose != OFFLINE_RESEARCH_BACKTEST_EXPERIMENT_PURPOSE:
             raise OfflineResearchBacktestValidationError("purpose must remain offline_historical_research.")
+        object.__setattr__(self, "dataset_report", _freeze_read_only_value(dict(self.resolution.dataset_report)))
 
     @property
     def registry_file(self) -> Path:
@@ -271,10 +286,6 @@ class OkxOfflineResearchArtifactReference:
     @property
     def registry_report(self) -> ResearchArtifactRegistryVerificationReport:
         return self.resolution.registry_report
-
-    @property
-    def dataset_report(self) -> dict[str, Any]:
-        return self.resolution.dataset_report
 
     @property
     def artifact_root(self) -> Path:
@@ -301,7 +312,10 @@ def resolve_okx_offline_research_artifact_reference(
             raise OfflineResearchBacktestValidationError(
                 "resolution must be a verified persistent OKX artifact resolution."
             )
-        return OkxOfflineResearchArtifactReference(resolution=resolution)
+        return OkxOfflineResearchArtifactReference(
+            resolution=resolution,
+            dataset_report=_freeze_read_only_value(dict(resolution.dataset_report)),
+        )
 
     if registry_file is None or dataset_file is None or manifest_file is None:
         raise OfflineResearchBacktestValidationError(
@@ -314,7 +328,10 @@ def resolve_okx_offline_research_artifact_reference(
         manifest_file=manifest_file,
         expected_external_artifact_ref=expected_external_artifact_ref,
     )
-    return OkxOfflineResearchArtifactReference(resolution=persistent_resolution)
+    return OkxOfflineResearchArtifactReference(
+        resolution=persistent_resolution,
+        dataset_report=_freeze_read_only_value(dict(persistent_resolution.dataset_report)),
+    )
 
 
 def resolve_okx_persistent_artifact(

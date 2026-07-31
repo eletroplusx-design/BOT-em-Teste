@@ -65,6 +65,31 @@ def _build_persistent_artifact(root: Path) -> dict[str, Path]:
     }
 
 
+def _copy_registry(
+    src_registry: Path,
+    dst_root: Path,
+    *,
+    external_artifact_ref: str,
+    mutate: dict[str, object] | None = None,
+    refresh_hashes: bool = False,
+) -> Path:
+    dst_root.mkdir(parents=True, exist_ok=True)
+    payload = json.loads(src_registry.read_text(encoding="utf-8"))
+    if mutate:
+        payload.update(mutate)
+    payload["external_artifact_ref"] = external_artifact_ref
+    if refresh_hashes:
+        payload["artifact_id"] = ""
+        payload["registry_hash"] = ""
+        payload = registry.ResearchArtifactRegistryEntry.from_dict(payload).as_dict()
+    dst_registry = dst_root / src_registry.name
+    dst_registry.write_text(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    return dst_registry
+
+
 @pytest.fixture(scope="module")
 def persistent_artifact(tmp_path_factory):
     root = tmp_path_factory.mktemp("phase38-okx-persistent-artifact")
@@ -141,6 +166,31 @@ def test_offline_research_artifact_reference_resolves_explicit_paths_and_uses_pe
     assert reference.paper_promotion_eligible is False
 
 
+def test_offline_research_artifact_reference_freezes_dataset_report_deeply(persistent_artifact):
+    resolution = backtest.resolve_okx_persistent_artifact(
+        registry_file=persistent_artifact["registry_file"],
+        dataset_file=persistent_artifact["dataset_file"],
+        manifest_file=persistent_artifact["manifest_file"],
+    )
+    nested_report = {
+        "outer": {
+            "items": [1, {"leaf": "x"}],
+            "flags": {"enabled": True},
+        }
+    }
+    object.__setattr__(resolution, "dataset_report", nested_report)
+    reference = backtest.resolve_okx_offline_research_artifact_reference(resolution=resolution)
+
+    with pytest.raises(TypeError):
+        reference.dataset_report["outer"] = {}
+    with pytest.raises(TypeError):
+        reference.dataset_report["outer"]["items"][1]["leaf"] = "y"
+
+    object.__setattr__(resolution, "dataset_report", {"outer": {"items": [9, {"leaf": "z"}]}})
+    assert reference.dataset_report["outer"]["items"][0] == 1
+    assert reference.dataset_report["outer"]["items"][1]["leaf"] == "x"
+
+
 @pytest.mark.parametrize(
     ("resolution", "registry_file", "dataset_file", "manifest_file", "expected"),
     [
@@ -191,7 +241,7 @@ def test_offline_research_artifact_reference_rejects_pytest_tmp_fixture_paths(tm
     [
         ({"provider_name": "KuCoin"}, None, "provider_name must be OKX"),
         ({"market_type": "futures"}, None, "market_type must be spot"),
-        (None, {"manifest_hash": "0" * 64}, "artifact_id mismatch"),
+        (None, {"manifest_hash": "0" * 64}, "manifest_hash mismatch"),
     ],
 )
 def test_offline_research_artifact_reference_rejects_divergent_contract_and_hashes_via_explicit_paths(
@@ -210,15 +260,6 @@ def test_offline_research_artifact_reference_rejects_divergent_contract_and_hash
     manifest_file = artifact_dir / okx.OKX_HISTORICAL_MANIFEST_FILENAME
     shutil.copyfile(persistent_artifact["dataset_file"], dataset_file)
     shutil.copyfile(persistent_artifact["manifest_file"], manifest_file)
-    registry_payload = json.loads(persistent_artifact["registry_file"].read_text(encoding="utf-8"))
-    if mutate_registry:
-        registry_payload.update(mutate_registry)
-    registry_payload["external_artifact_ref"] = artifact_dir.as_posix()
-    registry_file = registry_dir / "okx-research-artifact-registry.json"
-    registry_file.write_text(
-        json.dumps(registry_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
-        encoding="utf-8",
-    )
     if mutate_manifest:
         manifest_payload = json.loads(manifest_file.read_text(encoding="utf-8"))
         manifest_payload.update(mutate_manifest)
@@ -226,8 +267,42 @@ def test_offline_research_artifact_reference_rejects_divergent_contract_and_hash
             json.dumps(manifest_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
             encoding="utf-8",
         )
+    registry_file = _copy_registry(
+        persistent_artifact["registry_file"],
+        registry_dir,
+        external_artifact_ref=artifact_dir.as_posix(),
+        mutate=mutate_registry,
+        refresh_hashes=mutate_manifest is not None and mutate_registry is None,
+    )
 
     with pytest.raises(backtest.OfflineResearchBacktestError, match=expected):
+        backtest.resolve_okx_offline_research_artifact_reference(
+            registry_file=registry_file,
+            dataset_file=dataset_file,
+            manifest_file=manifest_file,
+        )
+
+
+def test_offline_research_artifact_reference_rejects_artifact_id_mismatch_with_separate_case(persistent_artifact, tmp_path):
+    artifact_root = tmp_path / "persistent-copy-artifact-id"
+    artifact_dir = artifact_root / "okx"
+    registry_dir = artifact_root / "phase20a-okx-research-artifact-registry"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    registry_dir.mkdir(parents=True, exist_ok=True)
+    dataset_file = artifact_dir / okx.OKX_HISTORICAL_DATASET_CANDLES_FILENAME
+    manifest_file = artifact_dir / okx.OKX_HISTORICAL_MANIFEST_FILENAME
+    shutil.copyfile(persistent_artifact["dataset_file"], dataset_file)
+    shutil.copyfile(persistent_artifact["manifest_file"], manifest_file)
+
+    registry_payload = json.loads(persistent_artifact["registry_file"].read_text(encoding="utf-8"))
+    registry_payload["external_artifact_ref"] = artifact_dir.as_posix()
+    registry_file = registry_dir / "okx-research-artifact-registry.json"
+    registry_file.write_text(
+        json.dumps(registry_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(backtest.OfflineResearchBacktestError, match="artifact_id mismatch"):
         backtest.resolve_okx_offline_research_artifact_reference(
             registry_file=registry_file,
             dataset_file=dataset_file,
