@@ -257,9 +257,10 @@ def test_gap_real_okx_artifact_is_deterministic_and_blocks_at_trend_alignment():
         "execution",
         "order_submission",
     )
+    assert ".pytest_tmp" in report.report_notice
     assert report.setup_candles == 0
     assert report.signal_emitted_candles == 0
-    assert report.not_reached == 201
+    assert report.not_reached == 200
     assert report.primary_rejection_reason == "trend_alignment"
     assert report.primary_rejection_reason_count == 42616
     assert "trend_alignment" in report.conclusion
@@ -267,6 +268,10 @@ def test_gap_real_okx_artifact_is_deterministic_and_blocks_at_trend_alignment():
     assert report.signal_gap_records[0].candle_index == 200
     assert report.signal_gap_records[0].first_real_failed_gate == "trend_alignment"
     assert report.signal_gap_records[0].normalized_rejection_reason == "trend_alignment"
+    assert report.signal_gap_records[0].real_gate_terminal == "trend_alignment"
+    assert report.real_gate_pass_counts.get("trend_alignment", 0) == 0
+    assert report.real_gate_fail_counts["trend_alignment"] == 42616
+    assert report.real_gate_not_reached_counts["close_above_ema200"] == 42816
     assert report.signal_gap_records[-1].signal_emitted is False
 
 
@@ -293,12 +298,14 @@ def test_gap_bullish_fixture_emits_signal_and_is_deterministic():
     assert report.report_hash == second.report_hash
     assert report.setup_candles == 1
     assert report.signal_emitted_candles == 1
-    assert report.not_reached == 201
+    assert report.not_reached == 200
     assert report.first_occurrences["first_setup_detected"]["open_time"] == "2025-01-09T09:00:00Z"
     assert report.first_occurrences["first_signal_emitted"]["open_time"] == "2025-01-09T09:00:00Z"
     assert report.signal_gap_records[-1].signal_emitted is True
     assert report.signal_gap_records[-1].signal_side == "LONG"
     assert report.signal_gap_records[-1].signal_reason == "long_setup_detected"
+    assert report.real_gate_pass_counts.get("trend_alignment", 0) == 2
+    assert report.real_gate_not_reached_counts["close_above_ema200"] == 200
     assert report.contract.allowed_use_cases == ("offline_historical_research",)
 
 
@@ -316,11 +323,13 @@ def test_gap_bearish_fixture_reaches_warmup_then_blocks_at_trend_alignment():
 
     assert report.setup_candles == 0
     assert report.signal_emitted_candles == 0
-    assert report.not_reached == 201
+    assert report.not_reached == 200
     assert report.primary_rejection_reason == "trend_alignment"
     assert report.first_occurrences["first_real_failure_trend_alignment"]["open_time"] == "2025-01-09T08:00:00Z"
     assert report.signal_gap_records[0].first_real_failed_gate == "trend_alignment"
     assert report.signal_gap_records[0].normalized_rejection_reason == "trend_alignment"
+    assert report.real_gate_pass_counts.get("trend_alignment", 0) == 0
+    assert report.real_gate_not_reached_counts["close_above_ema200"] == 202
 
 
 def test_gap_short_fixture_stays_in_warmup_and_emits_no_records():
