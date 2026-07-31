@@ -32,6 +32,13 @@ from .okx_historical import (
     OKX_HISTORICAL_SYMBOL,
     OkxHistoricalDataset,
     load_okx_historical_dataset,
+    verify_okx_historical_dataset,
+)
+from .research_artifact_registry_verification import (
+    ResearchArtifactRegistryVerificationReport,
+    ResearchArtifactRegistryVerificationIntegrityError,
+    ResearchArtifactRegistryVerificationValidationError,
+    verify_okx_research_artifact_registry,
 )
 from .offline_research_experiment_authorization import (
     OFFLINE_RESEARCH_EXPERIMENT_AUTHORIZATION_ALLOWED_USE_CASES,
@@ -56,6 +63,10 @@ from .research_artifact_registry import (
     OKX_RESEARCH_ARTIFACT_REQUESTED_END_EXCLUSIVE_UTC,
     OKX_RESEARCH_ARTIFACT_REQUESTED_START_INCLUSIVE_UTC,
     OKX_RESEARCH_ARTIFACT_SYMBOL,
+)
+from .research_artifact_registry_verification import (
+    ResearchArtifactRegistryVerificationReport,
+    verify_okx_research_artifact_registry,
 )
 from strategies.baseline_a_okx_btc_usdt_research import (
     BASELINE_A_OKX_BTC_USDT_RESEARCH_CONTRACT_ALLOWED_USE_CASES,
@@ -169,6 +180,152 @@ def _workspace_tmp_dir(name: str) -> Path:
     root = Path(__file__).resolve().parents[1] / ".pytest_tmp" / name
     root.mkdir(parents=True, exist_ok=True)
     return root
+
+def _is_temporary_pytest_path(path: Path) -> bool:
+    return any(part == ".pytest_tmp" for part in path.parts)
+
+def _ensure_persistent_okx_artifact_path(path: str | Path, *, field_name: str) -> Path:
+    artifact_path = Path(path)
+    if _is_temporary_pytest_path(artifact_path):
+        raise OfflineResearchBacktestValidationError(f"{field_name} must not point to .pytest_tmp.")
+    return artifact_path
+
+def _file_sha256(path: Path) -> str:
+    return sha256(path.read_bytes()).hexdigest()
+
+def _canonical_external_artifact_ref(value: str | Path) -> str:
+    if isinstance(value, Path):
+        ref = str(value)
+    else:
+        ref = _require_str(value, "external_artifact_ref")
+    if "://" in ref:
+        return ref
+    return Path(ref).expanduser().resolve(strict=False).as_posix()
+
+
+@dataclass(frozen=True, slots=True)
+class OkxPersistentResearchArtifactResolution:
+    registry_file: Path
+    dataset_file: Path
+    manifest_file: Path
+    registry_report: ResearchArtifactRegistryVerificationReport
+    dataset_report: dict[str, Any]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "registry_file", _ensure_persistent_okx_artifact_path(self.registry_file, field_name="registry_file"))
+        object.__setattr__(self, "dataset_file", _ensure_persistent_okx_artifact_path(self.dataset_file, field_name="dataset_file"))
+        object.__setattr__(self, "manifest_file", _ensure_persistent_okx_artifact_path(self.manifest_file, field_name="manifest_file"))
+        if not isinstance(self.registry_report, ResearchArtifactRegistryVerificationReport):
+            raise OfflineResearchBacktestValidationError("registry_report must be a verified research artifact registry report.")
+        if not isinstance(self.dataset_report, dict):
+            raise OfflineResearchBacktestValidationError("dataset_report must be a mapping.")
+        if self.registry_report.historical_research_only is not True:
+            raise OfflineResearchBacktestValidationError("historical_research_only must be true.")
+        if self.registry_report.operational_evidence is not False:
+            raise OfflineResearchBacktestValidationError("operational_evidence must be false.")
+        if self.registry_report.paper_promotion_eligible is not False:
+            raise OfflineResearchBacktestValidationError("paper_promotion_eligible must be false.")
+
+    @property
+    def artifact_root(self) -> Path:
+        return self.dataset_file.parent
+
+
+def resolve_okx_persistent_artifact(
+    *,
+    registry_file: str | Path,
+    dataset_file: str | Path,
+    manifest_file: str | Path,
+    expected_external_artifact_ref: str | Path | None = None,
+) -> OkxPersistentResearchArtifactResolution:
+    registry_path = _ensure_persistent_okx_artifact_path(registry_file, field_name="registry_file")
+    dataset_path = _ensure_persistent_okx_artifact_path(dataset_file, field_name="dataset_file")
+    manifest_path = _ensure_persistent_okx_artifact_path(manifest_file, field_name="manifest_file")
+
+    if not registry_path.exists():
+        raise OfflineResearchBacktestValidationError("research artifact registry is missing.")
+    if not dataset_path.exists():
+        raise OfflineResearchBacktestValidationError("dataset file is missing.")
+    if not manifest_path.exists():
+        raise OfflineResearchBacktestValidationError("manifest file is missing.")
+    if dataset_path.parent != manifest_path.parent:
+        raise OfflineResearchBacktestValidationError("dataset and manifest must share the same artifact directory.")
+
+    expected_artifact_ref = _canonical_external_artifact_ref(expected_external_artifact_ref or dataset_path.parent)
+    try:
+        registry_report = verify_okx_research_artifact_registry(
+            registry_path,
+            expected_external_artifact_ref=expected_artifact_ref,
+        )
+    except ResearchArtifactRegistryVerificationIntegrityError as exc:
+        raise OfflineResearchBacktestIntegrityError(str(exc)) from exc
+    except ResearchArtifactRegistryVerificationValidationError as exc:
+        raise OfflineResearchBacktestValidationError(str(exc)) from exc
+
+    artifact_ref = _canonical_external_artifact_ref(registry_report.external_artifact_ref)
+    if _is_temporary_pytest_path(Path(artifact_ref)):
+        raise OfflineResearchBacktestValidationError("external_artifact_ref must not point to .pytest_tmp.")
+    if not Path(artifact_ref).exists():
+        raise OfflineResearchBacktestValidationError("external_artifact_ref does not exist.")
+    if artifact_ref != _canonical_external_artifact_ref(dataset_path.parent):
+        raise OfflineResearchBacktestValidationError("external_artifact_ref must match the dataset artifact directory.")
+
+    try:
+        dataset_report = verify_okx_historical_dataset(dataset_file=dataset_path, manifest_file=manifest_path)
+    except HistoricalDataIntegrityError as exc:
+        raise OfflineResearchBacktestIntegrityError(str(exc)) from exc
+    except HistoricalDataValidationError as exc:
+        raise OfflineResearchBacktestValidationError(str(exc)) from exc
+    if dataset_report["dataset_hash"] != registry_report.dataset_sha256:
+        raise OfflineResearchBacktestIntegrityError("dataset_hash must match the verified registry.")
+    if dataset_report["manifest_hash"] != registry_report.manifest_hash:
+        raise OfflineResearchBacktestIntegrityError("manifest_hash must match the verified registry.")
+    if _file_sha256(dataset_path) != registry_report.dataset_sha256:
+        raise OfflineResearchBacktestIntegrityError("dataset file hash must match the verified registry.")
+    if _file_sha256(manifest_path) != registry_report.manifest_sha256:
+        raise OfflineResearchBacktestIntegrityError("manifest file hash must match the verified registry.")
+    return OkxPersistentResearchArtifactResolution(
+        registry_file=registry_path,
+        dataset_file=dataset_path,
+        manifest_file=manifest_path,
+        registry_report=registry_report,
+        dataset_report=dict(dataset_report),
+    )
+
+
+def discover_okx_persistent_artifact_paths(root: str | Path | None = None) -> tuple[Path, Path]:
+    search_root = Path(root) if root is not None else Path.home() / ".codex" / "artifacts" / "BOT-em-Teste"
+    if _is_temporary_pytest_path(search_root):
+        raise OfflineResearchBacktestValidationError("persistent artifact search root must not be .pytest_tmp.")
+    if not search_root.exists():
+        raise OfflineResearchBacktestValidationError("persistent artifact search root does not exist.")
+    registry_candidates = sorted(
+        candidate
+        for candidate in search_root.rglob("okx-research-artifact-registry.json")
+        if not _is_temporary_pytest_path(candidate)
+    )
+    if not registry_candidates:
+        raise OfflineResearchBacktestValidationError("OKX persistent research artifact registry was not found.")
+    for registry_file in registry_candidates:
+        registry_report = verify_okx_research_artifact_registry(registry_file)
+        artifact_dir = Path(registry_report.external_artifact_ref)
+        if _is_temporary_pytest_path(artifact_dir):
+            raise OfflineResearchBacktestValidationError("persistent artifact directory must not be .pytest_tmp.")
+        dataset_file = artifact_dir / OKX_HISTORICAL_DATASET_CANDLES_FILENAME
+        manifest_file = artifact_dir / OKX_HISTORICAL_MANIFEST_FILENAME
+        if not dataset_file.exists() or not manifest_file.exists():
+            continue
+        try:
+            resolve_okx_persistent_artifact(
+                registry_file=registry_file,
+                dataset_file=dataset_file,
+                manifest_file=manifest_file,
+                expected_external_artifact_ref=artifact_dir,
+            )
+        except OfflineResearchBacktestError:
+            continue
+        return dataset_file, manifest_file
+    raise OfflineResearchBacktestValidationError("OKX persistent research artifact files were not found locally.")
 
 
 def discover_okx_phase19a_artifact_paths(root: str | Path | None = None) -> tuple[Path, Path]:
@@ -929,5 +1086,8 @@ __all__ = [
     "OfflineResearchBacktestValidationError",
     "build_offline_research_backtest_experiment_contract",
     "discover_okx_phase19a_artifact_paths",
+    "discover_okx_persistent_artifact_paths",
+    "OkxPersistentResearchArtifactResolution",
+    "resolve_okx_persistent_artifact",
     "run_first_offline_okx_backtest_experiment",
 ]
