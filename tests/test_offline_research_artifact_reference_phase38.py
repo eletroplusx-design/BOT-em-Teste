@@ -13,6 +13,7 @@ import market_data.offline_research_execution_gate_diagnostic as execution_gate_
 import market_data.offline_research_signal_gap_diagnostic as signal_gap_diagnostic
 import market_data.okx_historical as okx
 import market_data.research_artifact_registry as registry
+from domain.serialization import serialize_value
 
 
 ACTUAL_REGISTRY_FILE = (
@@ -295,7 +296,19 @@ def test_offline_research_artifact_reference_rejects_artifact_id_mismatch_with_s
     shutil.copyfile(persistent_artifact["manifest_file"], manifest_file)
 
     registry_payload = json.loads(persistent_artifact["registry_file"].read_text(encoding="utf-8"))
+    registry_entry = registry.ResearchArtifactRegistryEntry.from_dict(registry_payload)
+    object.__setattr__(registry_entry, "external_artifact_ref", artifact_dir.as_posix())
     registry_payload["external_artifact_ref"] = artifact_dir.as_posix()
+    registry_payload["registry_hash"] = sha256(
+        json.dumps(
+            serialize_value(
+                registry_entry.canonical_payload(include_registry_hash=False)
+            ),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
     registry_file = registry_dir / "okx-research-artifact-registry.json"
     registry_file.write_text(
         json.dumps(registry_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
