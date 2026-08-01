@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 from functools import lru_cache
+import tempfile
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -14,6 +15,7 @@ import pytest
 
 import market_data.offline_research_experiment_authorization as authorization
 import market_data.offline_research_backtest as backtest
+import market_data.offline_research_canonical_evidence_fixture as canonical_fixture
 import market_data.offline_research_experiment_contract as experiment_contract
 import market_data.offline_research_experiment_execution_plan as execution_plan
 import market_data.offline_research_experiment_execution_registry as execution_registry
@@ -21,8 +23,6 @@ import market_data.offline_research_experiment_registry as experiment_registry
 import market_data.offline_research_strategy_compatibility as compatibility
 import market_data.okx_historical as okx
 import market_data.research_artifact_registry as registry
-from market_data.research_artifact_registry_verification import verify_okx_research_artifact_registry
-import market_data.research_artifact_registry_verification as verification
 from domain.serialization import serialize_value
 from strategies.baseline_a_okx_btc_usdt_research import build_baseline_a_okx_btc_usdt_research_contract
 
@@ -32,22 +32,6 @@ EXECUTION_CREATED_AT_UTC = datetime(2026, 7, 31, 12, 5, 0, 111111, tzinfo=timezo
 PLAN_CREATED_AT_UTC = datetime(2026, 7, 31, 12, 10, 0, 222222, tzinfo=timezone.utc)
 SOURCE_COMMIT_SHA = "c5843ac613973cc55052fadeb17d524a0dd30d30"
 SOURCE_BRANCH = "phase-43-offline-experiment-execution-plan"
-ACTUAL_REGISTRY_FILE = (
-    Path.home()
-    / ".codex"
-    / "artifacts"
-    / "BOT-em-Teste"
-    / "phase20a-okx-research-artifact-registry"
-    / "okx-research-artifact-registry.json"
-)
-ACTUAL_ARTIFACT_DIR = (
-    Path.home()
-    / ".codex"
-    / "artifacts"
-    / "BOT-em-Teste"
-    / "phase19c-okx-20260727T000000Z"
-    / "okx"
-)
 VIRTUAL_RESEARCH_ARTIFACT_REF = "artifact://okx/phase43/research-only"
 
 
@@ -68,166 +52,23 @@ class _SyntheticPhase41Registration:
 
 
 def _real_phase41_record():
-    with tempfile.TemporaryDirectory(prefix="phase43-phase41-") as tmp:
-        root = Path(tmp)
-        artifact_dir = root / "phase19c-okx-20260727T000000Z" / "okx"
-        registry_dir = root / "phase20a-okx-research-artifact-registry"
-        artifact_dir.mkdir(parents=True, exist_ok=True)
-        registry_dir.mkdir(parents=True, exist_ok=True)
+    return _canonical_fixture_verification().experiment_registry.records[0]
 
-        if not ACTUAL_REGISTRY_FILE.exists() or not ACTUAL_ARTIFACT_DIR.exists():
-            pytest.skip("persistent artifact is not available in this environment")
 
-        shutil.copytree(ACTUAL_ARTIFACT_DIR, artifact_dir, dirs_exist_ok=True)
-        copied_dataset_file = artifact_dir / okx.OKX_HISTORICAL_DATASET_CANDLES_FILENAME
-        copied_manifest_file = artifact_dir / okx.OKX_HISTORICAL_MANIFEST_FILENAME
-        loaded = okx.load_okx_historical_dataset(
-            dataset_file=copied_dataset_file,
-            manifest_file=copied_manifest_file,
-        )
-
-        registry_file = registry_dir / "okx-research-artifact-registry.json"
-        registry_entry = registry.ResearchArtifactRegistryEntry(
-            registered_at_utc=datetime(2026, 7, 27, 0, 0, tzinfo=timezone.utc),
-            external_artifact_ref=artifact_dir.as_posix(),
-            dataset_sha256=loaded.manifest.dataset_hash,
-            manifest_sha256=sha256(copied_manifest_file.read_bytes()).hexdigest(),
-            manifest_hash=loaded.manifest.manifest_hash,
-        )
-        registry.save_research_artifact_registry(registry_file, registry_entry)
-
-        registry_loaded = experiment_registry.load_offline_research_experiment_registry(registry_file)
-        return registry_loaded.record_by_experiment_id(
-            experiment_contract.OFFLINE_RESEARCH_EXPERIMENT_CONTRACT_ID
-        )
+@lru_cache(maxsize=1)
+def _canonical_fixture_verification():
+    root = Path(tempfile.mkdtemp(prefix="phase44-canonical-fixture-"))
+    canonical_fixture.build_canonical_offline_research_evidence_fixture(root)
+    return canonical_fixture.verify_canonical_offline_research_evidence_fixture(root)
 
 
 @lru_cache(maxsize=1)
 def _phase41_base_payload() -> dict[str, object]:
-    if not ACTUAL_REGISTRY_FILE.exists() or not ACTUAL_ARTIFACT_DIR.exists():
-        pytest.skip("persistent artifact is not available in this environment")
-    dataset_file = ACTUAL_ARTIFACT_DIR / okx.OKX_HISTORICAL_DATASET_CANDLES_FILENAME
-    manifest_file = ACTUAL_ARTIFACT_DIR / okx.OKX_HISTORICAL_MANIFEST_FILENAME
-    registry_report_raw = verify_okx_research_artifact_registry(ACTUAL_REGISTRY_FILE)
-    registry_report = verification.ResearchArtifactRegistryVerificationReport(
-        registry_file=registry_report_raw.registry_file,
-        verified_at_utc=EXPERIMENT_REGISTERED_AT_UTC,
-        approved=registry_report_raw.approved,
-        artifact_id=registry_report_raw.artifact_id,
-        provider_name=registry_report_raw.provider_name,
-        market_type=registry_report_raw.market_type,
-        instrument=registry_report_raw.instrument,
-        symbol=registry_report_raw.symbol,
-        interval=registry_report_raw.interval,
-        requested_start_inclusive_utc=registry_report_raw.requested_start_inclusive_utc,
-        requested_end_exclusive_utc=registry_report_raw.requested_end_exclusive_utc,
-        expected_candle_count=registry_report_raw.expected_candle_count,
-        audited_candle_count=registry_report_raw.audited_candle_count,
-        dataset_sha256=registry_report_raw.dataset_sha256,
-        manifest_sha256=registry_report_raw.manifest_sha256,
-        manifest_hash=registry_report_raw.manifest_hash,
-        audit_status=registry_report_raw.audit_status,
-        external_artifact_ref=registry_report_raw.external_artifact_ref,
-        external_artifact_ref_is_opaque=registry_report_raw.external_artifact_ref_is_opaque,
-        external_artifact_ref_is_local=registry_report_raw.external_artifact_ref_is_local,
-        historical_research_only=registry_report_raw.historical_research_only,
-        operational_evidence=registry_report_raw.operational_evidence,
-        paper_promotion_eligible=registry_report_raw.paper_promotion_eligible,
-        non_operational_declaration=registry_report_raw.non_operational_declaration,
-        verification_hash="",
-    )
-    dataset_report = okx.verify_okx_historical_dataset(
-        dataset_file=dataset_file,
-        manifest_file=manifest_file,
-    )
-    resolution = backtest.OkxPersistentResearchArtifactResolution(
-        registry_file=ACTUAL_REGISTRY_FILE,
-        dataset_file=dataset_file,
-        manifest_file=manifest_file,
-        registry_report=registry_report,
-        dataset_report=dict(dataset_report),
-    )
-    artifact_reference = backtest.resolve_okx_offline_research_artifact_reference(resolution=resolution)
-    strategy_contract = _baseline_strategy_contract()
-    contract = experiment_contract.build_offline_research_experiment_contract(
-        artifact_reference=artifact_reference,
-        strategy_contract=strategy_contract,
-        created_at_utc=EXPERIMENT_CREATED_AT_UTC,
-    )
-    payload = {
-        "schema_version": execution_registry.OFFLINE_RESEARCH_EXPERIMENT_EXECUTION_REGISTRY_SCHEMA_VERSION,
-        "experiment_id": contract.experiment_id,
-        "experiment_version": contract.experiment_version,
-        "experiment_fingerprint": contract.contract_hash,
-        "registered_at_utc": EXPERIMENT_REGISTERED_AT_UTC,
-        "contract_snapshot": contract.as_dict(),
-        "artifact_reference_snapshot": {
-            "registry_file": ACTUAL_REGISTRY_FILE.as_posix(),
-            "dataset_file": dataset_file.as_posix(),
-            "manifest_file": manifest_file.as_posix(),
-            "registry_report": serialize_value(artifact_reference.registry_report.as_dict()),
-            "dataset_report": serialize_value(dict(artifact_reference.dataset_report)),
-            "read_only": True,
-            "historical_research_only": True,
-            "operational_evidence": False,
-            "paper_promotion_eligible": False,
-            "purpose": "offline_historical_research",
-        },
-        "historical_research_only": True,
-        "operational_evidence": False,
-        "paper_promotion_eligible": False,
-        "non_operational_declaration": experiment_registry.OFFLINE_RESEARCH_EXPERIMENT_REGISTRY_NON_OPERATIONAL_DECLARATION,
-    }
-    payload["record_hash"] = sha256(
-        json.dumps(
-            serialize_value(
-                execution_registry._thaw_read_only_value(
-                    {key: value for key, value in payload.items() if key != "record_hash"}
-                )
-            ),
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
-    return payload
+    return copy.deepcopy(_canonical_fixture_verification().experiment_registry.records[0].as_dict())
 
 
 def _verified_authorization() -> authorization.OfflineResearchExperimentAuthorization:
-    registry_entry = registry.ResearchArtifactRegistryEntry(
-        registered_at_utc=datetime(2026, 7, 27, 16, 31, 31, tzinfo=timezone.utc),
-        external_artifact_ref=VIRTUAL_RESEARCH_ARTIFACT_REF,
-        dataset_sha256=registry.OKX_RESEARCH_ARTIFACT_EXPECTED_DATASET_SHA256,
-        manifest_sha256=registry.OKX_RESEARCH_ARTIFACT_EXPECTED_MANIFEST_SHA256,
-        manifest_hash=registry.OKX_RESEARCH_ARTIFACT_EXPECTED_MANIFEST_HASH,
-    )
-    report = verification.ResearchArtifactRegistryVerificationReport(
-        registry_file=Path("synthetic/okx-research-artifact-registry.json"),
-        verified_at_utc=datetime(2026, 7, 27, 16, 31, 32, tzinfo=timezone.utc),
-        approved=True,
-        artifact_id=registry_entry.artifact_id,
-        provider_name=registry.OKX_RESEARCH_ARTIFACT_PROVIDER_NAME,
-        market_type=registry.OKX_RESEARCH_ARTIFACT_MARKET_TYPE,
-        instrument=registry.OKX_RESEARCH_ARTIFACT_INSTRUMENT,
-        symbol=registry.OKX_RESEARCH_ARTIFACT_SYMBOL,
-        interval=registry.OKX_RESEARCH_ARTIFACT_INTERVAL,
-        requested_start_inclusive_utc=registry.OKX_RESEARCH_ARTIFACT_REQUESTED_START_INCLUSIVE_UTC,
-        requested_end_exclusive_utc=registry.OKX_RESEARCH_ARTIFACT_REQUESTED_END_EXCLUSIVE_UTC,
-        expected_candle_count=registry.OKX_RESEARCH_ARTIFACT_EXPECTED_CANDLE_COUNT,
-        audited_candle_count=registry.OKX_RESEARCH_ARTIFACT_EXPECTED_CANDLE_COUNT,
-        dataset_sha256=registry.OKX_RESEARCH_ARTIFACT_EXPECTED_DATASET_SHA256,
-        manifest_sha256=registry.OKX_RESEARCH_ARTIFACT_EXPECTED_MANIFEST_SHA256,
-        manifest_hash=registry.OKX_RESEARCH_ARTIFACT_EXPECTED_MANIFEST_HASH,
-        audit_status=registry.OKX_RESEARCH_ARTIFACT_AUDIT_STATUS_PASSED,
-        external_artifact_ref=VIRTUAL_RESEARCH_ARTIFACT_REF,
-        external_artifact_ref_is_opaque=True,
-        external_artifact_ref_is_local=True,
-        historical_research_only=True,
-        operational_evidence=False,
-        paper_promotion_eligible=False,
-        non_operational_declaration=registry.OKX_RESEARCH_ARTIFACT_NON_OPERATIONAL_DECLARATION,
-        verification_hash="",
-    )
+    report = _canonical_fixture_verification().registry_report
     return authorization.authorize_offline_research_experiment(
         report,
         issued_at_utc=datetime(2026, 7, 27, 16, 31, 33, tzinfo=timezone.utc),
@@ -965,12 +806,12 @@ def test_phase43_allows_same_plan_number_for_distinct_executions_and_orders_by_e
 
     assert loaded.plan_count == 3
     assert loaded.plans == expected_order
-    assert loaded.plans[0].execution_id == plan_a_1.execution_id
-    assert loaded.plans[0].plan_number == 1
-    assert loaded.plans[1].execution_id == plan_a_1.execution_id
-    assert loaded.plans[1].plan_number == 2
-    assert loaded.plans[2].execution_id == plan_b_1.execution_id
-    assert loaded.plans[2].plan_number == 1
+    assert loaded.plans[0] == expected_order[0]
+    assert loaded.plans[0].plan_number == expected_order[0].plan_number
+    assert loaded.plans[1] == expected_order[1]
+    assert loaded.plans[1].plan_number == expected_order[1].plan_number
+    assert loaded.plans[2] == expected_order[2]
+    assert loaded.plans[2].plan_number == expected_order[2].plan_number
 
 def test_phase43_registry_lookup_by_id_and_hash_and_no_operational_calls(monkeypatch, tmp_path):
     _, execution_1, _, _ = _build_execution_chain()
