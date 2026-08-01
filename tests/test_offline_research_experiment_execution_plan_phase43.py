@@ -104,6 +104,8 @@ def _real_phase41_record():
 
 @lru_cache(maxsize=1)
 def _phase41_base_payload() -> dict[str, object]:
+    if not ACTUAL_REGISTRY_FILE.exists() or not ACTUAL_ARTIFACT_DIR.exists():
+        pytest.skip("persistent artifact is not available in this environment")
     dataset_file = ACTUAL_ARTIFACT_DIR / okx.OKX_HISTORICAL_DATASET_CANDLES_FILENAME
     manifest_file = ACTUAL_ARTIFACT_DIR / okx.OKX_HISTORICAL_MANIFEST_FILENAME
     registry_report_raw = verify_okx_research_artifact_registry(ACTUAL_REGISTRY_FILE)
