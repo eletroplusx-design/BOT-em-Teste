@@ -1,39 +1,39 @@
 # Known Limitations
 
-## 1. Dados históricos
+## 1. Dados historicos
 
-- Há histórico no projeto de investigação de anomalias em candles e lacunas de dados.
-- As datas e hashes exatos dessas investigações devem ser confirmados no Git antes de uso como evidência.
-- O dataset confiável continua sendo um tema crítico.
+- Ha historico no projeto de investigacao de anomalias em candles e lacunas de dados.
+- As datas e hashes exatos dessas investigacoes devem ser confirmados no Git antes de uso como evidencia.
+- O dataset confiavel continua sendo um tema critico.
 
 ## 2. Testes
 
-- A suíte completa pode exceder timeout.
-- No Windows pode ser necessário redirecionar `.pytest_tmp`.
-- `TMP`, `TEMP` e `TMPDIR` podem precisar ser ajustados.
-- Blocos determinísticos devem cobrir todos os testes exatamente uma vez.
-- Warnings conhecidos devem ser registrados, não escondidos.
+- A suite completa pode exceder timeout em alguns ambientes.
+- No Windows pode ser necessario redirecionar temporarios para isolamento quando testes especificos pedirem.
+- `TMP`, `TEMP` e `TMPDIR` podem precisar ser ajustados em execucoes isoladas.
+- Blocos deterministcos devem cobrir todos os testes exatamente uma vez quando houver necessidade de particionamento.
+- Warnings conhecidos devem ser registrados, nao escondidos.
 
 ## 3. Fase 47
 
-- O executor neutro está publicado em branch, mas ainda está em PR draft.
-- A auditoria final ainda precisa ser concluída.
-- A suíte completa ainda não estava consolidada no momento do snapshot.
+- O executor neutro da Fase 47 esta integrado e versionado em `v0.47.0`.
+- A auditoria final foi concluida.
+- A suite completa foi consolidada no ambiente padrao.
 
-## 4. Estratégia
+## 4. Estrategia
 
-- Baseline A é simples e research-only.
-- Não há prova de edge suficiente para promoção operacional.
-- Estrategia B ainda não está formalizada.
-- Não há promoção paper/live.
+- Baseline A e simples e research-only.
+- Nao ha prova de edge suficiente para promocao operacional.
+- Estrategia B ainda nao esta formalizada.
+- Nao ha promocao paper/live.
 
 ## 5. Ambiente
 
 - Windows
-- possível warning de `credential-manager-core`
+- possivel warning de `credential-manager-core`
 - `PytestCacheWarning`
-- limitações de symlink
-- evitar dependências POSIX
+- limitacoes de symlink
+- evitar dependencias POSIX
 
 ## 6. Operacional
 
@@ -41,4 +41,4 @@
 - sem corretora
 - sem ordens
 - sem capital real
-- sem execução operacional
+- sem execucao operacional

@@ -1,40 +1,29 @@
-# Next Developer Prompt
-
-Você está assumindo a continuidade do projeto Bot-Trader.
+Voce esta assumindo a continuidade do projeto Bot-Trader.
 
 Antes de alterar qualquer arquivo, leia todos os documentos em `docs/handoff`.
 
-Não confie cegamente no snapshot.
+Nao confie cegamente no snapshot.
 Confirme o estado real do GitHub, branches, tags, PRs, CI e working tree.
 
-A primeira tarefa esperada é auditar a Fase 47 e a PR `#62`, caso ela ainda esteja aberta e não integrada.
+A Fase 47 ja foi integrada e versionada. A primeira tarefa do proximo desenvolvedor e confirmar o estado real atual antes de iniciar qualquer nova fase.
 
-Não inicie a Fase 48 antes de concluir:
-- auditoria do diff;
-- ampliação da cobertura específica;
-- validação de determinismo;
-- validação de limites;
-- validação de idempotência;
-- persistência fail-closed;
-- isolamento;
-- suíte completa;
-- CI verde;
-- merge;
-- tag `v0.47.0`.
+Nao inicie a Fase 48 sem autorizacao explicita e sem concluir uma nova verificacao do estado real.
 
-Não execute Baseline A.
-Não gere sinais.
-Não faça backtest.
-Não habilite paper.
-Não habilite live.
-Não conecte corretora.
-Não envie ordens.
+Nao execute Baseline A.
+Nao gere sinais.
+Nao faca backtest.
+Nao habilite paper.
+Nao habilite live.
+Nao conecte corretora.
+Nao envie ordens.
 
-Estado de referência do snapshot:
-- Fase 47 em PR draft
+Estado de referencia do snapshot:
+- Fase 47 integrada e versionada
 - branch: `phase-47-neutral-offline-executor`
 - head: `c67c7629c315dc97d3ab039bcb6d692e19525b5a`
 - PR: `#62`
-- CI: em andamento
+- merge commit: `abf3d31cf51f9ebcd0321e3281e7b75e28c5a41b`
+- tag: `v0.47.0`
+- CI: sucesso
 
-Trate `CURRENT_STATE.md` como snapshot e não como verdade eterna.
+Trate `CURRENT_STATE.md` como snapshot e nao como verdade eterna.

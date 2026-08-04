@@ -5,107 +5,35 @@
 Status:
 - integrada
 
-Branch:
-- Não confirmado
-
-PR:
-- Não confirmado
-
-Commit principal:
-- Não confirmado
-
-Merge commit:
-- Não confirmado
-
 Tag:
 - `v0.9.0-trusted-historical-data`
 - `v0.9.1-historical-replay-validation`
 - `v0.9.2-historical-experiment-contract`
 - `v0.10.0-baseline-trend-pullback`
 
-Arquivos principais:
-- contratos históricos iniciais e base da pesquisa
-
 Objetivo:
-- estabelecer dados históricos confiáveis, validação de replay e a primeira baseline trend/pullback
+- estabelecer dados historicos confiaveis, validacao de replay e a primeira baseline trend/pullback
 
-Garantias introduzidas:
-- pesquisa histórica confiável
-- primeiros contratos e validações
-
-O que deliberadamente não foi implementado:
-- paper live
-- execução operacional
-- promoção automática
-
-Testes ou validações relevantes:
-- validações históricas iniciais
-
-Limitações conhecidas:
-- detalhes finos de branch/PR não confirmados neste snapshot
-
-## Fases 11–22
+## Fases 11-22
 
 Status:
 - integrada
-
-Branch:
-- Não confirmado
-
-PR:
-- Não confirmado
-
-Commit principal:
-- Não confirmado
-
-Merge commit:
-- Não confirmado
 
 Tag:
 - `v0.11.0-historical-provider-qualification`
 - `v0.11.1-kucoin-spot-historical-provider`
 - `v0.12.0-kucoin-multitimeframe-qualification`
 - `v0.12.1-historical-multitimeframe-alignment`
-- demais fases 13–22: ver histórico Git local para confirmação fina
 
-Arquivos principais:
-- provedores históricos
-- validações de múltiplos timeframes
-- análises e experimentos
-
-Objetivo:
-- ampliar a infraestrutura de dados e pesquisa sem promoção operacional
-
-Garantias introduzidas:
-- providers históricos
-- alinhamento multi-timeframe
-
-O que deliberadamente não foi implementado:
-- operação ao vivo
-- promoção automática
-
-Testes ou validações relevantes:
-- regressões históricas e validações de contrato
-
-Limitações conhecidas:
-- sequência exata de branches/PRs das fases 13–22 requer consulta adicional se necessária
-
-## Fase 24 — rastreamento auditável dos gates entre sinal e trade simulado
+## Fase 24 - rastreamento auditavel dos gates entre sinal e trade simulado
 
 Status:
 - integrada
 
 Tag:
-- `v0.26.0` é a base posterior de referência do subciclo atual
+- `v0.26.0` e a base posterior de referencia do subciclo atual
 
-Objetivo:
-- rastrear os gates entre sinal e trade simulado
-
-Garantias introduzidas:
-- rastreamento dos gates
-- base para o diagnóstico posterior
-
-## Fase 26 — diagnóstico histórico da divergência entre setup e Signal
+## Fase 26 - diagnostico historico da divergencia entre setup e Signal
 
 Status:
 - integrada
@@ -117,16 +45,9 @@ PR:
 - `#51`
 
 Commit principal:
-- `1cc3ca9b01568b4c91cf0d2dc51cc878beb79624` é a base congelada anterior ao bloco posterior
+- `1cc3ca9b01568b4c91cf0d2dc51cc878beb79624`
 
-Objetivo:
-- diagnosticar divergências entre setup e Signal
-
-Garantias introduzidas:
-- diagnóstico histórico
-- contagem de gates e warm-up
-
-## Fase 30 — correção da confiabilidade do diagnóstico setup → Signal
+## Fase 30 - correcao da confiabilidade do diagnostico setup -> Signal
 
 Status:
 - integrada
@@ -143,18 +64,7 @@ Commit principal:
 Merge commit:
 - `093726c9406f01a4b14fa95dd42796664a0e39a1`
 
-Tag:
-- `v0.26.0` permanece a base histórica de referência do bloco
-
-Objetivo:
-- alinhar o diagnóstico histórico com a Baseline A sem alterar a estratégia
-
-Garantias introduzidas:
-- warm-up alinhado
-- gates com `passed`, `failed` e `not_reached`
-- regressão para não contar gate não alcançado como pass
-
-## Fase 34 — resolvedor seguro de artefato histórico persistente
+## Fase 34 - resolvedor seguro de artefato historico persistente
 
 Status:
 - integrada
@@ -171,15 +81,7 @@ Commit principal:
 Merge commit:
 - `8c2ccb6a10fd205dc859c4c925ebd81e9302bdf3`
 
-Objetivo:
-- resolver artefato persistente qualificado sem usar `.pytest_tmp`
-
-Garantias introduzidas:
-- read-only
-- rejeição explícita de `.pytest_tmp`
-- normalização de `external_artifact_ref`
-
-## Fase 38 — ponto de entrada offline qualificado
+## Fase 38 - ponto de entrada offline qualificado
 
 Status:
 - integrada
@@ -199,10 +101,7 @@ Merge commit:
 Tag:
 - `v0.38.0`
 
-Objetivo:
-- criar ponto de entrada read-only para artefato OKX qualificado
-
-## Fase 40 — contrato de experimento histórico offline reproduzível
+## Fase 40 - contrato de experimento historico offline reproduzivel
 
 Status:
 - integrada
@@ -222,10 +121,7 @@ Merge commit:
 Tag:
 - `v0.40.0`
 
-Objetivo:
-- declarar contrato de experimento com fingerprint reproduzível
-
-## Fase 41 — Registro Central de Experimentos Offline
+## Fase 41 - Registro Central de Experimentos Offline
 
 Status:
 - integrada
@@ -239,10 +135,7 @@ PR:
 Merge commit:
 - `9a0764a`
 
-Objetivo:
-- registry central append-only e deterministicamente verificável
-
-## Fase 42 — registro imutável de tentativas de execução offline
+## Fase 42 - registro imutavel de tentativas de execucao offline
 
 Status:
 - integrada
@@ -259,10 +152,7 @@ Merge commit:
 Tag:
 - `v0.42.0`
 
-Objetivo:
-- registrar tentativas de execução offline sem atividade operacional
-
-## Fase 43 — plano imutável de execução offline
+## Fase 43 - plano imutavel de execucao offline
 
 Status:
 - integrada
@@ -279,10 +169,7 @@ Merge commit:
 Tag:
 - `v0.43.0`
 
-Objetivo:
-- congelar o plano de execução offline do experimento
-
-## Fase 44 — pacote canônico de evidências e fixtures offline
+## Fase 44 - pacote canonico de evidencias e fixtures offline
 
 Status:
 - integrada
@@ -299,10 +186,7 @@ Merge commit:
 Tag:
 - `v0.44.0`
 
-Objetivo:
-- fornecer fixtures e evidência canônica offline
-
-## Fase 45 — autorização imutável de execução offline
+## Fase 45 - autorizacao imutavel de execucao offline
 
 Status:
 - integrada
@@ -319,10 +203,7 @@ Merge commit:
 Tag:
 - `v0.45.0`
 
-Objetivo:
-- registrar autorização offline futura, research-only, sem execução
-
-## Fase 46 — envelope canônico de execução offline
+## Fase 46 - envelope canonico de execucao offline
 
 Status:
 - integrada
@@ -339,19 +220,10 @@ Merge commit:
 Tag:
 - `v0.46.0`
 
-Objetivo:
-- congelar o envelope canônico com ambiente deny-all e permissões explícitas
-
-Garantias:
-- parâmetros congelados
-- seed congelada
-- registry append-only
-- autorização efetiva obrigatória
-
-## Fase 47 — executor offline neutro e determinístico
+## Fase 47 - executor offline neutro e deterministico
 
 Status:
-- em desenvolvimento
+- integrada
 
 Branch:
 - `phase-47-neutral-offline-executor`
@@ -363,38 +235,18 @@ Commit principal:
 - `c67c7629c315dc97d3ab039bcb6d692e19525b5a`
 
 Merge commit:
-- Não confirmado
+- `abf3d31cf51f9ebcd0321e3281e7b75e28c5a41b`
 
 Tag:
-- Não confirmado
-
-Arquivos principais:
-- `market_data/offline_research_neutral_executor.py`
-- `tests/test_offline_research_neutral_executor_phase47.py`
+- `v0.47.0`
 
 Objetivo:
-- consumir envelope da Fase 46 e produzir resultado técnico neutro
+- consumir envelope da Fase 46 e produzir resultado tecnico neutro sem executar estrategia
 
 Garantias introduzidas:
-- não executa Baseline A
-- não gera sinais
-- não calcula métricas financeiras
+- nao executa Baseline A
+- nao gera sinais
+- nao calcula metricas financeiras
 - registry append-only
-- idempotência
-
-O que deliberadamente não foi implementado:
-- estratégia
-- replay
-- backtest
-- walk-forward
-- paper
-- live
-- ordens
-
-Testes ou validações relevantes:
-- 7 testes específicos da Fase 47
-- fases 38, 40, 41, 42, 43, 44, 45 e 46 validadas em blocos
-
-Limitações conhecidas:
-- suíte completa não consolidada no snapshot
-- auditoria final pendente
+- idempotencia
+- determinismo de resultado e persistencia

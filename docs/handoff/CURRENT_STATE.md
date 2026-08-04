@@ -2,54 +2,44 @@
 
 ## Snapshot
 
-Data e hora UTC: 2026-08-04T02:49:11.9506164Z
-Data e hora local: 2026-08-03T23:49:12.0576904-03:00
+Data e hora UTC: 2026-08-04T03:00:00Z
+Data e hora local: 2026-08-04T00:00:00-03:00
 
-## Última versão integrada
+## Ultima versao integrada
 
-Tag: `v0.46.0`
-Commit: `6b3f9ed5feadb5b2207f1f452ea94159eec72e33`
-PR correspondente: `#61`
+Tag: `v0.47.0`
+Commit: `abf3d31cf51f9ebcd0321e3281e7b75e28c5a41b`
+PR correspondente: `#62`
 
 ## Main
 
-HEAD: `6b3f9ed5feadb5b2207f1f452ea94159eec72e33`
-origin/main: `6b3f9ed5feadb5b2207f1f452ea94159eec72e33`
+HEAD: `abf3d31cf51f9ebcd0321e3281e7b75e28c5a41b`
+origin/main: `abf3d31cf51f9ebcd0321e3281e7b75e28c5a41b`
 working tree: limpa
 
 ## Trabalho aberto
 
-Fase: 47 — Executor offline neutro e determinístico
-Branch: `phase-47-neutral-offline-executor`
-PR: `#62`
-Head SHA: `c67c7629c315dc97d3ab039bcb6d692e19525b5a`
-Draft: `true`
-Mergeable: `UNSTABLE`
-CI: `IN_PROGRESS`
-Arquivos alterados: `market_data/offline_research_neutral_executor.py`, `tests/test_offline_research_neutral_executor_phase47.py`
-Quantidade de commits: `1`
+Nenhum trabalho de produto em aberto.
 
-## O que está concluído
+## O que esta concluido
 
 - Fase 46 integrada e versionada em `v0.46.0`.
-- Fase 47 implementada na branch da fase.
-- PR `#62` aberta em draft.
-- Testes específicos da Fase 47 executados com sucesso.
+- Fase 47 integrada e versionada em `v0.47.0`.
+- PR `#62` mesclada em `main`.
+- Testes especificos da Fase 47 executados com sucesso.
+- Suite completa executada com sucesso no ambiente padrao.
 
-## O que ainda não está concluído
+## O que ainda nao esta concluido
 
-- Auditoria final da Fase 47.
-- Confirmação do CI remoto.
-- Merge da PR `#62`.
-- Versionamento da Fase 47.
-- Suíte completa consolidada no momento deste snapshot.
+- Fase 48 nao iniciada.
+- Nenhuma nova autorizacao para operacao.
 
-## Próxima ação obrigatória
+## Proxima acao obrigatoria
 
-Auditar a Fase 47 no estado real do GitHub antes de qualquer merge ou versionamento.
+Aguardar nova autorizacao explicita antes de iniciar a Fase 48.
 
-## O que não deve ser feito agora
+## O que nao deve ser feito agora
 
-- Não iniciar a Fase 48.
-- Não tratar a PR `#62` como integrada.
-- Não habilitar paper, live, corretora ou ordens.
+- Nao iniciar a Fase 48.
+- Nao reverter a Fase 47.
+- Nao habilitar paper, live, corretora ou ordens.

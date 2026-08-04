@@ -1,8 +1,8 @@
-# Bot-Trader — Pacote de continuidade do projeto
+# Bot-Trader - Pacote de continuidade do projeto
 
 Este pacote existe para permitir que outro desenvolvedor ou outra IA assuma o Bot-Trader sem depender desta conversa.
 
-## Ordem obrigatória de leitura
+## Ordem obrigatoria de leitura
 
 1. [CURRENT_STATE.md](./CURRENT_STATE.md)
 2. [PROJECT_HANDOFF.md](./PROJECT_HANDOFF.md)
@@ -15,17 +15,18 @@ Este pacote existe para permitir que outro desenvolvedor ou outra IA assuma o Bo
 
 ## Aviso central
 
-Não iniciar nova fase antes de verificar o estado real do GitHub.  
-Não tratar PR draft como código integrado.  
-Não habilitar paper, live, rede, corretora ou ordens.
+Nao iniciar nova fase antes de verificar o estado real do GitHub.
+Nao tratar PR draft como codigo integrado.
+Nao habilitar paper, live, rede, corretora ou ordens.
 
 ## Estado resumido
 
-- Última tag integrada: `v0.46.0`
-- Commit de `main`: `6b3f9ed5feadb5b2207f1f452ea94159eec72e33`
-- Fase ativa: Fase 47 — Executor offline neutro e determinístico
-- PR ativa: `#62`
+- Ultima tag integrada: `v0.47.0`
+- Commit de `main`: `abf3d31cf51f9ebcd0321e3281e7b75e28c5a41b`
+- Fase integrada mais recente: Fase 47 - Executor offline neutro e deterministico
+- PR integrada: `#62`
 - Branch: `phase-47-neutral-offline-executor`
 - Head: `c67c7629c315dc97d3ab039bcb6d692e19525b5a`
-- Status: draft, merge pendente, auditoria pendente
-- Próxima ação: auditar a Fase 47 e a PR `#62` no estado real do GitHub
+- Merge commit: `abf3d31cf51f9ebcd0321e3281e7b75e28c5a41b`
+- Status: integrada, versionada e documentada
+- Proxima acao: nao iniciar a Fase 48 sem nova autorizacao explicita

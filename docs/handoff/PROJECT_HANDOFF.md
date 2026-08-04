@@ -9,61 +9,61 @@
 
 ## 2. Objetivo real
 
-O projeto busca construir um sistema de pesquisa algorítmica auditável, reproduzível, determinístico, fail-closed e research-only, com cadeia explícita de autorização e sem promoção automática para operação.
+O projeto busca construir um sistema de pesquisa algoritimica auditavel, reproduzivel, deterministico, fail-closed e research-only, com cadeia explicita de autorizacao e sem promocao automatica para operacao.
 
-## 3. O que o projeto ainda não é
+## 3. O que o projeto ainda nao e
 
-- Não é um sistema live.
-- Não é um sistema paper aprovado.
-- Não está autorizado a enviar ordens.
-- Não possui prova de lucratividade.
-- Não possui estratégia profissional final validada.
-- Não possui validação completa fora da amostra.
-- Não possui capital autorizado.
-- Não possui promoção operacional.
+- Nao e um sistema live.
+- Nao e um sistema paper aprovado.
+- Nao esta autorizado a enviar ordens.
+- Nao possui prova de lucratividade.
+- Nao possui estrategia profissional final validada.
+- Nao possui validacao completa fora da amostra.
+- Nao possui capital autorizado.
+- Nao possui promocao operacional.
 
 ## 4. Filosofia arquitetural
 
 - fail-closed
-- identidade canônica
-- hash de conteúdo
+- identidade canonica
+- hash de conteudo
 - imutabilidade
 - append-only
-- persistência atômica
-- validação na recarga
-- autorização explícita
-- separação entre pesquisa e operação
-- nenhum efeito colateral implícito
-- nenhuma confiança em objetos isolados sem validação da cadeia
+- persistencia atomica
+- validacao na recarga
+- autorizacao explicita
+- separacao entre pesquisa e operacao
+- nenhum efeito colateral implicito
+- nenhuma confianca em objetos isolados sem validacao da cadeia
 
 ## 5. Arquitetura atual resumida
 
 ```text
-referência histórica
+referencia historica
 → contrato do experimento
 → registro do experimento
 → tentativa
 → plano
-→ evidência
-→ autorização
+→ evidencia
+→ autorizacao
 → envelope
-→ executor neutro em desenvolvimento
+→ executor neutro integrado
 ```
 
-Fases já documentadas e integradas: 38, 40, 41, 42, 43, 44, 45, 46.  
-Fase em aberto no momento deste snapshot: 47.
+Fases ja documentadas e integradas: 38, 40, 41, 42, 43, 44, 45, 46, 47.
+Nao ha fase de produto em aberto neste snapshot.
 
 ## 6. Participantes e responsabilidades
 
-- Vitor: dono do projeto e responsável pelas decisões finais
-- ChatGPT: planejamento arquitetural, revisão, auditoria e elaboração de prompts
-- Codex: implementação, testes, Git, branches, commits e PRs
-- DeepSeek: apoio eventual de análise textual
+- Vitor: dono do projeto e responsavel pelas decisoes finais
+- ChatGPT: planejamento arquitetural, revisao, auditoria e elaboracao de prompts
+- Codex: implementacao, testes, Git, branches, commits e PRs
+- DeepSeek: apoio eventual de analise textual
 
 ## 7. Estado atual
 
 Ver [CURRENT_STATE.md](./CURRENT_STATE.md).
 
-## 8. Próxima ação obrigatória
+## 8. Proxima acao obrigatoria
 
-A primeira tarefa do próximo desenvolvedor é verificar e auditar a Fase 47. Não iniciar a Fase 48 antes disso, salvo se o estado real já tiver mudado e isso estiver comprovado.
+A primeira tarefa do proximo desenvolvedor e verificar o estado real do GitHub antes de iniciar qualquer nova fase. Nao iniciar a Fase 48 sem autorizacao explicita e sem confirmar novamente o estado real.
