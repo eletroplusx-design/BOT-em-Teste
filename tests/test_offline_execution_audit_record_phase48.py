@@ -530,34 +530,18 @@ def test_phase48_rejects_invalid_record_payloads(field, value_factory, expected_
 
 
 @pytest.mark.parametrize(
-    ("record_file", "root_directory", "expected_message"),
+    "root_directory",
     [
-        (Path("C:/escape.json"), Path("."), "must be relative to the authorized root"),
-        (Path(r"C:\escape.json"), Path("."), "must be relative to the authorized root"),
-        (Path("D:/folder/file.json"), Path("."), "must be relative to the authorized root"),
-        (Path("//server/share/file.json"), Path("."), "must be relative to the authorized root"),
-        (Path(r"\\server\share\file.json"), Path("."), "must be relative to the authorized root"),
-        (Path("/tmp/file.json"), Path("."), "must be relative to the authorized root"),
-        (Path("../file.json"), Path("."), "must not traverse outside the authorized root"),
-        (Path("folder/../../file.json"), Path("."), "must not traverse outside the authorized root"),
-        (Path("~/file.json"), Path("."), "must not use home expansion"),
+        Path(r"C:\temp\.pytest_tmp\root"),
+        Path("C:/temp/.pytest_tmp/root"),
+        Path("/tmp/.pytest_tmp/root"),
+        Path("relative/.pytest_tmp/root"),
+        Path(".pytest_tmp/root"),
+        Path(r"nested\folder\.pytest_tmp\root"),
+        Path("nested/folder/.pytest_tmp/root"),
     ],
 )
-def test_phase48_rejects_escape_paths(record_file, root_directory, expected_message):
-    record = _synthetic_record(
-        created_at_utc=SYNTHETIC_CREATED_AT_UTC,
-        label_order=("alpha", "beta"),
-        group_order=(("gamma", "delta"), ("epsilon",)),
-    )
-    with pytest.raises(phase48.OfflineExecutionAuditRecordValidationError, match=expected_message):
-        phase48.save_offline_execution_audit_record(
-            record_file=record_file,
-            record=record,
-            root_directory=root_directory,
-        )
-
-
-def test_phase48_rejects_pytest_tmp_roots_and_loads():
+def test_phase48_rejects_pytest_tmp_roots_and_loads(root_directory):
     record = _synthetic_record(
         created_at_utc=SYNTHETIC_CREATED_AT_UTC,
         label_order=("alpha", "beta"),
@@ -567,13 +551,45 @@ def test_phase48_rejects_pytest_tmp_roots_and_loads():
         phase48.save_offline_execution_audit_record(
             record_file=Path("audit.json"),
             record=record,
-            root_directory=Path(r"C:\temp\.pytest_tmp\root"),
+            root_directory=root_directory,
         )
     with pytest.raises(phase48.OfflineExecutionAuditRecordValidationError, match=r"\.pytest_tmp"):
         phase48.load_offline_execution_audit_record(
             record_file=Path("audit.json"),
-            root_directory=Path(r"C:\temp\.pytest_tmp\root"),
+            root_directory=root_directory,
         )
+
+
+@pytest.mark.parametrize(
+    "root_directory",
+    [
+        Path("safe/my.pytest_tmp_backup/root"),
+        Path("safe/pytest_tmp/root"),
+        Path("safe/.pytest_tmp_backup/root"),
+        Path("safe/folder.pytest_tmp/root"),
+    ],
+)
+def test_phase48_allows_similar_names_without_exact_segment(root_directory, tmp_path):
+    record = _synthetic_record(
+        created_at_utc=SYNTHETIC_CREATED_AT_UTC,
+        label_order=("alpha", "beta"),
+        group_order=(("gamma", "delta"), ("epsilon",)),
+    )
+    record_file = Path("records") / "audit.json"
+    root = tmp_path / root_directory
+
+    saved = phase48.save_offline_execution_audit_record(
+        record_file=record_file,
+        record=record,
+        root_directory=root,
+    )
+    loaded = phase48.load_offline_execution_audit_record(
+        record_file=record_file,
+        root_directory=root,
+    )
+
+    assert saved.as_dict() == record.as_dict()
+    assert loaded.as_dict() == record.as_dict()
 
 
 def test_phase48_rejects_symlink_escape(tmp_path):

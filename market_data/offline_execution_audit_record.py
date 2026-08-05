@@ -131,7 +131,8 @@ def _utc_iso(value: datetime) -> str:
 
 
 def _is_temporary_pytest_path(path: Path) -> bool:
-    return any(part == ".pytest_tmp" for part in path.parts)
+    normalized = str(path).replace("\\", "/")
+    return any(part == ".pytest_tmp" for part in normalized.split("/") if part)
 
 
 def _is_windows_rooted_path(path_text: str) -> bool:
