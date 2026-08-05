@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from hashlib import sha256
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from types import MappingProxyType
 from typing import Any, Mapping
 
@@ -132,6 +132,11 @@ def _utc_iso(value: datetime) -> str:
 
 def _is_temporary_pytest_path(path: Path) -> bool:
     return any(part == ".pytest_tmp" for part in path.parts)
+
+
+def _is_windows_rooted_path(path_text: str) -> bool:
+    windows_path = PureWindowsPath(path_text)
+    return bool(windows_path.drive or windows_path.anchor)
 
 
 def _freeze_read_only_value(value: Any) -> Any:
@@ -262,18 +267,16 @@ def _rooted_record_path(
     field_name: str,
 ) -> tuple[Path, Path]:
     root = Path(root_directory) if root_directory is not None else Path.cwd()
-    root_parts = root.parts
     if _is_temporary_pytest_path(root):
         raise OfflineExecutionAuditRecordValidationError(f"{field_name} root must not point to .pytest_tmp.")
     if not isinstance(record_file, (str, Path)):
         raise OfflineExecutionAuditRecordValidationError(f"{field_name} must be a path.")
     candidate = Path(record_file)
-    if candidate.is_absolute():
-        raise OfflineExecutionAuditRecordValidationError(f"{field_name} must be relative to the authorized root.")
-    if candidate.drive or candidate.anchor:
-        raise OfflineExecutionAuditRecordValidationError(f"{field_name} must be relative to the authorized root.")
-    if candidate.parts and candidate.parts[0] == "~":
+    candidate_text = str(candidate)
+    if candidate_text.startswith("~"):
         raise OfflineExecutionAuditRecordValidationError(f"{field_name} must not use home expansion.")
+    if candidate.is_absolute() or _is_windows_rooted_path(candidate_text):
+        raise OfflineExecutionAuditRecordValidationError(f"{field_name} must be relative to the authorized root.")
     if any(part == ".." for part in candidate.parts):
         raise OfflineExecutionAuditRecordValidationError(f"{field_name} must not traverse outside the authorized root.")
     if _is_temporary_pytest_path(candidate):

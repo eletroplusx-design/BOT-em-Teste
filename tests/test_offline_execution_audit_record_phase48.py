@@ -532,11 +532,15 @@ def test_phase48_rejects_invalid_record_payloads(field, value_factory, expected_
 @pytest.mark.parametrize(
     ("record_file", "root_directory", "expected_message"),
     [
-        (Path("..") / "escape.json", Path("."), "must not traverse outside the authorized root"),
         (Path("C:/escape.json"), Path("."), "must be relative to the authorized root"),
-        (Path("/escape.json"), Path("."), "must be relative to the authorized root"),
-        (Path(r"\\server\share\escape.json"), Path("."), "must be relative to the authorized root"),
-        (Path(r"~\escape.json"), Path("."), "must not use home expansion"),
+        (Path(r"C:\escape.json"), Path("."), "must be relative to the authorized root"),
+        (Path("D:/folder/file.json"), Path("."), "must be relative to the authorized root"),
+        (Path("//server/share/file.json"), Path("."), "must be relative to the authorized root"),
+        (Path(r"\\server\share\file.json"), Path("."), "must be relative to the authorized root"),
+        (Path("/tmp/file.json"), Path("."), "must be relative to the authorized root"),
+        (Path("../file.json"), Path("."), "must not traverse outside the authorized root"),
+        (Path("folder/../../file.json"), Path("."), "must not traverse outside the authorized root"),
+        (Path("~/file.json"), Path("."), "must not use home expansion"),
     ],
 )
 def test_phase48_rejects_escape_paths(record_file, root_directory, expected_message):
