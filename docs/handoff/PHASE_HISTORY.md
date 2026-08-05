@@ -250,3 +250,33 @@ Garantias introduzidas:
 - registry append-only
 - idempotencia
 - determinismo de resultado e persistencia
+
+## Fase 48 - registro canonico de auditoria da execucao offline
+
+Status:
+- integrada
+
+Branch:
+- `codex/phase-48-offline-execution-audit-record`
+
+PR:
+- `#64`
+
+Commit principal:
+- `ba1cf11474d817bb55138086fbd68adf3346a912`
+
+Merge commit:
+- `838eb0706b2d3dc35aeef8ea6926e4b7775d14af`
+
+Tag:
+- `v0.48.0`
+
+Objetivo:
+- registrar auditoria offline de execucao com identidade canonica, persistencia atomica e protecoes cross-platform
+
+Garantias introduzidas:
+- audit_record_hash deterministico
+- lineage_hash deterministico
+- created_at_utc fora da identidade
+- freeze e thaw profundos
+- rejeicao de Windows absolute, Unix absolute, UNC, traversal, home expansion e `.pytest_tmp`

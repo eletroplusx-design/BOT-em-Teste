@@ -20,14 +20,20 @@
 - A auditoria final foi concluida.
 - A suite completa foi consolidada no ambiente padrao.
 
-## 4. Estrategia
+## 4. Fase 48
+
+- O registro canonico de auditoria da execucao offline da Fase 48 esta integrado e versionado em `v0.48.0`.
+- As protecoes cross-platform foram validadas em Windows e Linux no CI.
+- Os testes podem ser longos em alguns ambientes, especialmente a validacao da cadeia de fases 45-47.
+
+## 5. Estrategia
 
 - Baseline A e simples e research-only.
 - Nao ha prova de edge suficiente para promocao operacional.
 - Estrategia B ainda nao esta formalizada.
 - Nao ha promocao paper/live.
 
-## 5. Ambiente
+## 6. Ambiente
 
 - Windows
 - possivel warning de `credential-manager-core`
@@ -35,7 +41,7 @@
 - limitacoes de symlink
 - evitar dependencias POSIX
 
-## 6. Operacional
+## 7. Operacional
 
 - sem rede
 - sem corretora
