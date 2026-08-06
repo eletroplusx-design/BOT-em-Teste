@@ -26,14 +26,20 @@
 - As protecoes cross-platform foram validadas em Windows e Linux no CI.
 - Os testes podem ser longos em alguns ambientes, especialmente a validacao da cadeia de fases 45-47.
 
-## 5. Estrategia
+## 5. Fase 49
+
+- O registry offline de auditorias de execucao da Fase 49 esta integrado e versionado em `v0.49.0`.
+- A cadeia append-only, a metadata material e a regra 1:1 de `execution_attempt_id` foram validadas.
+- As regressoes das Fases 41-48 foram executadas com sucesso no ambiente local.
+
+## 6. Estrategia
 
 - Baseline A e simples e research-only.
 - Nao ha prova de edge suficiente para promocao operacional.
 - Estrategia B ainda nao esta formalizada.
 - Nao ha promocao paper/live.
 
-## 6. Ambiente
+## 7. Ambiente
 
 - Windows
 - possivel warning de `credential-manager-core`
@@ -41,7 +47,7 @@
 - limitacoes de symlink
 - evitar dependencias POSIX
 
-## 7. Operacional
+## 8. Operacional
 
 - sem rede
 - sem corretora

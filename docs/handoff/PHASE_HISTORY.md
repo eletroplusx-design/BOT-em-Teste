@@ -280,3 +280,36 @@ Garantias introduzidas:
 - created_at_utc fora da identidade
 - freeze e thaw profundos
 - rejeicao de Windows absolute, Unix absolute, UNC, traversal, home expansion e `.pytest_tmp`
+
+## Fase 49 - registry offline de auditorias de execucao
+
+Status:
+- integrada
+
+Branch:
+- `codex/phase-49-offline-execution-audit-registry`
+
+PR:
+- `#65`
+
+Commit principal:
+- `07cb0856cfef460331d1944b4b0b7408d23fbd00`
+
+Merge commit:
+- `40cc86cc1fb60347211cb335f987cc28ea63a363`
+
+Tag:
+- `v0.49.0`
+
+Objetivo:
+- registrar multiplos audit records da Fase 48 em um registry append-only, idempotente e fail-closed
+
+Garantias introduzidas:
+- registry_entry_id deterministico
+- registry_entry_hash deterministico
+- registry_hash deterministico
+- metadata material e profundamente imutavel
+- cadeia linear com previous_entry_id e previous_entry_hash
+- regra 1:1 para `execution_attempt_id`
+- persistencia atomica e carregamento fail-closed
+- protecao cross-platform para arquivos de registry

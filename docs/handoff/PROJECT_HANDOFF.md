@@ -48,9 +48,10 @@ referencia historica
 → autorizacao
 → envelope
 → executor neutro integrado
+→ registry de auditoria offline
 ```
 
-Fases ja documentadas e integradas: 38, 40, 41, 42, 43, 44, 45, 46, 47, 48.
+Fases ja documentadas e integradas: 38, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49.
 Nao ha fase de produto em aberto neste snapshot.
 
 ## 6. Participantes e responsabilidades
@@ -66,4 +67,4 @@ Ver [CURRENT_STATE.md](./CURRENT_STATE.md).
 
 ## 8. Proxima acao obrigatoria
 
-A primeira tarefa do proximo desenvolvedor e verificar o estado real do GitHub antes de iniciar qualquer nova fase. Nao iniciar a Fase 49 sem autorizacao explicita e sem confirmar novamente o estado real.
+A primeira tarefa do proximo desenvolvedor e verificar o estado real do GitHub antes de iniciar qualquer nova fase. Nao iniciar a Fase 50 sem autorizacao explicita e sem confirmar novamente o estado real.

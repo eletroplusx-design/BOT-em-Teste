@@ -21,12 +21,12 @@ Nao habilitar paper, live, rede, corretora ou ordens.
 
 ## Estado resumido
 
-- Ultima tag integrada: `v0.48.0`
-- Commit de `main`: `838eb0706b2d3dc35aeef8ea6926e4b7775d14af`
-- Fase integrada mais recente: Fase 48 - registro canonico de auditoria da execucao offline
-- PR integrada: `#64`
-- Branch: `codex/phase-48-offline-execution-audit-record`
-- Head: `ba1cf11474d817bb55138086fbd68adf3346a912`
-- Merge commit: `838eb0706b2d3dc35aeef8ea6926e4b7775d14af`
+- Ultima tag integrada: `v0.49.0`
+- Commit de `main`: `40cc86cc1fb60347211cb335f987cc28ea63a363`
+- Fase integrada mais recente: Fase 49 - registry offline de auditorias de execucao
+- PR integrada: `#65`
+- Branch: `codex/phase-49-offline-execution-audit-registry`
+- Head: `07cb0856cfef460331d1944b4b0b7408d23fbd00`
+- Merge commit: `40cc86cc1fb60347211cb335f987cc28ea63a363`
 - Status: integrada, versionada e documentada
-- Proxima acao: nao iniciar a Fase 49 sem nova autorizacao explicita
+- Proxima acao: nao iniciar a Fase 50 sem nova autorizacao explicita
