@@ -350,3 +350,230 @@ def test_phase51_round_trip_and_operational_surface_stay_research_only():
         "websocket",
     ):
         assert forbidden not in source
+
+
+def _mk_event(
+    kind: str,
+    *,
+    timestamp: datetime,
+    candle_index: int,
+    level: int | float,
+    status: str = "confirmed",
+    timeframe: str = "1H",
+) -> phase51._MarketStructureEvent:
+    return phase51._MarketStructureEvent(
+        kind=kind,
+        status=status,
+        timestamp=timestamp,
+        candle_index=candle_index,
+        timeframe=timeframe,
+        level=level,
+    )
+
+
+def _lookahead_series() -> list[dict[str, object]]:
+    return _price_series([100, 104, 101, 99, 110, 103, 98, 97], datetime(2026, 8, 2, 0, 0, tzinfo=timezone.utc))
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "mutator", "expected_exception", "expected_message"),
+    [
+        ({"candles": []}, None, phase51.OfflineMarketStructureDetectorValidationError, "must not be empty"),
+        ({"dataset_hash": "short"}, None, phase51.OfflineMarketStructureDetectorValidationError, "64-character hex digest"),
+        ({"dataset_hash": "g" * 64}, None, phase51.OfflineMarketStructureDetectorValidationError, "64-character hex digest"),
+        ({"symbol": " "}, None, phase51.OfflineMarketStructureDetectorValidationError, "symbol is required"),
+        ({"market": " "}, None, phase51.OfflineMarketStructureDetectorValidationError, "market is required"),
+        ({"provider_name": " "}, None, phase51.OfflineMarketStructureDetectorValidationError, "provider_name is required"),
+        ({"timeframe": " "}, None, phase51.OfflineMarketStructureDetectorValidationError, "timeframe is required"),
+        (
+            {"created_at_utc": datetime(2026, 8, 5, 0, 0)},
+            None,
+            phase51.OfflineMarketStructureDetectorValidationError,
+            "timezone-aware UTC datetime",
+        ),
+        (
+            {"candles_by_timeframe": {"4H": _price_series([100, 101, 102], datetime(2026, 8, 1, 0, 0, tzinfo=timezone.utc), hours=4)}},
+            None,
+            phase51.OfflineMarketStructureDetectorValidationError,
+            "primary timeframe candles are required",
+        ),
+        (
+            {"candles_by_timeframe": {"1H": _price_series([100, 101, 102], datetime(2026, 8, 1, 0, 0, tzinfo=timezone.utc))}},
+            lambda candles, kwargs, contract: kwargs.__setitem__("candles", _price_series([100, 101, 102, 103], datetime(2026, 8, 1, 0, 0, tzinfo=timezone.utc))),
+            phase51.OfflineMarketStructureDetectorValidationError,
+            "primary candles must match the primary timeframe series",
+        ),
+        (None, lambda candles, kwargs, contract: candles[1].__setitem__("timestamp", candles[0]["timestamp"]), phase51.OfflineMarketStructureDetectorValidationError, "strictly ascending"),
+        (None, lambda candles, kwargs, contract: candles[1].__setitem__("timestamp", candles[0]["timestamp"] + timedelta(hours=2)), phase51.OfflineMarketStructureDetectorValidationError, "missing or misaligned"),
+        (None, lambda candles, kwargs, contract: candles[0].update({"complete": False}), phase51.OfflineMarketStructureDetectorValidationError, "incomplete candle"),
+        (None, lambda candles, kwargs, contract: candles[0].update({"high": 101, "close": 103}), phase51.OfflineMarketStructureDetectorValidationError, "high must cover open and close"),
+        (None, lambda candles, kwargs, contract: candles[0].update({"low": 97, "close": 95}), phase51.OfflineMarketStructureDetectorValidationError, "low must cover open and close"),
+        (None, lambda candles, kwargs, contract: candles[0].update({"volume": -1}), phase51.OfflineMarketStructureDetectorValidationError, "non-negative"),
+        (None, lambda candles, kwargs, contract: candles[0].update({"open": True}), phase51.OfflineMarketStructureDetectorValidationError, "numeric"),
+        ({"contract": object()}, None, phase51.OfflineMarketStructureDetectorValidationError, "verified market structure research contract"),
+        (None, lambda candles, kwargs, contract: object.__setattr__(contract, "contract_hash", "0" * 64), phase50.MarketStructureResearchContractIntegrityError, "contract_hash mismatch"),
+        (None, lambda candles, kwargs, contract: object.__setattr__(contract, "contract_id", "0" * 64), phase50.MarketStructureResearchContractIntegrityError, "contract_id mismatch"),
+    ],
+)
+def test_phase51_rejects_validation_matrix(kwargs, mutator, expected_exception, expected_message):
+    candles = _price_series([100, 104, 101, 99, 110, 103], datetime(2026, 8, 5, 0, 0, tzinfo=timezone.utc))
+    contract = _build_contract()
+    input_kwargs = {
+        "candles": candles,
+        "contract": contract,
+        "timeframe": "1H",
+        "symbol": "BTC-USDT",
+        "market": "spot",
+        "provider_name": "synthetic",
+        "dataset_hash": PHASE51_DATASET_HASH,
+        "created_at_utc": PHASE51_CREATED_AT_UTC,
+    }
+    if kwargs:
+        input_kwargs.update(kwargs)
+    if mutator is not None:
+        mutator(candles, input_kwargs, contract)
+
+    with pytest.raises(expected_exception, match=expected_message):
+        phase51.build_market_structure_detection_input(**input_kwargs)
+
+
+@pytest.mark.parametrize(
+    ("mutator", "pivot_expected", "expected_candidate_kinds"),
+    [
+        (lambda candles: candles.__setitem__(7, _candle(candles[7]["timestamp"], open_=96, high=98, low=94, close=95, volume=107)), True, ()),
+        (lambda candles: candles[6].__setitem__("high", 140), False, ()),
+        (lambda candles: candles.__setitem__(4, _candle(candles[4]["timestamp"], open_=100, high=101, low=97, close=98, volume=104)), False, ()),
+        (lambda candles: candles.extend([_candle(candles[-1]["timestamp"] + timedelta(hours=1), open_=130, high=140, low=128, close=135, volume=108)]), True, ("candidate_swing_high",)),
+    ],
+)
+def test_phase51_lookahead_is_window_bound_and_candidates_stay_transitional(mutator, pivot_expected, expected_candidate_kinds):
+    candles = _lookahead_series()
+    mutator(candles)
+    normalized = tuple(
+        phase51._MarketCandle(
+            item["timestamp"],
+            item["open"],
+            item["high"],
+            item["low"],
+            item["close"],
+            item["volume"],
+            item["complete"],
+        )
+        for item in candles
+    )
+    contract = _build_contract()
+    events, confirmed_highs, confirmed_lows = phase51._detect_swings(
+        normalized,
+        timeframe="1H",
+        swing_definition=contract.swing_definition.parameters,
+    )
+
+    candidate_kinds = {event.kind for event in events if event.kind.startswith("candidate_")}
+    pivot_timestamp = normalized[4].timestamp
+    assert (any(event.timestamp == pivot_timestamp for event in confirmed_highs)) is pivot_expected
+    assert candidate_kinds.issuperset(expected_candidate_kinds)
+    assert all(event.timestamp <= normalized[7].timestamp for event in confirmed_lows)
+
+
+@pytest.mark.parametrize(
+    ("confirmed_highs", "confirmed_lows", "minimum_swing_count", "tolerance", "expected"),
+    [
+        ([110, 120], [90, 95], 3, 1, "bullish"),
+        ([120, 110], [95, 90], 3, 1, "bearish"),
+        ([100, 100], [99, 99], 3, 1, "lateral"),
+        ([100, 105], [90, 85], 3, 1, "ambiguous"),
+        ([100], [99], 3, 1, "indeterminate"),
+    ],
+)
+def test_phase51_classifies_structure_states_canonically(
+    confirmed_highs,
+    confirmed_lows,
+    minimum_swing_count,
+    tolerance,
+    expected,
+):
+    base = datetime(2026, 8, 3, 0, 0, tzinfo=timezone.utc)
+    swing_highs = tuple(
+        _mk_event("confirmed_swing_high", timestamp=base + timedelta(hours=index), candle_index=index, level=level)
+        for index, level in enumerate(confirmed_highs)
+    )
+    swing_lows = tuple(
+        _mk_event("confirmed_swing_low", timestamp=base + timedelta(hours=index + 10), candle_index=index + 10, level=level)
+        for index, level in enumerate(confirmed_lows)
+    )
+
+    assert phase51._classify_structure(
+        swing_highs,
+        swing_lows,
+        minimum_swing_count=minimum_swing_count,
+        lateral_range_tolerance=tolerance,
+    ) == expected
+
+
+@pytest.mark.parametrize(
+    ("mutator", "expected_exception", "expected_message"),
+    [
+        (lambda payload: payload["events"][0].update({"extra": True}), phase51.OfflineMarketStructureDetectorValidationError, "unexpected"),
+        (lambda payload: payload.__setitem__("extra_field", True), phase51.OfflineMarketStructureDetectorValidationError, "unexpected"),
+        (lambda payload: payload["events"].reverse(), None, None),
+        (lambda payload: payload.pop("metadata"), phase51.OfflineMarketStructureDetectorValidationError, "missing metadata"),
+    ],
+)
+def test_phase51_round_trip_rejects_extra_fields_and_preserves_ordering(mutator, expected_exception, expected_message):
+    result = phase51.detect_market_structure(_swing_bos_input())
+    payload = copy.deepcopy(result.as_dict())
+
+    if expected_exception is None:
+        mutator(payload)
+        rebuilt = phase51.market_structure_detection_result_from_dict(payload)
+        assert rebuilt.detection_result_id == result.detection_result_id
+        assert rebuilt.detection_result_hash == result.detection_result_hash
+        assert rebuilt.as_dict() == result.as_dict()
+        assert phase51.market_structure_detection_result_to_dict(rebuilt) == result.as_dict()
+    else:
+        mutator(payload)
+        with pytest.raises(expected_exception, match=expected_message):
+            phase51.market_structure_detection_result_from_dict(payload)
+
+
+@pytest.mark.parametrize(
+    ("factory", "expected_before", "expected_after"),
+    [
+        (
+            lambda: (
+                {"1H": tuple(_lookahead_series())},
+                {"1H": tuple(_lookahead_series())},
+            ),
+            1,
+            1,
+        ),
+        (
+            lambda: (
+                {"1H": _lookahead_series(), "4H": _price_series([150, 151, 152, 153], datetime(2026, 8, 2, 0, 0, tzinfo=timezone.utc), hours=4)},
+                {"1H": _lookahead_series(), "4H": _price_series([150, 151, 152, 153], datetime(2026, 8, 2, 0, 0, tzinfo=timezone.utc), hours=4)},
+            ),
+            2,
+            2,
+        ),
+    ],
+)
+def test_phase51_freezes_candles_by_timeframe_and_source_independence(factory, expected_before, expected_after):
+    by_timeframe, source = factory()
+    contract = _build_contract()
+    normalized = phase51.build_market_structure_detection_input(
+        contract=contract,
+        candles=by_timeframe["1H"],
+        candles_by_timeframe=by_timeframe,
+        timeframe="1H",
+        symbol="BTC-USDT",
+        market="spot",
+        provider_name="synthetic",
+        dataset_hash=PHASE51_DATASET_HASH,
+        created_at_utc=PHASE51_CREATED_AT_UTC,
+        metadata=_metadata_a(),
+    )
+
+    assert len(normalized.candles_by_timeframe) == expected_before
+    source["1H"] = tuple()
+    assert len(normalized.candles_by_timeframe) == expected_after
+    assert normalized.candles_by_timeframe["1H"] == normalized.candles

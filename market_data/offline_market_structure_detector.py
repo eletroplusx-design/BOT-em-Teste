@@ -73,6 +73,20 @@ def _require_str(value: Any, field_name: str) -> str:
     return value.strip()
 
 
+def _require_exact_keys(mapping: Mapping[str, Any], field_name: str, expected_keys: set[str]) -> None:
+    extra = sorted(set(mapping) - expected_keys)
+    missing = sorted(expected_keys - set(mapping))
+    if extra or missing:
+        parts: list[str] = []
+        if missing:
+            parts.append(f"missing {', '.join(missing)}")
+        if extra:
+            parts.append(f"unexpected {', '.join(extra)}")
+        raise OfflineMarketStructureDetectorValidationError(
+            f"{field_name} has invalid fields: {'; '.join(parts)}."
+        )
+
+
 def _require_bool(value: Any, field_name: str) -> bool:
     if type(value) is not bool:
         raise OfflineMarketStructureDetectorValidationError(f"{field_name} must be a boolean.")
@@ -332,13 +346,12 @@ def _normalize_candles_by_timeframe(
             incomplete_candle_policy=incomplete_candle_policy,
         )
 
-    if primary_timeframe in normalized:
-        if normalized[primary_timeframe] != primary_candles:
-            raise OfflineMarketStructureDetectorValidationError(
-                "primary candles must match the primary timeframe series."
-            )
-    else:
-        normalized[primary_timeframe] = primary_candles
+    if primary_timeframe not in normalized:
+        raise OfflineMarketStructureDetectorValidationError("primary timeframe candles are required.")
+    if normalized[primary_timeframe] != primary_candles:
+        raise OfflineMarketStructureDetectorValidationError(
+            "primary candles must match the primary timeframe series."
+        )
 
     return _freeze_read_only_value(normalized)
 
@@ -526,6 +539,22 @@ class _MarketStructureEvent:
     def from_dict(cls, data: Mapping[str, Any]) -> "_MarketStructureEvent":
         if not isinstance(data, Mapping):
             raise OfflineMarketStructureDetectorValidationError("event must be a mapping.")
+        _require_exact_keys(
+            data,
+            "event",
+            {
+                "kind",
+                "status",
+                "timestamp",
+                "candle_index",
+                "timeframe",
+                "level",
+                "direction",
+                "related_candle_index",
+                "related_timestamp",
+                "details",
+            },
+        )
         return cls(
             kind=data["kind"],
             status=data["status"],
@@ -1378,14 +1407,15 @@ class MarketStructureDetectionInput:
                     incomplete_candle_policy=self.incomplete_candle_policy,
                 )
             elif self.timeframe not in normalized_by_timeframe:
-                normalized_by_timeframe = _freeze_read_only_value(
-                    {**dict(normalized_by_timeframe), self.timeframe: normalized_candles}
+                raise OfflineMarketStructureDetectorValidationError(
+                    "primary timeframe candles are required."
                 )
             else:
                 if normalized_by_timeframe[self.timeframe] != normalized_candles:
                     raise OfflineMarketStructureDetectorValidationError(
                         "primary candles must match the primary timeframe series."
                     )
+                normalized_by_timeframe = _freeze_read_only_value(dict(normalized_by_timeframe))
         object.__setattr__(self, "candles_by_timeframe", normalized_by_timeframe)
         object.__setattr__(self, "metadata", _freeze_read_only_value(dict(self.metadata)))
         if self.ordering_policy != "strict_ascending_timestamp":
@@ -1570,6 +1600,33 @@ class MarketStructureDetectionResult:
     def from_dict(cls, data: Mapping[str, Any]) -> "MarketStructureDetectionResult":
         if not isinstance(data, Mapping):
             raise OfflineMarketStructureDetectorValidationError("market structure detection result must be a mapping.")
+        _require_exact_keys(
+            data,
+            "market structure detection result",
+            {
+                "schema_version",
+                "detection_result_id",
+                "detection_result_hash",
+                "contract_id",
+                "contract_hash",
+                "dataset_hash",
+                "symbol",
+                "market",
+                "timeframe",
+                "first_timestamp",
+                "last_timestamp",
+                "candle_count",
+                "events",
+                "final_structure_state",
+                "macro_context",
+                "intermediate_context",
+                "micro_context",
+                "ambiguity_state",
+                "invalidation_state",
+                "created_at_utc",
+                "metadata",
+            },
+        )
         try:
             return cls(
                 schema_version=data["schema_version"],
