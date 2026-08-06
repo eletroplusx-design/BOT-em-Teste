@@ -32,14 +32,21 @@
 - A cadeia append-only, a metadata material e a regra 1:1 de `execution_attempt_id` foram validadas.
 - As regressoes das Fases 41-48 foram executadas com sucesso no ambiente local.
 
-## 6. Estrategia
+## 6. Fase 50
+
+- O MarketStructureResearchContract da Fase 50 esta integrado e versionado em `v0.50.0`.
+- O contrato e declarativo, research-only e profundamente imutavel.
+- A metadata material continua sendo parte da identidade canonica e suporta estruturas aninhadas congeladas.
+- As regressoes das Fases 38-49 foram executadas com sucesso no ambiente local.
+
+## 7. Estrategia
 
 - Baseline A e simples e research-only.
 - Nao ha prova de edge suficiente para promocao operacional.
 - Estrategia B ainda nao esta formalizada.
 - Nao ha promocao paper/live.
 
-## 7. Ambiente
+## 8. Ambiente
 
 - Windows
 - possivel warning de `credential-manager-core`
@@ -47,7 +54,7 @@
 - limitacoes de symlink
 - evitar dependencias POSIX
 
-## 8. Operacional
+## 9. Operacional
 
 - sem rede
 - sem corretora

@@ -313,3 +313,35 @@ Garantias introduzidas:
 - regra 1:1 para `execution_attempt_id`
 - persistencia atomica e carregamento fail-closed
 - protecao cross-platform para arquivos de registry
+
+## Fase 50 - contrato de pesquisa de estrutura de mercado
+
+Status:
+- integrada
+
+Branch:
+- `codex/phase-50-market-structure-research-contract`
+
+PR:
+- `#66`
+
+Commit principal:
+- `bd9bb8a0765efc9ee0517772cd0a184b71347a6e`
+
+Merge commit:
+- `b991e2e254d2558da6513ff9d64361f273747eda`
+
+Tag:
+- `v0.50.0`
+
+Objetivo:
+- declarar um contrato de pesquisa de estrutura de mercado, deterministicamente canonico, profundamente imutavel e sem qualquer comportamento operacional
+
+Garantias introduzidas:
+- contract_id deterministico
+- contract_hash deterministico
+- created_at_utc fora da identidade
+- metadata material e profundamente imutavel
+- canonicalizacao estavel
+- round-trip fail-closed
+- ausencia de detector, classificacao automatica, sinais, entrada, stop, alvo, replay, backtest, walk-forward, paper, live, corretora, ordens e rede
