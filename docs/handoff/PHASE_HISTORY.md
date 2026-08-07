@@ -379,3 +379,40 @@ Garantias introduzidas:
 - ambiguous e indeterminate como saidas legitimas
 - deep freeze e round-trip fail-closed
 - ausencia de sinais, replay, backtest, walk-forward, paper, live, corretora, ordens e rede
+
+## Fase 53 - avaliacao de hipoteses de estrutura de mercado
+
+Status:
+- integrada
+
+Branch:
+- `codex/phase-53-market-structure-hypothesis-evaluation`
+
+PR:
+- `#69`
+
+Commit principal:
+- `d46fb88a71a13601c0d64b4d78bd9efaeeea603f`
+
+Merge commit:
+- `01d203c51500ad5b7c5af19d6bda1f91cd0a14c3`
+
+Tag:
+- `v0.53.0`
+
+Objetivo:
+- avaliar hipoteses de estrutura de mercado de forma offline, deterministica, explicavel e research-only, sem scoring nem promocao operacional
+
+Garantias introduzidas:
+- hypothesis_id deterministico
+- hypothesis_hash deterministico
+- evaluation_id deterministico
+- evaluation_hash deterministico
+- annotation_collection_hash persistido e validado
+- supporting e contradicting evidence canonicos
+- invalidation_reasons precedem quando aplicavel
+- Unknown preservado como hipoteses legitima
+- multi-timeframe explicito com contexto canonicalizado
+- created_at_utc fora da identidade
+- deep freeze e round-trip fail-closed
+- ausencia de score, confidence, probability, ranking, BUY, SELL, LONG, SHORT, replay, backtest, walk-forward, paper, live, corretora, ordens e rede

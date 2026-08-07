@@ -21,12 +21,12 @@ Nao habilitar paper, live, rede, corretora ou ordens.
 
 ## Estado resumido
 
-- Ultima tag integrada: `v0.51.0`
-- Commit de `main`: `c4936dc98924c5d957489d1313786ab9d775e2f2`
-- Fase integrada mais recente: Fase 51 - detector offline de estrutura de mercado
-- PR integrada: `#67`
-- Branch: `codex/phase-51-offline-market-structure-detector`
-- Head: `c62e32ce9e5fca1aec9776b57e327d6d393d4ddc`
-- Merge commit: `c4936dc98924c5d957489d1313786ab9d775e2f2`
+- Ultima tag integrada: `v0.53.0`
+- Commit de `main`: `01d203c51500ad5b7c5af19d6bda1f91cd0a14c3`
+- Fase integrada mais recente: Fase 53 - avaliacao de hipoteses de estrutura de mercado
+- PR integrada: `#69`
+- Branch: `codex/phase-53-market-structure-hypothesis-evaluation`
+- Head: `d46fb88a71a13601c0d64b4d78bd9efaeeea603f`
+- Merge commit: `01d203c51500ad5b7c5af19d6bda1f91cd0a14c3`
 - Status: integrada, versionada e documentada
-- Proxima acao: nao iniciar a Fase 52 sem nova autorizacao explicita
+- Proxima acao: nao iniciar a Fase 54 sem nova autorizacao explicita

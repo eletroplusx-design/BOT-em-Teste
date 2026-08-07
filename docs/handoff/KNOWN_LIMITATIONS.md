@@ -46,14 +46,21 @@
 - Look-ahead, ambiguidade e indeterminacao continuam tratados de forma fail-closed.
 - As regressoes das Fases 48-50 foram executadas com sucesso no ambiente local.
 
-## 8. Estrategia
+## 8. Fase 53
+
+- A avaliacao de hipoteses de estrutura de mercado da Fase 53 esta integrada e versionada em `v0.53.0`.
+- Hipoteses concorrentes continuam permitidas quando sustentadas por evidencias canonicas diferentes.
+- `Unknown` permanece uma saida valida e nao implica sinal, score, probabilidade ou ranking.
+- As regressoes das Fases 50-52 foram executadas com sucesso no ambiente local.
+
+## 9. Estrategia
 
 - Baseline A e simples e research-only.
 - Nao ha prova de edge suficiente para promocao operacional.
 - Estrategia B ainda nao esta formalizada.
 - Nao ha promocao paper/live.
 
-## 9. Ambiente
+## 10. Ambiente
 
 - Windows
 - possivel warning de `credential-manager-core`
@@ -61,7 +68,7 @@
 - limitacoes de symlink
 - evitar dependencias POSIX
 
-## 10. Operacional
+## 11. Operacional
 
 - sem rede
 - sem corretora
