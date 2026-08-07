@@ -416,3 +416,38 @@ Garantias introduzidas:
 - created_at_utc fora da identidade
 - deep freeze e round-trip fail-closed
 - ausencia de score, confidence, probability, ranking, BUY, SELL, LONG, SHORT, replay, backtest, walk-forward, paper, live, corretora, ordens e rede
+
+## Fase 54 - avaliacao de evidencias de estrutura de mercado
+
+Status:
+- integrada
+
+Branch:
+- `codex/phase-54-market-structure-evidence-assessment`
+
+PR:
+- `#70`
+
+Commit principal:
+- `f3b521937f5b98697560967acf3147d0b36123ff`
+
+Merge commit:
+- `42ab3bbcaab6e05a32d14047d85a026ce5a86931`
+
+Tag:
+- `v0.54.0`
+
+Objetivo:
+- avaliar evidencias estruturais de forma offline, deterministica, explicavel e research-only, sem scoring, ranking ou promocao operacional
+
+Garantias introduzidas:
+- evidence_id deterministico
+- assessment_id deterministico
+- assessment_hash deterministico
+- provenance_group_id deterministico
+- evidence_matrix canonica com families observadas apenas
+- families ausentes omitidas da matriz
+- support, contradiction, ambiguity e invalidation preservados
+- evidence_items, provenance_groups e evidence_matrix profundamente imutaveis
+- assessment vazio canonico permitido
+- ausencia de score, confidence, probability, ranking, BUY, SELL, LONG, SHORT, replay, backtest, walk-forward, paper, live, corretora, ordens e rede

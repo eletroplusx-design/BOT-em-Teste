@@ -5,9 +5,9 @@ Antes de alterar qualquer arquivo, leia todos os documentos em `docs/handoff`.
 Nao confie cegamente no snapshot.
 Confirme o estado real do GitHub, branches, tags, PRs, CI e working tree.
 
-A Fase 51 ja foi integrada e versionada. A primeira tarefa do proximo desenvolvedor e confirmar o estado real atual antes de iniciar qualquer nova fase.
+A Fase 54 ja foi integrada e versionada. A primeira tarefa do proximo desenvolvedor e confirmar o estado real atual antes de iniciar qualquer nova fase.
 
-Nao inicie a Fase 54 sem autorizacao explicita e sem concluir uma nova verificacao do estado real.
+Nao inicie a Fase 55 sem autorizacao explicita e sem concluir uma nova verificacao do estado real.
 
 Nao execute Baseline A.
 Nao gere sinais.
