@@ -39,14 +39,21 @@
 - A metadata material continua sendo parte da identidade canonica e suporta estruturas aninhadas congeladas.
 - As regressoes das Fases 38-49 foram executadas com sucesso no ambiente local.
 
-## 7. Estrategia
+## 7. Fase 51
+
+- O detector offline de estrutura de mercado da Fase 51 esta integrado e versionado em `v0.51.0`.
+- A identidade canonica do resultado depende da cadeia de validacao e da ordem canonica dos eventos.
+- Look-ahead, ambiguidade e indeterminacao continuam tratados de forma fail-closed.
+- As regressoes das Fases 48-50 foram executadas com sucesso no ambiente local.
+
+## 8. Estrategia
 
 - Baseline A e simples e research-only.
 - Nao ha prova de edge suficiente para promocao operacional.
 - Estrategia B ainda nao esta formalizada.
 - Nao ha promocao paper/live.
 
-## 8. Ambiente
+## 9. Ambiente
 
 - Windows
 - possivel warning de `credential-manager-core`
@@ -54,7 +61,7 @@
 - limitacoes de symlink
 - evitar dependencias POSIX
 
-## 9. Operacional
+## 10. Operacional
 
 - sem rede
 - sem corretora

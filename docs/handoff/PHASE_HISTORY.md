@@ -345,3 +345,37 @@ Garantias introduzidas:
 - canonicalizacao estavel
 - round-trip fail-closed
 - ausencia de detector, classificacao automatica, sinais, entrada, stop, alvo, replay, backtest, walk-forward, paper, live, corretora, ordens e rede
+
+## Fase 51 - detector offline de estrutura de mercado
+
+Status:
+- integrada
+
+Branch:
+- `codex/phase-51-offline-market-structure-detector`
+
+PR:
+- `#67`
+
+Commit principal:
+- `c62e32ce9e5fca1aec9776b57e327d6d393d4ddc`
+
+Merge commit:
+- `c4936dc98924c5d957489d1313786ab9d775e2f2`
+
+Tag:
+- `v0.51.0`
+
+Objetivo:
+- detectar estrutura de mercado de forma offline, deterministica, research-only e sem habilitar operacao
+
+Garantias introduzidas:
+- detection_result_id deterministico
+- detection_result_hash deterministico
+- event_id e event_hash deterministicos quando aplicaveis
+- timestamp fora da identidade canonica
+- ordenacao canonica dos eventos
+- look-ahead controlado pela right_window declarada
+- ambiguous e indeterminate como saidas legitimas
+- deep freeze e round-trip fail-closed
+- ausencia de sinais, replay, backtest, walk-forward, paper, live, corretora, ordens e rede

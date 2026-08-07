@@ -2,19 +2,19 @@
 
 ## Snapshot
 
-Data e hora UTC: 2026-08-06T16:12:29.9701496Z
-Data e hora local: 2026-08-06T13:12:29.9701496-03:00
+Data e hora UTC: 2026-08-07T01:03:33.4083841Z
+Data e hora local: 2026-08-06T22:03:12.6206848-03:00
 
 ## Ultima versao integrada
 
-Tag: `v0.50.0`
-Commit: `b991e2e254d2558da6513ff9d64361f273747eda`
-PR correspondente: `#66`
+Tag: `v0.51.0`
+Commit: `c4936dc98924c5d957489d1313786ab9d775e2f2`
+PR correspondente: `#67`
 
 ## Main
 
-HEAD: `b991e2e254d2558da6513ff9d64361f273747eda`
-origin/main: `b991e2e254d2558da6513ff9d64361f273747eda`
+HEAD: `c4936dc98924c5d957489d1313786ab9d775e2f2`
+origin/main: `c4936dc98924c5d957489d1313786ab9d775e2f2`
 working tree: limpa
 
 ## Trabalho aberto
@@ -42,18 +42,23 @@ Nenhum trabalho de produto em aberto.
 - MarketStructureResearchContract declarativo e research-only validado.
 - metadata material e profundamente imutavel confirmada.
 - Regressao das Fases 38-49 executada com sucesso.
+- Fase 51 integrada e versionada em `v0.51.0`.
+- PR `#67` mesclada em `main`.
+- Detector offline de estrutura de mercado validado.
+- Look-ahead controlado, ordem canonica e ambiguidade explicitada.
+- Regressao das Fases 48-50 executada com sucesso.
 
 ## O que ainda nao esta concluido
 
-- Fase 51 nao iniciada.
+- Fase 52 nao iniciada.
 - Nenhuma nova autorizacao para operacao.
 
 ## Proxima acao obrigatoria
 
-Aguardar nova autorizacao explicita antes de iniciar a Fase 51.
+Aguardar nova autorizacao explicita antes de iniciar a Fase 52.
 
 ## O que nao deve ser feito agora
 
-- Nao iniciar a Fase 51.
+- Nao iniciar a Fase 52.
 - Nao reverter a Fase 47.
 - Nao habilitar paper, live, corretora ou ordens.
