@@ -451,3 +451,36 @@ Garantias introduzidas:
 - evidence_items, provenance_groups e evidence_matrix profundamente imutaveis
 - assessment vazio canonico permitido
 - ausencia de score, confidence, probability, ranking, BUY, SELL, LONG, SHORT, replay, backtest, walk-forward, paper, live, corretora, ordens e rede
+
+## Fase 55 - consolidacao estrutural de hipoteses
+
+Status:
+- integrada
+
+Branch:
+- `codex/phase-55-market-structure-structural-assessment`
+
+PR:
+- `#71`
+
+Commit principal:
+- `76368e85364eb5f5f108ea83c789e8c29d9deecb`
+
+Merge commit:
+- `4f45a99e9fc3c3b69947937a1113286836606f98`
+
+Tag:
+- `v0.55.0`
+
+Objetivo:
+- consolidar evidencias estruturais em uma avaliacao por hipotese, deterministicamente canonica, profundamente imutavel e sem qualquer comportamento operacional
+
+Garantias introduzidas:
+- structural_state deterministico
+- dimension summaries esparsos por dimensao observada
+- absent omitido em vez de materializado como neutral
+- supporting, contradicting, ambiguous, indeterminate, invalidated, neutral e empty preservados
+- invalidation precedence preservada
+- provenance preservada sem contagem implicita
+- multi-timeframe sem escolha automatica de vencedor
+- ausencia de score, confidence, probability, ranking, signal, replay, backtest, walk-forward, paper, live, corretora, ordens e rede

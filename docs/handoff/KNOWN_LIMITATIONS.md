@@ -60,7 +60,14 @@
 - Estrategia B ainda nao esta formalizada.
 - Nao ha promocao paper/live.
 
-## 10. Ambiente
+## 10. Fase 55
+
+- A Fase 55 esta integrada e versionada em `v0.55.0`.
+- A consolidacao estrutural por hipotese preserva absent != neutral, conflito, invalidacao e provenance sem scoring.
+- A ausencia de majority voting, signal e promocao operacional permanece obrigatoria.
+- As regressoes das Fases 53-54 foram aprovadas no ambiente local.
+
+## 11. Ambiente
 
 - Windows
 - possivel warning de `credential-manager-core`
@@ -68,7 +75,7 @@
 - limitacoes de symlink
 - evitar dependencias POSIX
 
-## 11. Operacional
+## 12. Operacional
 
 - sem rede
 - sem corretora

@@ -18,12 +18,12 @@ Nao conecte corretora.
 Nao envie ordens.
 
 Estado de referencia do snapshot:
-- Fase 53 integrada e versionada
-- branch: `codex/phase-53-market-structure-hypothesis-evaluation`
-- head: `d46fb88a71a13601c0d64b4d78bd9efaeeea603f`
-- PR: `#69`
-- merge commit: `01d203c51500ad5b7c5af19d6bda1f91cd0a14c3`
-- tag: `v0.53.0`
+- Fase 55 integrada e versionada
+- branch: `codex/phase-55-market-structure-structural-assessment`
+- head: `76368e85364eb5f5f108ea83c789e8c29d9deecb`
+- PR: `#71`
+- merge commit: `4f45a99e9fc3c3b69947937a1113286836606f98`
+- tag: `v0.55.0`
 - CI: sucesso
 
 Trate `CURRENT_STATE.md` como snapshot e nao como verdade eterna.
