@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "project": {
+    "name": "BOT-em-Teste",
+    "repository": "eletroplusx-design/BOT-em-Teste",
+    "primary_environment": "Windows",
+    "known_local_path": "C:\\Users\\Vitor\\Desktop\\meu_app_trading"
+  },
+  "snapshot": {
+    "created_at_utc": "2026-08-07T11:27:23Z",
+    "main_commit": "a19d3eb1ded6203ae23c430ecaa07628883dd476",
+    "last_integrated_tag": "v0.52.0",
+    "working_tree_clean": true
+  },
+  "active_work": {
+    "phase": 52,
+    "name": "Market Structure Annotation Layer",
+    "branch": "codex/phase-52-market-structure-annotation-layer",
+    "pull_request": 68,
+    "pull_request_state": "MERGED",
+    "draft": false,
+    "head_sha": "c38cda230a2013d67d3d71a34ff2cfef96475f57",
+    "merge_commit": "a19d3eb1ded6203ae23c430ecaa07628883dd476",
+    "ci_status": "SUCCESS",
+    "status": "completed"
+  },
+  "safety": {
+    "historical_research_only": true,
+    "operational_evidence": false,
+    "paper_promotion_eligible": false,
+    "paper_enabled": false,
+    "live_enabled": false,
+    "exchange_connectivity_enabled": false,
+    "order_submission_enabled": false
+  },
+  "next_required_action": "await_phase_53_authorization",
+  "documents": [
+    "README.md",
+    "PROJECT_HANDOFF.md",
+    "CURRENT_STATE.md",
+    "PHASE_HISTORY.md",
+    "ENGINEERING_GUARDRAILS.md",
+    "STRATEGY_RESEARCH_NOTES.md",
+    "KNOWN_LIMITATIONS.md",
+    "TESTING_AND_RELEASE_PROCESS.md",
+    "NEXT_DEVELOPER_PROMPT.md",
+    "PROMPT_HISTORY_INDEX.md"
+  ]
+}
