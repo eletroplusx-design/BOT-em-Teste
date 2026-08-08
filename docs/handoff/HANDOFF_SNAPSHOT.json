@@ -7,20 +7,20 @@
     "known_local_path": "C:\\Users\\Vitor\\Desktop\\meu_app_trading"
   },
   "snapshot": {
-    "created_at_utc": "2026-08-07T23:11:10.0462771Z",
-    "main_commit": "4f45a99e9fc3c3b69947937a1113286836606f98",
-    "last_integrated_tag": "v0.55.0",
+    "created_at_utc": "2026-08-08T02:14:58Z",
+    "main_commit": "4bedecce3d451d4f0b2cf5cd1df90b257bf77cb0",
+    "last_integrated_tag": "v0.56.0",
     "working_tree_clean": true
   },
   "active_work": {
-    "phase": 55,
-    "name": "Market Structure Structural Assessment",
-    "branch": "codex/phase-55-market-structure-structural-assessment",
-    "pull_request": 71,
+    "phase": 56,
+    "name": "Temporal Structural Validation",
+    "branch": "codex/phase-56-temporal-structural-validation",
+    "pull_request": 72,
     "pull_request_state": "MERGED",
     "draft": false,
-    "head_sha": "76368e85364eb5f5f108ea83c789e8c29d9deecb",
-    "merge_commit": "4f45a99e9fc3c3b69947937a1113286836606f98",
+    "head_sha": "8d98106e3ded2f72d1d3eced5d3db298f227d8fb",
+    "merge_commit": "4bedecce3d451d4f0b2cf5cd1df90b257bf77cb0",
     "ci_status": "SUCCESS",
     "status": "completed"
   },
@@ -33,7 +33,7 @@
     "exchange_connectivity_enabled": false,
     "order_submission_enabled": false
   },
-    "next_required_action": "await_phase_56_authorization",
+    "next_required_action": "await_phase_57_authorization",
   "documents": [
     "README.md",
     "PROJECT_HANDOFF.md",

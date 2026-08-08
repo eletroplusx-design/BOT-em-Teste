@@ -484,3 +484,36 @@ Garantias introduzidas:
 - provenance preservada sem contagem implicita
 - multi-timeframe sem escolha automatica de vencedor
 - ausencia de score, confidence, probability, ranking, signal, replay, backtest, walk-forward, paper, live, corretora, ordens e rede
+
+## Fase 56 - validacao estrutural temporal
+
+Status:
+- integrada
+
+Branch:
+- `codex/phase-56-temporal-structural-validation`
+
+PR:
+- `#72`
+
+Commit principal:
+- `8d98106e3ded2f72d1d3eced5d3db298f227d8fb`
+
+Merge commit:
+- `4bedecce3d451d4f0b2cf5cd1df90b257bf77cb0`
+
+Tag:
+- `v0.56.0`
+
+Objetivo:
+- validar transicoes temporais canonicas entre assessments estruturais da Fase 55 de forma read-only, deterministica e fail-closed
+
+Garantias introduzidas:
+- transition_id deterministico
+- transition_hash deterministico
+- created_at_utc fora da identidade
+- changed_dimensions derivado
+- no_change, dimension_change, state_change e invalidation preservados
+- regressao temporal, same-timestamp drift, cross-hypothesis, cross-domain e resurrection apos invalidation rejeitados
+- passado imutavel e look-ahead bloqueado
+- ausencia de ledger, scoring, signal, replay, backtest, walk-forward, paper, live, corretora, ordens e rede

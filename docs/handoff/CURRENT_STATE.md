@@ -7,14 +7,14 @@ Data e hora local: 2026-08-07T20:11:10.0507962-03:00
 
 ## Ultima versao integrada
 
-Tag: `v0.55.0`
-Commit: `4f45a99e9fc3c3b69947937a1113286836606f98`
-PR correspondente: `#71`
+Tag: `v0.56.0`
+Commit: `4bedecce3d451d4f0b2cf5cd1df90b257bf77cb0`
+PR correspondente: `#72`
 
 ## Main
 
-HEAD: `4f45a99e9fc3c3b69947937a1113286836606f98`
-origin/main: `4f45a99e9fc3c3b69947937a1113286836606f98`
+HEAD: `4bedecce3d451d4f0b2cf5cd1df90b257bf77cb0`
+origin/main: `4bedecce3d451d4f0b2cf5cd1df90b257bf77cb0`
 working tree: limpa
 
 ## Trabalho aberto
@@ -57,23 +57,23 @@ Nenhum trabalho de produto em aberto.
 - Market Structure Evidence Assessment validada.
 - Provenance, evidence matrix parcial, assessment vazio canonico e ausencia operacional preservados.
 - Regressao das Fases 48-53 executada com sucesso.
-- Fase 55 integrada e versionada em `v0.55.0`.
-- PR `#71` mesclada em `main`.
-- Market Structure Structural Assessment validada.
-- Consolidacao estrutural por hipotese, absent != neutral, conflict preservation, invalidation precedence, provenance preservation e ausencia de scoring preservados.
-- Regressao das Fases 53-54 executada com sucesso.
+- Fase 56 integrada e versionada em `v0.56.0`.
+- PR `#72` mesclada em `main`.
+- Temporal Structural Validation validada.
+- Validacao temporal entre assessments da Fase 55, changed_dimensions derivado, no_change, dimension_change, state_change, invalidation, regressao temporal, same-timestamp drift, cross-domain e resurrected invalidation preservados.
+- Regressao das Fases 50-55 executada com sucesso.
 
 ## O que ainda nao esta concluido
 
-- Fase 56 nao iniciada.
+- Fase 56 concluida e Fase 57 nao iniciada.
 - Nenhuma nova autorizacao para operacao.
 
 ## Proxima acao obrigatoria
 
-Aguardar nova autorizacao explicita antes de iniciar a Fase 56.
+Aguardar nova autorizacao explicita antes de iniciar a Fase 57.
 
 ## O que nao deve ser feito agora
 
-- Nao iniciar a Fase 56.
+- Nao iniciar a Fase 57.
 - Nao reverter a Fase 47.
 - Nao habilitar paper, live, corretora ou ordens.

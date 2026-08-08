@@ -67,7 +67,14 @@
 - A ausencia de majority voting, signal e promocao operacional permanece obrigatoria.
 - As regressoes das Fases 53-54 foram aprovadas no ambiente local.
 
-## 11. Ambiente
+## 11. Fase 56
+
+- A Fase 56 esta integrada e versionada em `v0.56.0`.
+- A validacao temporal entre assessments da Fase 55 preserva identidade deterministica, deep freeze/thaw e rejeicao fail-closed.
+- `created_at_utc` permanece fora da identidade canonica.
+- Nao ha scoring, signal, replay ou operacao.
+
+## 12. Ambiente
 
 - Windows
 - possivel warning de `credential-manager-core`
@@ -75,7 +82,7 @@
 - limitacoes de symlink
 - evitar dependencias POSIX
 
-## 12. Operacional
+## 13. Operacional
 
 - sem rede
 - sem corretora
