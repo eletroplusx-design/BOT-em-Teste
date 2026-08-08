@@ -21,12 +21,12 @@ Nao habilitar paper, live, rede, corretora ou ordens.
 
 ## Estado resumido
 
-- Ultima tag integrada: `v0.56.0`
-- Commit de `main`: `4bedecce3d451d4f0b2cf5cd1df90b257bf77cb0`
-- Fase integrada mais recente: Fase 56 - validacao estrutural temporal
-- PR integrada: `#72`
-- Branch: `codex/phase-56-temporal-structural-validation`
-- Head: `8d98106e3ded2f72d1d3eced5d3db298f227d8fb`
-- Merge commit: `4bedecce3d451d4f0b2cf5cd1df90b257bf77cb0`
+- Ultima tag integrada: `v0.57.0`
+- Commit de `main`: `f8d52e03c6d56e6f7906f04dccccc7b524d579e2`
+- Fase integrada mais recente: Fase 57 - structural assessment history
+- PR integrada: `#73`
+- Branch: `codex/phase-57-structural-assessment-history`
+- Head: `2697c92e98c87237fd303e6ac0f0ca56f0f5021a`
+- Merge commit: `f8d52e03c6d56e6f7906f04dccccc7b524d579e2`
 - Status: integrada, versionada e documentada
-- Proxima acao: nao iniciar a Fase 57 sem nova autorizacao explicita
+- Proxima acao: nao iniciar a Fase 58 sem nova autorizacao explicita

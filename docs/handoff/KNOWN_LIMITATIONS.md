@@ -74,7 +74,14 @@
 - `created_at_utc` permanece fora da identidade canonica.
 - Nao ha scoring, signal, replay ou operacao.
 
-## 12. Ambiente
+## 12. Fase 57
+
+- A Fase 57 esta integrada e versionada em `v0.57.0`.
+- A history canonica por hypothesis lineage preserva cadeia linear, append puro, prefix integrity e rejeicao fail-closed de reorder, chain break, duplicate conflict, fork, cycle, self-reference e cross-hypothesis.
+- `created_at_utc` permanece fora da identidade canonica.
+- Nao ha filesystem, scoring, signal, replay ou operacao.
+
+## 13. Ambiente
 
 - Windows
 - possivel warning de `credential-manager-core`
@@ -82,7 +89,7 @@
 - limitacoes de symlink
 - evitar dependencias POSIX
 
-## 13. Operacional
+## 14. Operacional
 
 - sem rede
 - sem corretora

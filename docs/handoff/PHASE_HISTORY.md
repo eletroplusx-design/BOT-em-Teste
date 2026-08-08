@@ -517,3 +517,39 @@ Garantias introduzidas:
 - regressao temporal, same-timestamp drift, cross-hypothesis, cross-domain e resurrection apos invalidation rejeitados
 - passado imutavel e look-ahead bloqueado
 - ausencia de ledger, scoring, signal, replay, backtest, walk-forward, paper, live, corretora, ordens e rede
+
+## Fase 57 - structural assessment history
+
+Status:
+- integrada
+
+Branch:
+- `codex/phase-57-structural-assessment-history`
+
+PR:
+- `#73`
+
+Commit principal:
+- `2697c92e98c87237fd303e6ac0f0ca56f0f5021a`
+
+Merge commit:
+- `f8d52e03c6d56e6f7906f04dccccc7b524d579e2`
+
+Tag:
+- `v0.57.0`
+
+Objetivo:
+- representar a historia canonica de transitions da Fase 56 por hypothesis lineage, de forma deterministica, imutavel, append-only e research-only
+
+Garantias introduzidas:
+- history_id deterministico
+- history_hash deterministico
+- transitions em ordem canonica e linear
+- append puro sem mutacao do historico anterior
+- prefix integrity preservada
+- metadata material e profundamente imutavel
+- created_at_utc fora da identidade
+- rejeicao de reorder, chain break, duplicate conflict, fork, cycle, self-reference e cross-hypothesis
+- no_change preservado
+- gaps temporais permitidos
+- ausencia de filesystem, scoring, signal, replay, backtest, walk-forward, paper, live, corretora, ordens e rede

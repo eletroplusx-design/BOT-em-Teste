@@ -2,19 +2,19 @@
 
 ## Snapshot
 
-Data e hora UTC: 2026-08-07T23:11:10.0462771Z
-Data e hora local: 2026-08-07T20:11:10.0507962-03:00
+Data e hora UTC: 2026-08-08T11:48:37.1364885Z
+Data e hora local: 2026-08-08T08:48:37.1364885-03:00
 
 ## Ultima versao integrada
 
-Tag: `v0.56.0`
-Commit: `4bedecce3d451d4f0b2cf5cd1df90b257bf77cb0`
-PR correspondente: `#72`
+Tag: `v0.57.0`
+Commit: `f8d52e03c6d56e6f7906f04dccccc7b524d579e2`
+PR correspondente: `#73`
 
 ## Main
 
-HEAD: `4bedecce3d451d4f0b2cf5cd1df90b257bf77cb0`
-origin/main: `4bedecce3d451d4f0b2cf5cd1df90b257bf77cb0`
+HEAD: `f8d52e03c6d56e6f7906f04dccccc7b524d579e2`
+origin/main: `f8d52e03c6d56e6f7906f04dccccc7b524d579e2`
 working tree: limpa
 
 ## Trabalho aberto
@@ -62,18 +62,23 @@ Nenhum trabalho de produto em aberto.
 - Temporal Structural Validation validada.
 - Validacao temporal entre assessments da Fase 55, changed_dimensions derivado, no_change, dimension_change, state_change, invalidation, regressao temporal, same-timestamp drift, cross-domain e resurrected invalidation preservados.
 - Regressao das Fases 50-55 executada com sucesso.
+- Fase 57 integrada e versionada em `v0.57.0`.
+- PR `#73` mesclada em `main`.
+- Structural Assessment History validada.
+- History canonica por hypothesis lineage, cadeia linear, append puro, prefix integrity, no_change, gaps temporais e rejeicao de fork/cycle/self-reference/cross-hypothesis preservados.
+- Regressao das Fases 50-56 executada com sucesso.
 
 ## O que ainda nao esta concluido
 
-- Fase 56 concluida e Fase 57 nao iniciada.
+- Fase 57 concluida e Fase 58 nao iniciada.
 - Nenhuma nova autorizacao para operacao.
 
 ## Proxima acao obrigatoria
 
-Aguardar nova autorizacao explicita antes de iniciar a Fase 57.
+Aguardar nova autorizacao explicita antes de iniciar a Fase 58.
 
 ## O que nao deve ser feito agora
 
-- Nao iniciar a Fase 57.
+- Nao iniciar a Fase 58.
 - Nao reverter a Fase 47.
 - Nao habilitar paper, live, corretora ou ordens.
