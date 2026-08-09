@@ -1,6 +1,8 @@
 import os
 import sqlite3
 import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -88,4 +90,81 @@ def mock_binance_exchange_info():
                 ],
             }
         ]
+    }
+
+
+@pytest.fixture(scope="session")
+def canonical_artifacts_root(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    from market_data import offline_research_canonical_evidence_fixture as phase44
+
+    root = tmp_path_factory.mktemp("phase48-49-canonical-artifacts")
+    phase44.build_canonical_offline_research_evidence_fixture(root)
+    return root
+
+
+@pytest.fixture(scope="session")
+def canonical_verification(canonical_artifacts_root: Path):
+    from market_data import offline_research_canonical_evidence_fixture as phase44
+
+    return phase44.verify_canonical_offline_research_evidence_fixture(canonical_artifacts_root)
+
+
+@pytest.fixture(scope="session")
+def canonical_runtime_bundle(canonical_artifacts_root: Path, canonical_verification):
+    from market_data import offline_research_execution_authorization as phase45
+    from market_data import offline_research_execution_envelope as phase46
+    from market_data import offline_research_neutral_executor as phase47
+
+    verification = canonical_verification
+    plan = verification.execution_plan_registry.plans[0]
+
+    authorization_registry_file = canonical_artifacts_root / "offline-research-execution-authorization-registry.json"
+    authorization = phase45.build_offline_research_execution_authorization(
+        plan=plan,
+        evidence=verification,
+        issued_at_utc=datetime(2026, 8, 1, 12, 0, 0, tzinfo=timezone.utc),
+        source_commit_sha=plan.source_commit_sha,
+        source_branch=plan.source_branch,
+    )
+    phase45.register_offline_research_execution_authorization(
+        registry_file=authorization_registry_file,
+        authorization=authorization,
+        updated_at_utc=datetime(2026, 8, 1, 12, 0, 0, tzinfo=timezone.utc),
+    )
+
+    envelope = phase46.build_offline_research_execution_envelope(
+        plan=plan,
+        evidence=verification,
+        authorization=authorization,
+        authorization_registry_file=authorization_registry_file,
+        plan_registry_file=verification.execution_plan_registry.registry_file,
+        random_seed=7,
+        created_at_utc=datetime(2026, 8, 1, 12, 0, 1, tzinfo=timezone.utc),
+        source_commit_sha=plan.source_commit_sha,
+        source_branch=plan.source_branch,
+    )
+
+    request = phase47.build_neutral_execution_request(
+        envelope=envelope,
+        fixture_directory=verification.fixture.fixture_directory,
+        output_directory=canonical_artifacts_root / "neutral-output",
+        registry_file=canonical_artifacts_root
+        / "neutral-output"
+        / phase47.OFFLINE_RESEARCH_NEUTRAL_EXECUTION_REGISTRY_FILENAME,
+        created_at_utc=datetime(2026, 8, 1, 12, 0, 2, tzinfo=timezone.utc),
+        random_seed=7,
+    )
+    result = phase47.execute_neutral_offline(
+        request,
+        started_at_utc=datetime(2026, 8, 1, 12, 0, 3, tzinfo=timezone.utc),
+        finished_at_utc=datetime(2026, 8, 1, 12, 0, 4, tzinfo=timezone.utc),
+        elapsed_monotonic_ns=1234,
+    )
+
+    return {
+        "verification": verification,
+        "authorization": authorization,
+        "envelope": envelope,
+        "request": request,
+        "result": result,
     }
