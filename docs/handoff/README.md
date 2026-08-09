@@ -22,11 +22,12 @@ Nao habilitar paper, live, rede, corretora ou ordens.
 ## Estado resumido
 
 - Ultima tag integrada: `v0.57.0`
-- Commit de `main`: `f8d52e03c6d56e6f7906f04dccccc7b524d579e2`
+- Commit de `main`: `ce1889dbfeb3c62f15aad72b96048ace72abfb49`
 - Fase integrada mais recente: Fase 57 - structural assessment history
 - PR integrada: `#73`
 - Branch: `codex/phase-57-structural-assessment-history`
 - Head: `2697c92e98c87237fd303e6ac0f0ca56f0f5021a`
 - Merge commit: `f8d52e03c6d56e6f7906f04dccccc7b524d579e2`
-- Status: integrada, versionada e documentada
+- Status: fase funcional integrada, e a frente de CI foi concluida e integrada via PR `#76`
+- Otimizacao de CI: PR `#74` absorvida, PR `#75` fechada sem merge, PR `#76` mesclada
 - Proxima acao: nao iniciar a Fase 58 sem nova autorizacao explicita

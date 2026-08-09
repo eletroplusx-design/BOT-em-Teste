@@ -2,8 +2,8 @@
 
 ## Snapshot
 
-Data e hora UTC: 2026-08-08T11:48:37.1364885Z
-Data e hora local: 2026-08-08T08:48:37.1364885-03:00
+Data e hora UTC: 2026-08-09T15:15:17.0165210Z
+Data e hora local: 2026-08-09T12:15:17.0000000-03:00
 
 ## Ultima versao integrada
 
@@ -11,15 +11,29 @@ Tag: `v0.57.0`
 Commit: `f8d52e03c6d56e6f7906f04dccccc7b524d579e2`
 PR correspondente: `#73`
 
+## Ultima integracao de infraestrutura
+
+PR: `#76`
+Branch: `ci/optimize-test-runtime-phase2c-sharding`
+Head aprovado: `ed07cab73c8e2d0c36ff0172074bed0e93a7a464`
+Merge commit: `ce1889dbfeb3c62f15aad72b96048ace72abfb49`
+Status: integrada, com 3/3 runs verdes e sharding estavel
+Wall-clock medio: `51m13s`
+Ganho medio contra o baseline original: `~49.4%`
+Partition check: `full = 1698`, `historical = 113`, `remainder = 1585`, `overlap = 0`, `missing = 0`
+Coverage: mantida por shard em `coverage-historical.xml` e `coverage-remainder.xml`
+Tag nova: nenhuma
+
 ## Main
 
-HEAD: `f8d52e03c6d56e6f7906f04dccccc7b524d579e2`
-origin/main: `f8d52e03c6d56e6f7906f04dccccc7b524d579e2`
+HEAD: `ce1889dbfeb3c62f15aad72b96048ace72abfb49`
+origin/main: `ce1889dbfeb3c62f15aad72b96048ace72abfb49`
 working tree: limpa
 
 ## Trabalho aberto
 
 Nenhum trabalho de produto em aberto.
+Nenhuma frente de otimizacao de CI em aberto.
 
 ## O que esta concluido
 
@@ -67,10 +81,14 @@ Nenhum trabalho de produto em aberto.
 - Structural Assessment History validada.
 - History canonica por hypothesis lineage, cadeia linear, append puro, prefix integrity, no_change, gaps temporais e rejeicao de fork/cycle/self-reference/cross-hypothesis preservados.
 - Regressao das Fases 50-56 executada com sucesso.
+- Otimizacao de CI concluida e integrada pela PR `#76`.
+- PR `#74` absorvida pela PR `#76` e PR `#75` fechada sem merge.
+- Sharding em dois jobs validado com 3/3 runs verdes.
+- 1698 testes preservados, sem overlap e sem missing.
 
 ## O que ainda nao esta concluido
 
-- Fase 57 concluida e Fase 58 nao iniciada.
+- Fase 58 nao iniciada.
 - Nenhuma nova autorizacao para operacao.
 
 ## Proxima acao obrigatoria
@@ -82,3 +100,4 @@ Aguardar nova autorizacao explicita antes de iniciar a Fase 58.
 - Nao iniciar a Fase 58.
 - Nao reverter a Fase 47.
 - Nao habilitar paper, live, corretora ou ordens.
+- Nao perseguir novas otimizacoes de CI sem autorizacao explicita.
