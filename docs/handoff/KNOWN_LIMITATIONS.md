@@ -81,7 +81,14 @@
 - `created_at_utc` permanece fora da identidade canonica.
 - Nao ha filesystem, scoring, signal, replay ou operacao.
 
-## 13. Ambiente
+## 13. Fase 58
+
+- A Fase 58 esta integrada e versionada em `v0.58.0`.
+- A persistent structural assessment history preserva save/load/verify canonicos com JSON canonico, atomic write e safe paths.
+- `created_at_utc` permanece fora da identidade canonica.
+- Nao ha registry, replay, scoring, ranking, signal ou operacao.
+
+## 14. Ambiente
 
 - Windows
 - possivel warning de `credential-manager-core`
@@ -89,7 +96,7 @@
 - limitacoes de symlink
 - evitar dependencias POSIX
 
-## 14. Operacional
+## 15. Operacional
 
 - sem rede
 - sem corretora

@@ -7,20 +7,20 @@
     "known_local_path": "C:\\Users\\Vitor\\Desktop\\meu_app_trading"
   },
   "snapshot": {
-    "created_at_utc": "2026-08-08T11:48:37.1364885Z",
-    "main_commit": "f8d52e03c6d56e6f7906f04dccccc7b524d579e2",
-    "last_integrated_tag": "v0.57.0",
+    "created_at_utc": "2026-08-09T17:23:54.7691811Z",
+    "main_commit": "b7358f0d954b7eacd85fcccf321c88e328a6bfbb",
+    "last_integrated_tag": "v0.58.0",
     "working_tree_clean": true
   },
   "active_work": {
-    "phase": 57,
-    "name": "Structural Assessment History",
-    "branch": "codex/phase-57-structural-assessment-history",
-    "pull_request": 73,
+    "phase": 58,
+    "name": "Persistent Structural Assessment History",
+    "branch": "codex/phase-58-persistent-structural-assessment-history",
+    "pull_request": 77,
     "pull_request_state": "MERGED",
     "draft": false,
-    "head_sha": "2697c92e98c87237fd303e6ac0f0ca56f0f5021a",
-    "merge_commit": "f8d52e03c6d56e6f7906f04dccccc7b524d579e2",
+    "head_sha": "30dd70c1755165792dc0d0d90a08983cb4a3f251",
+    "merge_commit": "b7358f0d954b7eacd85fcccf321c88e328a6bfbb",
     "ci_status": "SUCCESS",
     "status": "completed"
   },
@@ -33,7 +33,7 @@
     "exchange_connectivity_enabled": false,
     "order_submission_enabled": false
   },
-    "next_required_action": "await_phase_58_authorization",
+    "next_required_action": "await_phase_59_authorization",
   "documents": [
     "README.md",
     "PROJECT_HANDOFF.md",

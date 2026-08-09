@@ -49,9 +49,10 @@ referencia historica
 → envelope
 → executor neutro integrado
 → registry de auditoria offline
+→ persistencia canonica da structural assessment history
 ```
 
-Fases ja documentadas e integradas: 38, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 53, 54, 55, 56, 57.
+Fases ja documentadas e integradas: 38, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 53, 54, 55, 56, 57, 58.
 Nao ha fase de produto em aberto neste snapshot.
 
 ## 6. Participantes e responsabilidades
@@ -65,13 +66,14 @@ Nao ha fase de produto em aberto neste snapshot.
 
 Ver [CURRENT_STATE.md](./CURRENT_STATE.md).
 
-A frente de otimizacao de CI foi concluida em `main` por meio da PR `#76`.
+A Fase 58 foi integrada em `main` por meio da PR `#77` e versionada em `v0.58.0`.
 Esse merge nao altera a arquitetura funcional do bot.
 Os fluxos de pesquisa, validacao e seguranca permanecem research-only e fail-closed.
+O pacote de continuidade segue com o branch de documentacao separado do branch de produto.
 
 ## 8. Proxima acao obrigatoria
 
 A primeira tarefa do proximo desenvolvedor e verificar o estado real do GitHub antes de iniciar qualquer nova fase.
 
-A Fase 57 ja foi concluida e a frente de otimizacao de CI tambem foi encerrada.
-Nao iniciar a Fase 58 sem autorizacao explicita e sem confirmar novamente o estado real.
+A Fase 58 ja foi concluida, integrada e versionada.
+Nao iniciar a Fase 59 sem autorizacao explicita e sem confirmar novamente o estado real.

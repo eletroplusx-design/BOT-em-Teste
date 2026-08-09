@@ -2,14 +2,14 @@
 
 ## Snapshot
 
-Data e hora UTC: 2026-08-09T15:15:17.0165210Z
-Data e hora local: 2026-08-09T12:15:17.0000000-03:00
+Data e hora UTC: 2026-08-09T17:23:54.7691811Z
+Data e hora local: 2026-08-09T14:23:54.7691811-03:00
 
 ## Ultima versao integrada
 
-Tag: `v0.57.0`
-Commit: `f8d52e03c6d56e6f7906f04dccccc7b524d579e2`
-PR correspondente: `#73`
+Tag: `v0.58.0`
+Commit: `b7358f0d954b7eacd85fcccf321c88e328a6bfbb`
+PR correspondente: `#77`
 
 ## Ultima integracao de infraestrutura
 
@@ -26,8 +26,8 @@ Tag nova: nenhuma
 
 ## Main
 
-HEAD: `ce1889dbfeb3c62f15aad72b96048ace72abfb49`
-origin/main: `ce1889dbfeb3c62f15aad72b96048ace72abfb49`
+HEAD: `b7358f0d954b7eacd85fcccf321c88e328a6bfbb`
+origin/main: `b7358f0d954b7eacd85fcccf321c88e328a6bfbb`
 working tree: limpa
 
 ## Trabalho aberto
@@ -85,19 +85,25 @@ Nenhuma frente de otimizacao de CI em aberto.
 - PR `#74` absorvida pela PR `#76` e PR `#75` fechada sem merge.
 - Sharding em dois jobs validado com 3/3 runs verdes.
 - 1698 testes preservados, sem overlap e sem missing.
+- Fase 58 integrada e versionada em `v0.58.0`.
+- PR `#77` mesclada em `main`.
+- Persistent Structural Assessment History validada.
+- Persistencia da history da Fase 57 com JSON canonico, atomic write, safe paths, load fail-closed, idempotencia e conflicting overwrite rejection preservadas.
+- Regressao das Fases 48-57 executada com sucesso.
+- CI sharded da Fase 58 aprovado com 2/2 jobs verdes.
 
 ## O que ainda nao esta concluido
 
-- Fase 58 nao iniciada.
+- Fase 59 nao iniciada.
 - Nenhuma nova autorizacao para operacao.
 
 ## Proxima acao obrigatoria
 
-Aguardar nova autorizacao explicita antes de iniciar a Fase 58.
+Aguardar nova autorizacao explicita antes de iniciar a Fase 59.
 
 ## O que nao deve ser feito agora
 
-- Nao iniciar a Fase 58.
+- Nao iniciar a Fase 59.
 - Nao reverter a Fase 47.
 - Nao habilitar paper, live, corretora ou ordens.
 - Nao perseguir novas otimizacoes de CI sem autorizacao explicita.

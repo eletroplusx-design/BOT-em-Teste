@@ -553,3 +553,39 @@ Garantias introduzidas:
 - no_change preservado
 - gaps temporais permitidos
 - ausencia de filesystem, scoring, signal, replay, backtest, walk-forward, paper, live, corretora, ordens e rede
+
+## Fase 58 - persistent structural assessment history
+
+Status:
+- integrada
+
+Branch:
+- `codex/phase-58-persistent-structural-assessment-history`
+
+PR:
+- `#77`
+
+Commit principal:
+- `30dd70c1755165792dc0d0d90a08983cb4a3f251`
+
+Merge commit:
+- `b7358f0d954b7eacd85fcccf321c88e328a6bfbb`
+
+Tag:
+- `v0.58.0`
+
+Objetivo:
+- persistir a Structural Assessment History da Fase 57 de forma canonica, atomica, fail-closed e research-only
+
+Garantias introduzidas:
+- save, load e verify para a history canonica
+- JSON canonico com UTF-8 explicito
+- atomic write com flush, fsync e os.replace
+- safe paths reaproveitando a politica da Fase 48
+- idempotencia de save para payload identico
+- conflicting overwrite fail-closed
+- load fail-closed para missing, empty, invalid JSON, schema invalido e corrupcao
+- identity/hash preservados
+- created_at_utc fora da identidade
+- deep freeze/thaw preservados
+- ausencia de registry, replay, scoring, ranking, signal e operacao

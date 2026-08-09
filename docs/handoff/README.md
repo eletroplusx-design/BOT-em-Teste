@@ -21,13 +21,13 @@ Nao habilitar paper, live, rede, corretora ou ordens.
 
 ## Estado resumido
 
-- Ultima tag integrada: `v0.57.0`
-- Commit de `main`: `ce1889dbfeb3c62f15aad72b96048ace72abfb49`
-- Fase integrada mais recente: Fase 57 - structural assessment history
-- PR integrada: `#73`
-- Branch: `codex/phase-57-structural-assessment-history`
-- Head: `2697c92e98c87237fd303e6ac0f0ca56f0f5021a`
-- Merge commit: `f8d52e03c6d56e6f7906f04dccccc7b524d579e2`
-- Status: fase funcional integrada, e a frente de CI foi concluida e integrada via PR `#76`
+- Ultima tag integrada: `v0.58.0`
+- Commit de `main`: `b7358f0d954b7eacd85fcccf321c88e328a6bfbb`
+- Fase integrada mais recente: Fase 58 - Persistent Structural Assessment History
+- PR integrada: `#77`
+- Branch: `codex/phase-58-persistent-structural-assessment-history`
+- Head: `30dd70c1755165792dc0d0d90a08983cb4a3f251`
+- Merge commit: `b7358f0d954b7eacd85fcccf321c88e328a6bfbb`
+- Status: fase funcional integrada, CI sharded verde e versionamento concluido via PR `#77`
 - Otimizacao de CI: PR `#74` absorvida, PR `#75` fechada sem merge, PR `#76` mesclada
-- Proxima acao: nao iniciar a Fase 58 sem nova autorizacao explicita
+- Proxima acao: nao iniciar a Fase 59 sem nova autorizacao explicita
