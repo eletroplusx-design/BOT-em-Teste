@@ -5,11 +5,13 @@ from hashlib import sha256
 import json
 from typing import Any, Mapping
 
+from domain.validation import parse_symbol
 from domain.serialization import serialize_value
 
 from .errors import HistoricalDataValidationError
 
 
+KUCOIN_PUBLIC_SPOT_SUPPORTED_SYMBOLS: tuple[str, ...] = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "UNIUSDT")
 KUCOIN_PUBLIC_SPOT_INTERVALS: tuple[str, ...] = ("15m", "1h", "4h")
 KUCOIN_PUBLIC_SPOT_INTERVAL_CODES: dict[str, str] = {
     "15m": "15min",
@@ -31,7 +33,7 @@ OKX_PUBLIC_SPOT_CLOSE_TIME_RULE = "confirm=0 means incomplete; confirm=1 means c
 def kucoin_public_spot_interval_contract(interval: str) -> tuple[str, int]:
     normalized_interval = _require_str(interval, "interval")
     if normalized_interval not in KUCOIN_PUBLIC_SPOT_INTERVALS:
-        raise HistoricalDataValidationError("kucoin public spot provider only supports BTCUSDT 15m, 1h, or 4h.")
+        raise HistoricalDataValidationError("kucoin public spot provider only supports 15m, 1h, or 4h.")
     return (
         KUCOIN_PUBLIC_SPOT_INTERVAL_CODES[normalized_interval],
         KUCOIN_PUBLIC_SPOT_INTERVAL_SECONDS[normalized_interval],
@@ -88,6 +90,22 @@ def _require_http_url(value: Any, field_name: str) -> str:
     if not url.lower().startswith(("https://", "http://")):
         raise HistoricalDataValidationError(f"{field_name} must be a URL.")
     return url
+
+def _require_supported_kucoin_public_spot_symbol(value: Any) -> str:
+    normalized_symbol = parse_symbol(value)
+    if normalized_symbol not in KUCOIN_PUBLIC_SPOT_SUPPORTED_SYMBOLS:
+        raise HistoricalDataValidationError(
+            "kucoin public spot provider only supports BTCUSDT, ETHUSDT, SOLUSDT, or UNIUSDT."
+        )
+    if not normalized_symbol.endswith("USDT"):
+        raise HistoricalDataValidationError(
+            "kucoin public spot provider only supports BTCUSDT, ETHUSDT, SOLUSDT, or UNIUSDT."
+        )
+    return normalized_symbol
+
+def kucoin_public_spot_external_symbol(symbol: str) -> str:
+    normalized_symbol = _require_supported_kucoin_public_spot_symbol(symbol)
+    return f"{normalized_symbol[:-4]}-USDT"
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,7 +167,8 @@ class HistoricalProviderQualification:
                 raise HistoricalDataValidationError("close_time_rule is required for provider contract version 2.")
         elif self.data_contract_version == 3:
             expected_interval_code, expected_duration_seconds = kucoin_public_spot_interval_contract(self.interval)
-            if self.external_symbol != "BTC-USDT":
+            expected_external_symbol = kucoin_public_spot_external_symbol(self.symbol)
+            if self.external_symbol != expected_external_symbol:
                 raise HistoricalDataValidationError("external_symbol is required for provider contract version 3.")
             if self.external_symbol == self.symbol:
                 raise HistoricalDataValidationError("external_symbol must differ from canonical symbol for version 3.")
@@ -208,10 +227,8 @@ class HistoricalProviderQualification:
         provider_version: str = "v1",
         data_contract_version: int | None = None,
     ) -> "HistoricalProviderQualification":
-        normalized_symbol = _require_str(symbol, "symbol").upper()
+        normalized_symbol = _require_supported_kucoin_public_spot_symbol(symbol)
         normalized_interval = _require_str(interval, "interval")
-        if normalized_symbol != "BTCUSDT":
-            raise HistoricalDataValidationError("kucoin public spot provider only supports BTCUSDT.")
         interval_code, interval_duration_seconds = kucoin_public_spot_interval_contract(normalized_interval)
         if normalized_interval == "1h":
             expected_version = 2
@@ -233,7 +250,7 @@ class HistoricalProviderQualification:
             time_semantics="utc",
             access_type="public_no_auth",
             data_contract_version=data_contract_version,
-            external_symbol="BTC-USDT",
+            external_symbol=kucoin_public_spot_external_symbol(normalized_symbol),
             interval_code=interval_code if data_contract_version >= 3 else "",
             interval_duration_seconds=interval_duration_seconds if data_contract_version >= 3 else 0,
             endpoint_url="https://api.kucoin.com/api/v1/market/candles",
