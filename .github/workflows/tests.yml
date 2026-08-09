@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 jobs:
-  test:
+  test-historical:
     runs-on: ubuntu-latest
     env:
       CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
@@ -22,6 +22,10 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
 
       - name: Install dependencies
         run: |
@@ -29,16 +33,146 @@ jobs:
           python -m pip install -r requirements-dev.txt
           python -m pip install -r requirements.txt
 
-      - name: Run tests with coverage
+      - name: Verify shard partition
         run: |
-          python -m pytest -q --cov=. --cov-report=term --cov-report=xml
+          set -euo pipefail
+          mapfile -t HISTORICAL_TESTS < .github/test-shards/phase2c-historical.txt
+          IGNORE_ARGS=()
+          for test_path in "${HISTORICAL_TESTS[@]}"; do
+            IGNORE_ARGS+=("--ignore=$test_path")
+          done
+
+          FULL_LIST="$(mktemp)"
+          HIST_LIST="$(mktemp)"
+          REM_LIST="$(mktemp)"
+
+          python -m pytest --collect-only -q tests | grep '::' > "$FULL_LIST"
+          python -m pytest --collect-only -q "${HISTORICAL_TESTS[@]}" | grep '::' > "$HIST_LIST"
+          python -m pytest --collect-only -q tests "${IGNORE_ARGS[@]}" | grep '::' > "$REM_LIST"
+
+          FULL_COUNT=$(grep -c '::' "$FULL_LIST" || true)
+          HIST_COUNT=$(grep -c '::' "$HIST_LIST" || true)
+          REM_COUNT=$(grep -c '::' "$REM_LIST" || true)
+
+          echo "Full suite count: $FULL_COUNT"
+          echo "Historical shard count: $HIST_COUNT"
+          echo "Remainder shard count: $REM_COUNT"
+
+          if [ $((HIST_COUNT + REM_COUNT)) -ne "$FULL_COUNT" ]; then
+            echo "Shard counts do not add up to the full suite."
+            diff -u <(sort "$FULL_LIST") <(sort -u "$HIST_LIST" "$REM_LIST") || true
+            exit 1
+          fi
+
+          if comm -12 <(sort "$HIST_LIST") <(sort "$REM_LIST") | grep -q .; then
+            echo "Shard overlap detected."
+            comm -12 <(sort "$HIST_LIST") <(sort "$REM_LIST")
+            exit 1
+          fi
+
+          if ! diff -u <(sort "$FULL_LIST") <(sort -u "$HIST_LIST" "$REM_LIST"); then
+            echo "Shard union does not match the full suite."
+            exit 1
+          fi
+
+      - name: Run historical shard with coverage
+        run: |
+          mapfile -t HISTORICAL_TESTS < .github/test-shards/phase2c-historical.txt
+          python -m pytest -q --durations=30 --durations-min=1.0 --cov=. --cov-report=term --cov-report=xml:coverage-historical.xml "${HISTORICAL_TESTS[@]}"
 
       - name: Upload coverage to Codecov
         if: ${{ env.CODECOV_TOKEN != '' }}
         uses: codecov/codecov-action@v4
         with:
           token: ${{ env.CODECOV_TOKEN }}
-          file: ./coverage.xml
+          file: ./coverage-historical.xml
+          fail_ci_if_error: false
+
+      - name: Codecov upload skipped
+        if: ${{ env.CODECOV_TOKEN == '' }}
+        run: echo "Codecov upload skipped because CODECOV_TOKEN is not configured."
+
+  test-remainder:
+    runs-on: ubuntu-latest
+    env:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+          python -m pip install -r requirements.txt
+
+      - name: Verify shard partition
+        run: |
+          set -euo pipefail
+          mapfile -t HISTORICAL_TESTS < .github/test-shards/phase2c-historical.txt
+          IGNORE_ARGS=()
+          for test_path in "${HISTORICAL_TESTS[@]}"; do
+            IGNORE_ARGS+=("--ignore=$test_path")
+          done
+
+          FULL_LIST="$(mktemp)"
+          HIST_LIST="$(mktemp)"
+          REM_LIST="$(mktemp)"
+
+          python -m pytest --collect-only -q tests | grep '::' > "$FULL_LIST"
+          python -m pytest --collect-only -q "${HISTORICAL_TESTS[@]}" | grep '::' > "$HIST_LIST"
+          python -m pytest --collect-only -q tests "${IGNORE_ARGS[@]}" | grep '::' > "$REM_LIST"
+
+          FULL_COUNT=$(grep -c '::' "$FULL_LIST" || true)
+          HIST_COUNT=$(grep -c '::' "$HIST_LIST" || true)
+          REM_COUNT=$(grep -c '::' "$REM_LIST" || true)
+
+          echo "Full suite count: $FULL_COUNT"
+          echo "Historical shard count: $HIST_COUNT"
+          echo "Remainder shard count: $REM_COUNT"
+
+          if [ $((HIST_COUNT + REM_COUNT)) -ne "$FULL_COUNT" ]; then
+            echo "Shard counts do not add up to the full suite."
+            diff -u <(sort "$FULL_LIST") <(sort -u "$HIST_LIST" "$REM_LIST") || true
+            exit 1
+          fi
+
+          if comm -12 <(sort "$HIST_LIST") <(sort "$REM_LIST") | grep -q .; then
+            echo "Shard overlap detected."
+            comm -12 <(sort "$HIST_LIST") <(sort "$REM_LIST")
+            exit 1
+          fi
+
+          if ! diff -u <(sort "$FULL_LIST") <(sort -u "$HIST_LIST" "$REM_LIST"); then
+            echo "Shard union does not match the full suite."
+            exit 1
+          fi
+
+      - name: Run remainder shard with coverage
+        run: |
+          mapfile -t HISTORICAL_TESTS < .github/test-shards/phase2c-historical.txt
+          IGNORE_ARGS=()
+          for test_path in "${HISTORICAL_TESTS[@]}"; do
+            IGNORE_ARGS+=("--ignore=$test_path")
+          done
+
+          python -m pytest -q --durations=30 --durations-min=1.0 --cov=. --cov-report=term --cov-report=xml:coverage-remainder.xml tests "${IGNORE_ARGS[@]}"
+
+      - name: Upload coverage to Codecov
+        if: ${{ env.CODECOV_TOKEN != '' }}
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ env.CODECOV_TOKEN }}
+          file: ./coverage-remainder.xml
           fail_ci_if_error: false
 
       - name: Codecov upload skipped
