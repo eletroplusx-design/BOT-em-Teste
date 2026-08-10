@@ -20,6 +20,8 @@ from .provider_qualification import (
     KUCOIN_PUBLIC_SPOT_INTERVAL_CODES,
     KUCOIN_PUBLIC_SPOT_INTERVAL_SECONDS,
     KUCOIN_PUBLIC_SPOT_INTERVALS,
+    KUCOIN_PUBLIC_SPOT_SUPPORTED_SYMBOLS,
+    kucoin_public_spot_external_symbol,
 )
 
 
@@ -37,8 +39,8 @@ class KuCoinPublicSpotKlinesProvider:
         "1h": 2,
         "4h": 3,
     }
-    historical_external_symbol = "BTC-USDT"
     historical_symbol = "BTCUSDT"
+    historical_supported_symbols = KUCOIN_PUBLIC_SPOT_SUPPORTED_SYMBOLS
     historical_supported_intervals = KUCOIN_PUBLIC_SPOT_INTERVALS
     historical_endpoint_documentation = "https://www.kucoin.com/docs-new/3470071w0"
     historical_close_time_rule_v2 = "open_time + 1h - 1ms"
@@ -54,7 +56,7 @@ class KuCoinPublicSpotKlinesProvider:
             raise HistoricalDataValidationError("historical provider requires valid symbol and interval.")
         normalized_interval = interval.strip()
         if normalized_interval not in self.historical_supported_intervals:
-            raise HistoricalDataValidationError("historical provider only supports BTCUSDT 15m, 1h, or 4h.")
+            raise HistoricalDataValidationError("historical provider only supports 15m, 1h, or 4h intervals.")
         return (
             normalized_interval,
             KUCOIN_PUBLIC_SPOT_INTERVAL_CODES[normalized_interval],
@@ -68,8 +70,8 @@ class KuCoinPublicSpotKlinesProvider:
             raise HistoricalDataValidationError("historical provider requires valid symbol and interval.")
         normalized_symbol = symbol.strip().upper()
         normalized_interval, _, _, data_contract_version, _ = self._normalize_historical_interval(interval)
-        if normalized_symbol != self.historical_symbol:
-            raise HistoricalDataValidationError("historical provider only supports BTCUSDT 15m, 1h, or 4h.")
+        if normalized_symbol not in self.historical_supported_symbols:
+            raise HistoricalDataValidationError("historical provider only supports BTCUSDT, ETHUSDT, SOLUSDT, or UNIUSDT.")
         return HistoricalProviderQualification.kucoin_public_spot(
             symbol=normalized_symbol,
             interval=normalized_interval,
@@ -80,7 +82,7 @@ class KuCoinPublicSpotKlinesProvider:
     def _request_params(self, symbol: str, interval: str, limit: int, start_time: int | None, end_time: int | None) -> dict[str, Any]:
         normalized_interval, interval_code, _, _, _ = self._normalize_historical_interval(interval)
         params: dict[str, Any] = {
-            "symbol": self.historical_external_symbol,
+            "symbol": kucoin_public_spot_external_symbol(symbol),
             "type": interval_code,
             "limit": limit,
         }
@@ -95,8 +97,8 @@ class KuCoinPublicSpotKlinesProvider:
             raise HistoricalDataValidationError("historical provider requires valid symbol and interval.")
         normalized_symbol = symbol.strip().upper()
         normalized_interval, _, interval_duration_seconds, _, _ = self._normalize_historical_interval(interval)
-        if normalized_symbol != self.historical_symbol:
-            raise HistoricalDataValidationError("historical provider only supports BTCUSDT 15m, 1h, or 4h.")
+        if normalized_symbol not in self.historical_supported_symbols:
+            raise HistoricalDataValidationError("historical provider only supports BTCUSDT, ETHUSDT, SOLUSDT, or UNIUSDT.")
         if type(limit) is not int or isinstance(limit, bool):
             raise HistoricalDataValidationError("limit must be an integer.")
         if limit <= 0:

@@ -202,8 +202,8 @@ def _kucoin_normalized_page(start: datetime, count: int, *, base: int = 100, dur
 
 
 
-def _kucoin_qualification(interval: str):
-    return HistoricalProviderQualification.kucoin_public_spot(symbol="BTCUSDT", interval=interval)
+def _kucoin_qualification(interval: str, symbol: str = "BTCUSDT"):
+    return HistoricalProviderQualification.kucoin_public_spot(symbol=symbol, interval=interval)
 
 
 def _canonical_hash(payload):
@@ -211,7 +211,7 @@ def _canonical_hash(payload):
 
 
 
-def _kucoin_dataset(tmp_path: Path, *, interval: str = "1h", count: int = 12) -> tuple[Path, HistoricalDataset]:
+def _kucoin_dataset(tmp_path: Path, *, interval: str = "1h", count: int = 12, symbol: str = "BTCUSDT") -> tuple[Path, HistoricalDataset]:
     seconds = HistoricalProviderQualification.kucoin_public_spot(symbol="BTCUSDT", interval=interval).interval_duration_seconds or 3600
     candles = tuple(
         Candle.from_dict(
@@ -223,7 +223,7 @@ def _kucoin_dataset(tmp_path: Path, *, interval: str = "1h", count: int = 12) ->
                 "low": str(96 + idx),
                 "close": str(102 + idx),
                 "volume": str(1000 + idx),
-                "symbol": "BTCUSDT",
+                "symbol": symbol,
                 "interval": interval,
                 "source": DataSource.KUCOIN,
             }
@@ -232,9 +232,9 @@ def _kucoin_dataset(tmp_path: Path, *, interval: str = "1h", count: int = 12) ->
     )
     request = HistoricalDatasetRequest(
         provider="kucoin.public.klines",
-        provider_qualification=_kucoin_qualification(interval),
+        provider_qualification=_kucoin_qualification(interval, symbol=symbol),
         endpoint=KUCOIN_ENDPOINT,
-        symbol="BTCUSDT",
+        symbol=symbol,
         interval=interval,
         requested_start_utc=candles[0].open_time,
         requested_end_utc=candles[-1].close_time,
@@ -280,7 +280,7 @@ def test_kucoin_qualification_is_canonical_for_allowed_intervals(interval, expec
 
 @pytest.mark.parametrize("interval", ["5m", "3m", "1d", "4hour", "15min", "2h", "1hour", "abc"])
 def test_kucoin_qualification_rejects_non_whitelisted_intervals(interval):
-    with pytest.raises(HistoricalDataValidationError, match="only supports BTCUSDT 15m, 1h, or 4h"):
+    with pytest.raises(HistoricalDataValidationError, match="only supports 15m, 1h, or 4h"):
         HistoricalProviderQualification.kucoin_public_spot(symbol="BTCUSDT", interval=interval)
 
 
@@ -308,6 +308,32 @@ def test_kucoin_provider_fetch_uses_official_codes_and_derives_close_time(interv
     assert payload[0][0] < payload[1][0]
     assert payload[0][6] == payload[0][0] + duration_seconds * 1000 - 1
     assert payload[1][6] == payload[1][0] + duration_seconds * 1000 - 1
+
+@pytest.mark.parametrize(
+    ("symbol", "external_symbol"),
+    [
+        ("ETHUSDT", "ETH-USDT"),
+        ("SOLUSDT", "SOL-USDT"),
+        ("UNIUSDT", "UNI-USDT"),
+    ],
+)
+def test_kucoin_provider_fetch_uses_symbol_specific_external_symbol(symbol, external_symbol):
+    start = BASE_START
+    rows = _kucoin_raw_page(start, 1, duration_seconds=3600)
+    session = FakeSession([FakeResponse({"code": "200000", "data": rows})])
+    provider = KuCoinPublicSpotKlinesProvider(session=session)
+
+    payload = provider.fetch_klines(
+        symbol,
+        "1h",
+        limit=1500,
+        start_time=int(start.timestamp() * 1000),
+        end_time=int((start + timedelta(hours=1) - ONE_MS).timestamp() * 1000),
+    )
+
+    assert session.calls[0]["params"]["symbol"] == external_symbol
+    assert session.calls[0]["params"]["type"] == "1hour"
+    assert payload[0][0] == int(start.timestamp() * 1000)
 
 
 @pytest.mark.parametrize(
@@ -396,6 +422,20 @@ def test_kucoin_legacy_and_new_dataset_round_trip_preserve_provenance(tmp_path, 
     assert loaded.manifest.provider_qualification.as_dict() == dataset.manifest.provider_qualification.as_dict()
     assert loaded.manifest.interval == interval
     assert loaded.manifest.symbol == "BTCUSDT"
+
+@pytest.mark.parametrize(
+    ("symbol", "external_symbol"),
+    [
+        ("ETHUSDT", "ETH-USDT"),
+        ("SOLUSDT", "SOL-USDT"),
+        ("UNIUSDT", "UNI-USDT"),
+    ],
+)
+def test_kucoin_legacy_and_new_dataset_round_trip_preserve_provenance_for_all_symbols(tmp_path, symbol, external_symbol):
+    path, dataset = _kucoin_dataset(tmp_path, interval="1h", count=8, symbol=symbol)
+    loaded = load_historical_dataset_file(path)
+    assert loaded.manifest.provider_qualification == dataset.manifest.provider_qualification
+    assert loaded.manifest.provider_qualification.external_symbol == external_symbol
 
 
 @pytest.mark.parametrize("interval", ["15m", "4h"])

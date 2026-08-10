@@ -182,7 +182,7 @@ def _kucoin_normalized_page(start: datetime, count: int, *, base: int = 100):
     ]
 
 
-def _dataset_rows(count: int = 12):
+def _dataset_rows(count: int = 12, *, symbol: str = "BTCUSDT"):
     return tuple(
         Candle.from_dict(
             {
@@ -193,7 +193,7 @@ def _dataset_rows(count: int = 12):
                 "low": str(96 + idx),
                 "close": str(102 + idx),
                 "volume": str(1000 + idx),
-                "symbol": "BTCUSDT",
+                "symbol": symbol,
                 "interval": "1h",
                 "source": DataSource.KUCOIN,
             }
@@ -202,17 +202,17 @@ def _dataset_rows(count: int = 12):
     )
 
 
-def _kucoin_qualification():
-    return HistoricalProviderQualification.kucoin_public_spot(symbol="BTCUSDT", interval="1h")
+def _kucoin_qualification(symbol: str = "BTCUSDT"):
+    return HistoricalProviderQualification.kucoin_public_spot(symbol=symbol, interval="1h")
 
 
-def _kucoin_dataset(tmp_path: Path, *, count: int = 12) -> tuple[Path, HistoricalDataset]:
-    candles = _dataset_rows(count=count)
+def _kucoin_dataset(tmp_path: Path, *, count: int = 12, symbol: str = "BTCUSDT") -> tuple[Path, HistoricalDataset]:
+    candles = _dataset_rows(count=count, symbol=symbol)
     request = HistoricalDatasetRequest(
         provider="kucoin.public.klines",
-        provider_qualification=_kucoin_qualification(),
+        provider_qualification=_kucoin_qualification(symbol=symbol),
         endpoint=KUCOIN_ENDPOINT,
-        symbol="BTCUSDT",
+        symbol=symbol,
         interval="1h",
         requested_start_utc=candles[0].open_time,
         requested_end_utc=candles[-1].close_time,
@@ -273,6 +273,33 @@ def test_kucoin_qualification_rejects_missing_and_invalid_fields(payload, messag
     with pytest.raises(HistoricalDataValidationError, match=message):
         HistoricalProviderQualification.from_dict(payload)
 
+@pytest.mark.parametrize(
+    ("symbol", "external_symbol"),
+    [
+        ("BTCUSDT", "BTC-USDT"),
+        ("ethusdt", "ETH-USDT"),
+        ("SolUsdt", "SOL-USDT"),
+        ("UNIUSDT", "UNI-USDT"),
+    ],
+)
+def test_kucoin_qualification_accepts_supported_symbols_and_derives_external_symbol(symbol, external_symbol):
+    qualification = HistoricalProviderQualification.kucoin_public_spot(symbol=symbol, interval="1h")
+    assert qualification.symbol == symbol.strip().upper()
+    assert qualification.external_symbol == external_symbol
+    assert qualification.qualification_hash == HistoricalProviderQualification.from_dict(qualification.as_dict()).qualification_hash
+
+def test_kucoin_qualification_hash_differs_across_supported_symbols():
+    btc = HistoricalProviderQualification.kucoin_public_spot(symbol="BTCUSDT", interval="1h")
+    eth = HistoricalProviderQualification.kucoin_public_spot(symbol="ETHUSDT", interval="1h")
+    sol = HistoricalProviderQualification.kucoin_public_spot(symbol="SOLUSDT", interval="1h")
+    uni = HistoricalProviderQualification.kucoin_public_spot(symbol="UNIUSDT", interval="1h")
+    assert len({btc.qualification_hash, eth.qualification_hash, sol.qualification_hash, uni.qualification_hash}) == 4
+
+@pytest.mark.parametrize("symbol", ["DOGEUSDT", "BTCUSD", "BTC-USDT"])
+def test_kucoin_qualification_rejects_unsupported_symbols(symbol):
+    with pytest.raises(HistoricalDataValidationError, match="only supports BTCUSDT, ETHUSDT, SOLUSDT, or UNIUSDT"):
+        HistoricalProviderQualification.kucoin_public_spot(symbol=symbol, interval="1h")
+
 
 def test_kucoin_qualification_rejects_futures_in_spot_contract():
     futures = HistoricalProviderQualification(
@@ -303,6 +330,26 @@ def test_kucoin_qualification_rejects_futures_in_spot_contract():
             page_size=1,
             closed_candles_only=True,
         )
+
+@pytest.mark.parametrize(
+    ("symbol", "external_symbol"),
+    [
+        ("ETHUSDT", "ETH-USDT"),
+        ("SolUsdt", "SOL-USDT"),
+        ("uniusdt", "UNI-USDT"),
+    ],
+)
+def test_kucoin_provider_fetch_uses_symbol_specific_request_symbol(symbol, external_symbol):
+    start = BASE_START
+    rows = _kucoin_raw_page(start, 1)
+    session = FakeSession([FakeResponse({"code": "200000", "data": rows})])
+    provider = KuCoinPublicSpotKlinesProvider(session=session)
+
+    payload = provider.fetch_klines(symbol, "1h", limit=1500, start_time=int(start.timestamp() * 1000), end_time=int((start + ONE_HOUR - ONE_MS).timestamp() * 1000))
+
+    assert session.calls[0]["params"]["symbol"] == external_symbol
+    assert session.calls[0]["params"]["type"] == "1hour"
+    assert payload[0][0] == int(start.timestamp() * 1000)
 
 
 def test_kucoin_provider_fetch_normalizes_reverse_order_and_derives_close_time():
@@ -353,6 +400,38 @@ def test_prepare_historical_dataset_kucoin_round_trip_preserves_provider_qualifi
     verify = verify_historical_dataset_file(input_file=output)
     assert status["provider_qualification"] == _kucoin_qualification().as_dict()
     assert verify["provider_qualification"] == _kucoin_qualification().as_dict()
+
+@pytest.mark.parametrize(
+    ("symbol", "external_symbol"),
+    [
+        ("ETHUSDT", "ETH-USDT"),
+        ("SOLUSDT", "SOL-USDT"),
+        ("UNIUSDT", "UNI-USDT"),
+    ],
+)
+def test_kucoin_prepare_historical_dataset_supports_all_whitelisted_symbols(tmp_path, monkeypatch, symbol, external_symbol):
+    pages = [_kucoin_raw_page(BASE_START, 12)]
+    CountingKuCoinProvider.reset(pages)
+    monkeypatch.setattr(historical, "KuCoinPublicSpotKlinesProvider", CountingKuCoinProvider)
+    output = tmp_path / f"kucoin-{symbol.lower()}.json"
+
+    result = prepare_historical_dataset_kucoin(
+        output_file=output,
+        symbol=symbol,
+        interval="1h",
+        requested_start_utc=BASE_START,
+        requested_end_utc=BASE_START + 11 * ONE_HOUR + ONE_HOUR - ONE_MS,
+        page_size=1500,
+        max_pages=4,
+    )
+
+    assert result["reused"] is False
+    assert CountingKuCoinProvider.instantiations == 1
+    assert CountingKuCoinProvider.qualification_calls == 1
+    assert CountingKuCoinProvider.fetch_calls == 1
+    dataset = load_historical_dataset_file(output)
+    assert dataset.manifest.provider_qualification == _kucoin_qualification(symbol=symbol)
+    assert dataset.manifest.provider_qualification.external_symbol == external_symbol
 
 
 class BoundaryBinanceProvider(historical.BinancePublicKlinesProvider):
