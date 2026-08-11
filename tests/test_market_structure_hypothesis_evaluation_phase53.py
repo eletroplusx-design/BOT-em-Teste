@@ -539,3 +539,125 @@ def test_phase53_evaluation_lookahead_is_stable_and_tampering_is_fail_closed():
     payload["evaluation_hash"] = "0" * 64
     with pytest.raises(phase53.MarketStructureHypothesisIntegrityError, match="evaluation_hash mismatch"):
         phase53.market_structure_hypothesis_evaluation_from_dict(payload)
+
+
+def _annotation_collection_from_annotations(
+    annotations: tuple[phase52.MarketStructureAnnotation, ...],
+    *,
+    metadata: dict[str, object],
+) -> phase52.MarketStructureAnnotationCollection:
+    if not annotations:
+        raise AssertionError("annotations must not be empty")
+    return phase52.MarketStructureAnnotationCollection(
+        schema_version=phase52.MARKET_STRUCTURE_ANNOTATION_COLLECTION_SCHEMA_VERSION,
+        dataset_hash=annotations[0].dataset_hash,
+        contract_hash=annotations[0].contract_hash,
+        detection_result_hash=annotations[0].detection_result_hash,
+        annotation_count=len(annotations),
+        first_candle_timestamp=min(annotation.candle_timestamp for annotation in annotations),
+        last_candle_timestamp=max(annotation.candle_timestamp for annotation in annotations),
+        annotations=annotations,
+        created_at_utc=PHASE53_CREATED_AT_UTC,
+        metadata=metadata,
+    )
+
+
+def test_phase53_unknown_hypotheses_are_deduplicated_and_order_independent():
+    metadata = _metadata_a()
+    result = _analysis_result()
+    base_collection = _analysis_collection(metadata=metadata)
+    template = _annotation_with_state(base_collection, "Distribution Candidate")
+    unknown_a = _unknown_annotation(
+        template,
+        candle_index=0,
+        candle_timestamp=result.first_timestamp,
+        metadata=metadata,
+    )
+    unknown_b = _unknown_annotation(
+        template,
+        candle_index=1,
+        candle_timestamp=result.first_timestamp + timedelta(hours=1),
+        metadata=metadata,
+    )
+    unknown_c = _unknown_annotation(
+        template,
+        candle_index=2,
+        candle_timestamp=result.first_timestamp + timedelta(hours=2),
+        metadata=metadata,
+    )
+
+    collection_a = _annotation_collection_from_annotations((unknown_a, unknown_b, unknown_c), metadata=metadata)
+    collection_b = _annotation_collection_from_annotations((unknown_c, unknown_b, unknown_a), metadata=metadata)
+
+    evaluation_a = phase53.evaluate_market_structure_hypotheses(
+        collection_a,
+        metadata=metadata,
+        created_at_utc=PHASE53_CREATED_AT_UTC,
+    )
+    evaluation_b = phase53.evaluate_market_structure_hypotheses(
+        collection_b,
+        metadata=metadata,
+        created_at_utc=PHASE53_CREATED_AT_UTC,
+    )
+
+    assert evaluation_a.as_dict() == evaluation_b.as_dict()
+    assert [hypothesis.hypothesis_type for hypothesis in evaluation_a.hypotheses] == ["Unknown"]
+    assert evaluation_a.hypotheses[0].status == "indeterminate"
+    assert evaluation_a.hypotheses[0].supporting_annotation_ids == tuple(
+        sorted({unknown_a.annotation_id, unknown_b.annotation_id, unknown_c.annotation_id})
+    )
+    assert evaluation_a.hypotheses[0].supporting_event_ids == ()
+    assert evaluation_a.hypotheses[0].contradicting_event_ids == ()
+    assert evaluation_a.evaluation_id == evaluation_b.evaluation_id
+    assert evaluation_a.evaluation_hash == evaluation_b.evaluation_hash
+
+
+def test_phase53_unknown_deduplication_preserves_known_hypotheses_in_mixed_collections():
+    metadata = _metadata_a()
+    result = _analysis_result()
+    base_collection = _analysis_collection(metadata=metadata)
+    candidate_template = _annotation_with_state(base_collection, "Distribution Candidate")
+    candidate = _rebased_annotation(
+        candidate_template,
+        candle_index=0,
+        candle_timestamp=result.first_timestamp,
+        metadata=metadata,
+    )
+    unknown_one = _unknown_annotation(
+        candidate_template,
+        candle_index=1,
+        candle_timestamp=result.first_timestamp + timedelta(hours=1),
+        metadata=metadata,
+    )
+    unknown_two = _unknown_annotation(
+        candidate_template,
+        candle_index=2,
+        candle_timestamp=result.first_timestamp + timedelta(hours=2),
+        metadata=metadata,
+    )
+
+    single_collection = _annotation_collection_from_annotations((candidate,), metadata=metadata)
+    mixed_collection = _annotation_collection_from_annotations((candidate, unknown_one, unknown_two), metadata=metadata)
+
+    single_evaluation = phase53.evaluate_market_structure_hypotheses(
+        single_collection,
+        metadata=metadata,
+        created_at_utc=PHASE53_CREATED_AT_UTC,
+    )
+    mixed_evaluation = phase53.evaluate_market_structure_hypotheses(
+        mixed_collection,
+        metadata=metadata,
+        created_at_utc=PHASE53_CREATED_AT_UTC,
+    )
+
+    assert [hypothesis.hypothesis_type for hypothesis in mixed_evaluation.hypotheses] == [
+        "Bullish Continuation",
+        "Distribution Candidate",
+        "Unknown",
+    ]
+    assert [_semantic_hypothesis_payload(hypothesis) for hypothesis in mixed_evaluation.hypotheses[:2]] == [
+        _semantic_hypothesis_payload(hypothesis) for hypothesis in single_evaluation.hypotheses
+    ]
+    assert mixed_evaluation.hypotheses[-1].supporting_annotation_ids == tuple(
+        sorted({unknown_one.annotation_id, unknown_two.annotation_id})
+    )

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
@@ -1095,6 +1095,83 @@ def _evaluate_hypotheses_for_annotation(
     return hypotheses
 
 
+def _unknown_hypothesis_semantic_payload(hypothesis: MarketStructureHypothesis) -> dict[str, Any]:
+    payload = hypothesis.canonical_payload(include_hypothesis_id=False, include_hypothesis_hash=False)
+    return {
+        "schema_version": payload["schema_version"],
+        "hypothesis_type": payload["hypothesis_type"],
+        "status": payload["status"],
+        "dataset_hash": payload["dataset_hash"],
+        "contract_hash": payload["contract_hash"],
+        "detection_result_hash": payload["detection_result_hash"],
+        "annotation_collection_hash": payload["annotation_collection_hash"],
+        "timeframe_context": payload["timeframe_context"],
+        "supporting_event_ids": payload["supporting_event_ids"],
+        "contradicting_event_ids": payload["contradicting_event_ids"],
+        "invalidation_reasons": payload["invalidation_reasons"],
+        "ambiguity_reasons": payload["ambiguity_reasons"],
+    }
+
+def _canonicalize_unknown_hypotheses(
+    hypotheses: Sequence[MarketStructureHypothesis],
+) -> tuple[MarketStructureHypothesis, ...]:
+    grouped: dict[str, list[MarketStructureHypothesis]] = {}
+    canonical_hypotheses: list[MarketStructureHypothesis] = []
+
+    for hypothesis in hypotheses:
+        if hypothesis.hypothesis_type != "Unknown":
+            canonical_hypotheses.append(hypothesis)
+            continue
+        semantic_key = _canonical_json(_unknown_hypothesis_semantic_payload(hypothesis))
+        grouped.setdefault(semantic_key, []).append(hypothesis)
+
+    for semantic_key in sorted(grouped):
+        grouped_hypotheses = grouped[semantic_key]
+        if len(grouped_hypotheses) == 1:
+            canonical_hypotheses.append(grouped_hypotheses[0])
+            continue
+
+        ordered_group = sorted(
+            grouped_hypotheses,
+            key=lambda item: (
+                _utc_iso(item.observed_at),
+                _utc_iso(item.effective_at),
+                item.hypothesis_id,
+                item.hypothesis_hash,
+            ),
+        )
+        representative = ordered_group[0]
+        canonical_hypotheses.append(
+            replace(
+                representative,
+                observed_at=ordered_group[0].observed_at,
+                effective_at=ordered_group[0].effective_at,
+                created_at_utc=ordered_group[0].created_at_utc,
+                supporting_event_ids=tuple(
+                    sorted({event_id for item in grouped_hypotheses for event_id in item.supporting_event_ids})
+                ),
+                supporting_annotation_ids=tuple(
+                    sorted({annotation_id for item in grouped_hypotheses for annotation_id in item.supporting_annotation_ids})
+                ),
+                contradicting_event_ids=tuple(
+                    sorted({event_id for item in grouped_hypotheses for event_id in item.contradicting_event_ids})
+                ),
+                contradicting_annotation_ids=tuple(
+                    sorted({annotation_id for item in grouped_hypotheses for annotation_id in item.contradicting_annotation_ids})
+                ),
+                invalidation_reasons=tuple(
+                    sorted({reason for item in grouped_hypotheses for reason in item.invalidation_reasons})
+                ),
+                ambiguity_reasons=tuple(
+                    sorted({reason for item in grouped_hypotheses for reason in item.ambiguity_reasons})
+                ),
+                hypothesis_id="",
+                hypothesis_hash="",
+            )
+        )
+
+    return tuple(canonical_hypotheses)
+
 def evaluate_market_structure_hypotheses(
     annotation_collection: phase52.MarketStructureAnnotationCollection,
     *,
@@ -1114,6 +1191,7 @@ def evaluate_market_structure_hypotheses(
                 created_at_utc=created_at_utc,
             )
         )
+    hypotheses = list(_canonicalize_unknown_hypotheses(hypotheses))
     if not hypotheses:
         raise MarketStructureHypothesisValidationError("hypotheses must not be empty.")
 
