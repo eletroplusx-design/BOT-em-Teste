@@ -589,3 +589,35 @@ Garantias introduzidas:
 - created_at_utc fora da identidade
 - deep freeze/thaw preservados
 - ausencia de registry, replay, scoring, ranking, signal e operacao
+## Fase 59 - hypothesis temporal lineage
+
+Status:
+- integrada
+
+Branch:
+- `codex/phase-59-hypothesis-temporal-lineage`
+
+PR:
+- `#79`
+
+Commit principal:
+- `c2b6c721be014a75e158628c3e86210b823a7820`
+
+Merge commit:
+- `4b5fc602f00da550ec1db60673d78c9a4fafc8d9`
+
+Tag:
+- `v0.59.0`
+
+Objetivo:
+- representar a continuidade temporal conceitual de hypotheses snapshot-specific sem alterar a semantica das identidades das Fases 53 a 58
+
+Garantias introduzidas:
+- lineage_id deterministico e estavel
+- lineage_hash deterministico e acumulado
+- semantic key deterministica
+- append puro e deep immutability
+- canonical round-trip
+- ordem temporal e fail-closed
+- invalidation terminal e ausencia de resurrection automatica
+- ausencia de persistence, replay, scoring, signal, trading, paper, live, corretora, ordens e rede

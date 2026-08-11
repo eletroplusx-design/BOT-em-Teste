@@ -2,14 +2,14 @@
 
 ## Snapshot
 
-Data e hora UTC: 2026-08-09T17:23:54.7691811Z
-Data e hora local: 2026-08-09T14:23:54.7691811-03:00
+Data e hora UTC: 2026-08-11T00:48:38Z
+Data e hora local: 2026-08-10T21:48:38-03:00
 
 ## Ultima versao integrada
 
-Tag: `v0.58.0`
-Commit: `b7358f0d954b7eacd85fcccf321c88e328a6bfbb`
-PR correspondente: `#77`
+Tag: `v0.59.0`
+Commit: `4b5fc602f00da550ec1db60673d78c9a4fafc8d9`
+PR correspondente: `#79`
 
 ## Ultima integracao de infraestrutura
 
@@ -26,8 +26,8 @@ Tag nova: nenhuma
 
 ## Main
 
-HEAD: `b7358f0d954b7eacd85fcccf321c88e328a6bfbb`
-origin/main: `b7358f0d954b7eacd85fcccf321c88e328a6bfbb`
+HEAD: `4b5fc602f00da550ec1db60673d78c9a4fafc8d9`
+origin/main: `4b5fc602f00da550ec1db60673d78c9a4fafc8d9`
 working tree: limpa
 
 ## Trabalho aberto
@@ -91,15 +91,20 @@ Nenhuma frente de otimizacao de CI em aberto.
 - Persistencia da history da Fase 57 com JSON canonico, atomic write, safe paths, load fail-closed, idempotencia e conflicting overwrite rejection preservadas.
 - Regressao das Fases 48-57 executada com sucesso.
 - CI sharded da Fase 58 aprovado com 2/2 jobs verdes.
+- Fase 59 integrada e versionada em `v0.59.0`.
+- PR `#79` mesclada em `main`.
+- Hypothesis Temporal Lineage validada.
+- identidade temporal conceitual separada de `hypothesis_id` e `hypothesis_hash` preservada.
+- regressao das Fases 53-58 executada com sucesso.
+- CI da PR `#79` aprovado com `test-historical` e `test-remainder` verdes.
 
 ## O que ainda nao esta concluido
 
-- Fase 59 nao iniciada.
 - Nenhuma nova autorizacao para operacao.
 
 ## Proxima acao obrigatoria
 
-Aguardar nova autorizacao explicita antes de iniciar a Fase 59.
+Aguardar nova autorizacao explicita antes de iniciar a Fase 60.
 
 ## O que nao deve ser feito agora
 

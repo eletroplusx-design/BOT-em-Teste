@@ -88,7 +88,15 @@
 - `created_at_utc` permanece fora da identidade canonica.
 - Nao ha registry, replay, scoring, ranking, signal ou operacao.
 
-## 14. Ambiente
+## 14. Fase 59
+
+- A Fase 59 esta integrada e versionada em `v0.59.0`.
+- A HypothesisTemporalLineage preserva identidade temporal conceitual separada de `hypothesis_id` e `hypothesis_hash`.
+- Nao existe persistencia propria da lineage nesta fase.
+- Fork e merge globais exigiriam contexto externo adicional; o contrato atual verifica apenas a lineage isolada recebida.
+- A semantic key e deterministica, mas pode precisar evoluir se surgirem colisoes semanticas reais em futuro escopo maior.
+- O Golden Corpus V3 temporal pode ser retomado com a Fase 59 como contrato de continuidade.
+## 15. Ambiente
 
 - Windows
 - possivel warning de `credential-manager-core`
@@ -96,7 +104,7 @@
 - limitacoes de symlink
 - evitar dependencias POSIX
 
-## 15. Operacional
+## 16. Operacional
 
 - sem rede
 - sem corretora
