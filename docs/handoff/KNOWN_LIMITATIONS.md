@@ -101,7 +101,17 @@
 - Fork e merge globais exigiriam contexto externo adicional; o contrato atual verifica apenas a lineage isolada recebida.
 - A semantic key e deterministica, mas pode precisar evoluir se surgirem colisoes semanticas reais em futuro escopo maior.
 - O Golden Corpus V3 temporal pode ser retomado com a Fase 59 como contrato de continuidade.
-## 15. Ambiente
+
+## 15. Fase 60
+
+- A Fase 60 esta integrada e versionada em `v0.60.0`.
+- O detector local de transicao estrutural nao possui consumidor downstream nesta entrega.
+- A validacao empirica cross-asset ainda pode ser ampliada.
+- A integracao com annotations/hypotheses continua sendo uma decisao posterior.
+- `failed_sweep` continua separado.
+- A Fase 60 nao deve ser transformada em um segundo classificador global.
+
+## 16. Ambiente
 
 - Windows
 - possivel warning de `credential-manager-core`
@@ -109,7 +119,7 @@
 - limitacoes de symlink
 - evitar dependencias POSIX
 
-## 16. Operacional
+## 17. Operacional
 
 - sem rede
 - sem corretora

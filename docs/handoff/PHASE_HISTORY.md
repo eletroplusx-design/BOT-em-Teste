@@ -621,3 +621,39 @@ Garantias introduzidas:
 - ordem temporal e fail-closed
 - invalidation terminal e ausencia de resurrection automatica
 - ausencia de persistence, replay, scoring, signal, trading, paper, live, corretora, ordens e rede
+
+## Fase 60 - local structural transition detector
+
+Status:
+- integrada
+
+Branch:
+- `codex/phase-60-local-structural-transition`
+
+PR:
+- `#81`
+
+Commit principal:
+- `1e466c22bd0c6774c1d6366cd20edf6a1920ef52`
+
+Merge commit:
+- `08fea0a982dbc72054c4bc58243d664f5bdd6afd`
+
+Tag:
+- `v0.60.0`
+
+Objetivo:
+- detectar transicoes estruturais locais de forma offline, deterministica, research-only e sem exigir classificacao global bullish/bearish
+
+Garantias introduzidas:
+- local transition result_id deterministico
+- local transition result_hash deterministico
+- confirmed swings only
+- protected pivot deterministico
+- break confirmado e displacement preservados
+- wick-only, sweep e failed break rejeitados
+- range protection preservada
+- created_at_utc fora da identidade
+- metadata profundamente imutavel
+- canonical round-trip
+- ausencia de replay, backtest, walk-forward, scoring, signal, paper, live, corretora, ordens e rede

@@ -7,20 +7,20 @@
     "known_local_path": "C:\\Users\\Vitor\\Desktop\\meu_app_trading"
   },
   "snapshot": {
-    "created_at_utc": "2026-08-11T00:48:38Z",
-    "main_commit": "4b5fc602f00da550ec1db60673d78c9a4fafc8d9",
-    "last_integrated_tag": "v0.59.0",
+    "created_at_utc": "2026-08-11T21:38:38Z",
+    "main_commit": "08fea0a982dbc72054c4bc58243d664f5bdd6afd",
+    "last_integrated_tag": "v0.60.0",
     "working_tree_clean": true
   },
   "active_work": {
-    "phase": 59,
-    "name": "Hypothesis Temporal Lineage",
-    "branch": "codex/phase-59-hypothesis-temporal-lineage",
-    "pull_request": 79,
+    "phase": 60,
+    "name": "Local Structural Transition Detector",
+    "branch": "codex/phase-60-local-structural-transition",
+    "pull_request": 81,
     "pull_request_state": "MERGED",
     "draft": false,
-    "head_sha": "c2b6c721be014a75e158628c3e86210b823a7820",
-    "merge_commit": "4b5fc602f00da550ec1db60673d78c9a4fafc8d9",
+    "head_sha": "1e466c22bd0c6774c1d6366cd20edf6a1920ef52",
+    "merge_commit": "08fea0a982dbc72054c4bc58243d664f5bdd6afd",
     "ci_status": "SUCCESS",
     "status": "completed"
   },
@@ -33,7 +33,7 @@
     "exchange_connectivity_enabled": false,
     "order_submission_enabled": false
   },
-    "next_required_action": "await_phase_60_authorization",
+    "next_required_action": "validate_phase_60_empirically_on_real_snapshots",
   "documents": [
     "README.md",
     "PROJECT_HANDOFF.md",
