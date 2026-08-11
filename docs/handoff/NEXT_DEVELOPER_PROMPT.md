@@ -5,12 +5,15 @@ Antes de alterar qualquer arquivo, leia todos os documentos em `docs/handoff`.
 Nao confie cegamente no snapshot.
 Confirme o estado real do GitHub, branches, tags, PRs, CI e working tree.
 
-A Fase 59 ja foi integrada, versionada e documentada.
-A primeira tarefa do proximo desenvolvedor e confirmar o estado real atual antes de iniciar qualquer nova fase.
+A Fase 53 recebeu um bugfix minimo para deduplicar `Unknown` redundantes em snapshots reais.
+A prioridade imediata e retomar o Golden Corpus V3 temporal apos o bugfix.
 
-Retome a validacao temporal do Golden Corpus V3 usando `HypothesisTemporalLineage`.
-Compare T-1, T e T+1 em BTCUSDT, ETHUSDT, SOLUSDT e UNIUSDT.
-Somente depois dessa validacao decidir se alguma nova capacidade e necessaria.
+Tarefa recomendada:
+- retomar a validacao temporal do Golden Corpus V3;
+- focar nos casos BTCUSDT-006 e ETHUSDT-016;
+- confirmar se 97 `Unknown` redundantes passam a uma representacao canonica reduzida;
+- manter `known hypotheses` intocadas;
+- somente depois reavaliar a aplicabilidade de lineage temporal da Fase 59.
 
 Nao execute Baseline A.
 Nao gere sinais.
@@ -19,14 +22,12 @@ Nao habilite paper.
 Nao habilite live.
 Nao conecte corretora.
 Nao envie ordens.
+Nao iniciar a Fase 60.
 
 Estado de referencia do snapshot:
 - Fase 59 integrada e versionada
-- branch: `codex/phase-59-hypothesis-temporal-lineage`
-- head: `c2b6c721be014a75e158628c3e86210b823a7820`
-- PR: `#79`
-- merge commit: `4b5fc602f00da550ec1db60673d78c9a4fafc8d9`
-- tag: `v0.59.0`
-- CI: sucesso
+- PR `#80` mesclada em `main`
+- bugfix da Fase 53 integrado em `main`
+- tag formal mais recente continua sendo `v0.59.0`
 
 Trate `CURRENT_STATE.md` como snapshot e nao como verdade eterna.

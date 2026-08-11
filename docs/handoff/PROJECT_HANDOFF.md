@@ -68,6 +68,7 @@ Nao ha fase de produto em aberto neste snapshot.
 Ver [CURRENT_STATE.md](./CURRENT_STATE.md).
 
 A Fase 59 foi integrada em `main` por meio da PR `#79` e versionada em `v0.59.0`.
+A PR `#80` integrou em `main` o bugfix da Fase 53 para deduplicar `Unknown` redundantes sem alterar `known hypotheses` e sem criar nova tag.
 Esse merge nao altera a arquitetura funcional do bot.
 Os fluxos de pesquisa, validacao e seguranca permanecem research-only e fail-closed.
 O pacote de continuidade segue com o branch de documentacao separado do branch de produto.
@@ -77,4 +78,4 @@ O pacote de continuidade segue com o branch de documentacao separado do branch d
 A primeira tarefa do proximo desenvolvedor e verificar o estado real do GitHub antes de iniciar qualquer nova fase.
 
 A Fase 59 ja foi concluida, integrada e versionada.
-Nao iniciar a Fase 60 sem autorizacao explicita e sem confirmar novamente o estado real.
+Nao iniciar nova fase sem autorizacao explicita e sem confirmar novamente o estado real.

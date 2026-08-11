@@ -1,5 +1,10 @@
 # Known Limitations
 
+## Resolvido recentemente
+
+- A multiplicidade redundante de `Unknown` da Fase 53 foi resolvida e integrada em `main` pela PR `#80`.
+- O ajuste preserva `known hypotheses` e nao introduz nova fase nem nova tag.
+
 ## 1. Dados historicos
 
 - Ha historico no projeto de investigacao de anomalias em candles e lacunas de dados.
