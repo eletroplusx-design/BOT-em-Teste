@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "project": {
+    "name": "BOT-em-Teste",
+    "repository": "eletroplusx-design/BOT-em-Teste",
+    "primary_environment": "Windows",
+    "known_local_path": "C:\\Users\\Vitor\\Desktop\\meu_app_trading"
+  },
+  "snapshot": {
+    "created_at_utc": "2026-08-12T00:46:00Z",
+    "main_commit": "08fea0a982dbc72054c4bc58243d664f5bdd6afd",
+    "last_integrated_tag": "v0.60.0",
+    "working_tree_clean": true
+  },
+  "active_work": {
+    "phase": 60,
+    "name": "Local Structural Transition Detector",
+    "branch": "codex/phase-60-local-structural-transition",
+    "pull_request": 81,
+    "pull_request_state": "MERGED",
+    "draft": false,
+    "head_sha": "1e466c22bd0c6774c1d6366cd20edf6a1920ef52",
+    "merge_commit": "08fea0a982dbc72054c4bc58243d664f5bdd6afd",
+    "ci_status": "SUCCESS",
+    "status": "completed"
+  },
+  "safety": {
+    "historical_research_only": true,
+    "operational_evidence": false,
+    "paper_promotion_eligible": false,
+    "paper_enabled": false,
+    "live_enabled": false,
+    "exchange_connectivity_enabled": false,
+    "order_submission_enabled": false
+  },
+    "next_required_action": "keep_phase_60_isolated_until_real_downstream_consumer_appears",
+  "documents": [
+    "README.md",
+    "PROJECT_HANDOFF.md",
+    "CURRENT_STATE.md",
+    "PHASE_HISTORY.md",
+    "ENGINEERING_GUARDRAILS.md",
+    "STRATEGY_RESEARCH_NOTES.md",
+    "KNOWN_LIMITATIONS.md",
+    "TESTING_AND_RELEASE_PROCESS.md",
+    "NEXT_DEVELOPER_PROMPT.md",
+    "PROMPT_HISTORY_INDEX.md"
+  ]
+}
