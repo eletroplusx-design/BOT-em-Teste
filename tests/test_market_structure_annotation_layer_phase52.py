@@ -178,6 +178,11 @@ def _liquidity_sweep_input() -> phase51.MarketStructureDetectionInput:
     return _build_input(candles, dataset_hash=PHASE52_DATASET_HASH_ALT)
 
 
+def _failed_sweep_input() -> phase51.MarketStructureDetectionInput:
+    candles = _price_series(_liquidity_base_prices() + [108, 106, 106, 106], datetime(2026, 8, 2, 0, 0, tzinfo=timezone.utc))
+    return _build_input(candles, dataset_hash=PHASE52_DATASET_HASH_ALT)
+
+
 def _liquidity_breakout_input() -> phase51.MarketStructureDetectionInput:
     candles = _price_series(_liquidity_base_prices() + [110, 107], datetime(2026, 8, 3, 0, 0, tzinfo=timezone.utc))
     return _build_input(candles, dataset_hash=PHASE52_DATASET_HASH_ALT)
@@ -436,6 +441,11 @@ def test_phase52_collection_round_trip_and_ordering_are_canonical():
         (
             _liquidity_sweep_input,
             "liquidity_sweep",
+            {"liquidity_sweep": True},
+        ),
+        (
+            _failed_sweep_input,
+            "failed_sweep",
             {"liquidity_sweep": True},
         ),
         (

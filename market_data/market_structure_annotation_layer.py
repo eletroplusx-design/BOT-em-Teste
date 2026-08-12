@@ -65,6 +65,7 @@ MARKET_STRUCTURE_ANNOTATION_ALLOWED_EVENT_KINDS = {
     "protected_high",
     "protected_low",
     "liquidity_sweep",
+    "failed_sweep",
     "false_break",
     "breakout",
     "valid_bos",
@@ -358,7 +359,7 @@ def _annotation_payload_from_result(
             kind in {"equal_highs", "equal_lows", "internal_liquidity", "external_liquidity"}
             for kind in event_kinds
         ),
-        "liquidity_sweep": "liquidity_sweep" in event_kind_set,
+        "liquidity_sweep": any(kind in {"liquidity_sweep", "failed_sweep"} for kind in event_kinds),
         "breakout": "breakout" in event_kind_set,
         "failed_breakout": "false_break" in event_kind_set,
         "bos": any(kind in {"valid_bos", "failed_bos"} for kind in event_kinds),
@@ -449,7 +450,7 @@ def _validate_annotation_payload(
             kind in {"equal_highs", "equal_lows", "internal_liquidity", "external_liquidity"}
             for kind in event_kinds
         ),
-        "liquidity_sweep": "liquidity_sweep" in event_kinds,
+        "liquidity_sweep": any(kind in {"liquidity_sweep", "failed_sweep"} for kind in event_kinds),
         "breakout": "breakout" in event_kinds,
         "failed_breakout": "false_break" in event_kinds,
         "bos": any(kind in {"valid_bos", "failed_bos"} for kind in event_kinds),
