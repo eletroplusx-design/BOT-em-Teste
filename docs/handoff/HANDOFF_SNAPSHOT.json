@@ -7,7 +7,7 @@
     "known_local_path": "C:\\Users\\Vitor\\Desktop\\meu_app_trading"
   },
   "snapshot": {
-    "created_at_utc": "2026-08-11T21:38:38Z",
+    "created_at_utc": "2026-08-12T00:46:00Z",
     "main_commit": "08fea0a982dbc72054c4bc58243d664f5bdd6afd",
     "last_integrated_tag": "v0.60.0",
     "working_tree_clean": true
@@ -33,7 +33,7 @@
     "exchange_connectivity_enabled": false,
     "order_submission_enabled": false
   },
-    "next_required_action": "validate_phase_60_empirically_on_real_snapshots",
+    "next_required_action": "keep_phase_60_isolated_until_real_downstream_consumer_appears",
   "documents": [
     "README.md",
     "PROJECT_HANDOFF.md",

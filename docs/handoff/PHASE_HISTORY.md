@@ -645,6 +645,11 @@ Tag:
 Objetivo:
 - detectar transicoes estruturais locais de forma offline, deterministica, research-only e sem exigir classificacao global bullish/bearish
 
+Checkpoint de pesquisa:
+- validacao empirica concluida em snapshots reais
+- downstream integration deferida
+- Phase 61 nao justificada neste momento
+
 Garantias introduzidas:
 - local transition result_id deterministico
 - local transition result_hash deterministico

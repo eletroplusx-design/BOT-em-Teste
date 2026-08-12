@@ -2,8 +2,8 @@
 
 ## Snapshot
 
-Data e hora UTC: 2026-08-11T21:38:38.9356269Z
-Data e hora local: 2026-08-11T18:38:32-03:00
+Data e hora UTC: 2026-08-12T00:46:00Z
+Data e hora local: 2026-08-11T21:46:00-03:00
 
 ## Ultima versao integrada
 
@@ -17,7 +17,7 @@ PR correspondente: `#81`
 - O bugfix da Fase 53 para deduplicacao de `Unknown` redundantes foi integrado sem nova tag.
 - Merge commit: `6b777fd80bc856397979db95612fc008a4007d73`
 - PR `#81` foi mesclada em `main`.
-- A Fase 60 foi integrada e versionada em `v0.60.0`.
+- A Fase 60 foi integrada, validada empiricamente e versionada em `v0.60.0`.
 - Merge commit: `08fea0a982dbc72054c4bc58243d664f5bdd6afd`
 
 ## Ultima integracao de infraestrutura
@@ -109,7 +109,7 @@ Nenhuma frente de otimizacao de CI em aberto.
 - PR `#80` mesclada em `main`.
 - Bugfix da Fase 53 reduziu a multiplicidade redundante de `Unknown` sem alterar `known hypotheses`.
 - O merge tecnico nao introduziu nova tag de fase.
-- Fase 60 integrada e versionada em `v0.60.0`.
+- Fase 60 integrada, validada empiricamente e versionada em `v0.60.0`.
 - PR `#81` mesclada em `main`.
 - Local Structural Transition Detector validado.
 - separacao formal entre estrutura global e transicao estrutural local preservada.
@@ -122,7 +122,7 @@ Nenhuma frente de otimizacao de CI em aberto.
 
 ## Proxima acao obrigatoria
 
-Aguardar validacao empirica da Fase 60 em snapshots reais antes de qualquer nova integracao downstream ou nova fase.
+Manter a Fase 60 isolada ate existir consumidor real e necessidade objetiva de integracao downstream.
 
 ## O que nao deve ser feito agora
 

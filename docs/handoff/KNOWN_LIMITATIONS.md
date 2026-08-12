@@ -104,10 +104,10 @@
 
 ## 15. Fase 60
 
-- A Fase 60 esta integrada e versionada em `v0.60.0`.
+- A Fase 60 esta integrada, validada empiricamente e versionada em `v0.60.0`.
 - O detector local de transicao estrutural nao possui consumidor downstream nesta entrega.
-- A validacao empirica cross-asset ainda pode ser ampliada.
-- A integracao com annotations/hypotheses continua sendo uma decisao posterior.
+- A validacao empirica cross-asset foi concluida como checkpoint de pesquisa; `UNIUSDT` permaneceu fail-closed sem bug confirmado.
+- A integracao com annotations/hypotheses continua sendo uma decisao posterior e foi deferida neste checkpoint.
 - `failed_sweep` continua separado.
 - A Fase 60 nao deve ser transformada em um segundo classificador global.
 

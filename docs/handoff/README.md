@@ -21,13 +21,12 @@ Nao habilitar paper, live, rede, corretora ou ordens.
 
 ## Estado resumido
 
-- Ultima tag integrada: `v0.59.0`
-- Commit de `main`: `4b5fc602f00da550ec1db60673d78c9a4fafc8d9`
-- Fase integrada mais recente: Fase 59 - Hypothesis Temporal Lineage
-- PR integrada: `#79`
-- Branch: `codex/phase-59-hypothesis-temporal-lineage`
-- Head: `c2b6c721be014a75e158628c3e86210b823a7820`
-- Merge commit: `4b5fc602f00da550ec1db60673d78c9a4fafc8d9`
-- Status: fase funcional integrada, CI verde e versionamento concluido via PR `#79`
-- Proxima acao: nao iniciar a Fase 60 sem nova autorizacao explicita
-- Proxima acao: nao iniciar a Fase 60 sem nova autorizacao explicita
+- Ultima tag integrada: `v0.60.0`
+- Commit de `main`: `08fea0a982dbc72054c4bc58243d664f5bdd6afd`
+- Fase integrada mais recente: Fase 60 - Local Structural Transition Detector
+- PR integrada: `#81`
+- Branch: `codex/phase-60-local-structural-transition`
+- Head: `1e466c22bd0c6774c1d6366cd20edf6a1920ef52`
+- Merge commit: `08fea0a982dbc72054c4bc58243d664f5bdd6afd`
+- Status: fase funcional integrada, validada empiricamente, CI verde e versionamento concluido via PR `#81`
+- Proxima acao: manter a Fase 60 isolada ate existir consumidor real e autorizacao explicita para reavaliar integracao downstream
